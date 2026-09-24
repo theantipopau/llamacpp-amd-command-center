@@ -339,7 +339,7 @@ echo    Projector:   mmproj-F16.gguf
 echo    API alias:   qwen3.5:9b
 echo    Download:    approximately 6.20 GiB including projector
 echo    Best for:    fast VS Code Agent turns and tool calling
-echo    Context:     32768 tokens, enough for Copilot Agent mode
+echo    Context:     65536 tokens, room for Copilot Agent prompts of 26k+
 echo.
 echo  QUALITY OPTION: Qwen3.8 27B Q4_K_M
 echo  Stronger answers, but it does not fit in 16 GB of VRAM, so part of it runs

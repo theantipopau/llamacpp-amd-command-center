@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
-          $issues = @(Invoke-ScriptAnalyzer -Path .\Install-LlamaCpp-AMD.ps1, .\tests\Test-CommandCenter.ps1 -Severity Error)
+          $issues = @('.\Install-LlamaCpp-AMD.ps1', '.\tests\Test-CommandCenter.ps1' | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Error })
           $issues | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
           if ($issues.Count -gt 0) { exit 1 }
 

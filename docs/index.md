@@ -69,7 +69,7 @@ The command center has been validated for a system with:
 - Radeon integrated GPU / UMA reporting
 - Windows DXGI adapter inventory
 
-The command center recommends the strongest tool-capable model that fits entirely in VRAM. For that target it is Qwen3.5 9B Q4_K_M with its vision projector, exposed as `qwen3.5:9b`, at 32768 tokens of context. It runs fully on the GPU at roughly 70 tokens per second and handles 20k-token Agent prompts with tool calls.
+The command center recommends the strongest tool-capable model that fits entirely in VRAM. For that target it is Qwen3.5 9B Q4_K_M with its vision projector, exposed as `qwen3.5:9b`, at 65536 tokens of context. It runs fully on the GPU at roughly 70 tokens per second and handles 20k-token Agent prompts with tool calls.
 
 Qwen3.8 27B Q4_K_M (`qwen3.8:latest`) is offered as a quality option. It does not fit in 16 GiB of VRAM, so part of it runs from system RAM at roughly 4–7 tokens per second. The model source is [Unsloth Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF), and the installer verifies the current Hugging Face Git LFS SHA-256 digest.
 

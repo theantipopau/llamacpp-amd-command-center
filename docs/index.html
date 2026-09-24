@@ -104,7 +104,7 @@
   <p>Automatic mode is recommended. The PowerShell command center shows the hardware evidence and allows an explicit backend override.</p>
 
   <h2>Recommended local target</h2>
-  <p>The project has been validated for an AMD Ryzen 7 9800X3D, Radeon RX 9070 XT with approximately 15.8 GiB dedicated VRAM, and 31.2 GiB system RAM. The command center recommends the strongest tool-capable model that fits entirely in VRAM: Qwen3.5 9B Q4_K_M with its vision projector, exposed as <code>qwen3.5:9b</code>, at 32768 tokens of context. It runs fully on the GPU at roughly 70 tokens per second and handles 20k-token Agent prompts with tool calls.</p>
+  <p>The project has been validated for an AMD Ryzen 7 9800X3D, Radeon RX 9070 XT with approximately 15.8 GiB dedicated VRAM, and 31.2 GiB system RAM. The command center recommends the strongest tool-capable model that fits entirely in VRAM: Qwen3.5 9B Q4_K_M with its vision projector, exposed as <code>qwen3.5:9b</code>, at 65536 tokens of context. It runs fully on the GPU at roughly 70 tokens per second and handles 20k-token Agent prompts with tool calls.</p>
   <p>Qwen3.8 27B Q4_K_M (<code>qwen3.8:latest</code>) is offered as a quality option. It does not fit in 16 GiB of VRAM, so part of it runs from system RAM at roughly 4–7 tokens per second. The model source is <a href="https://huggingface.co/unsloth/Qwen3.5-9B-GGUF">Unsloth Qwen3.5-9B-GGUF</a>, and the installer verifies the current Hugging Face Git LFS SHA-256 digest.</p>
   <p>Model availability and filenames can change. The installer resolves the current Hugging Face revision and verifies published Git LFS SHA-256 values at download time.</p>
 

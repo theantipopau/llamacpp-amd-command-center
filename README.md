@@ -108,9 +108,9 @@ The command center recommends the strongest tool-capable model that fits **entir
 | Vision projector | `mmproj-F16.gguf` |
 | API model ID | `qwen3.5:9b` |
 | Approximate download | 6.20 GiB including projector |
-| Context | 32768 tokens |
+| Context | 65536 tokens (the 32k KV cache is only ~0.75 GiB on this hybrid model) |
 
-On the RX 9070 XT it runs fully on the GPU (about 6 GiB of 16 GiB in use at 32k context) and generates roughly 70 tokens per second. A 20k-token Agent-style prompt with tool definitions returns a correct tool call in under 10 seconds. Choose it from the PowerShell command center with:
+On the RX 9070 XT it runs fully on the GPU (about 6 GiB of 16 GiB in use at 32k context, about 7 GiB at 64k) and generates roughly 70 tokens per second. A 20k-token Agent-style prompt with tool definitions returns a correct tool call in under 10 seconds. Choose it from the PowerShell command center with:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b
@@ -131,7 +131,7 @@ Stronger answers, but it does not fit in 16 GiB of VRAM: about 4.8 GiB runs from
 
 ### Context size
 
-Context is sized from spare VRAM. Tool-capable models get at least 32768 tokens where memory allows, because VS Code Copilot Agent mode sends a large system prompt and tool list. Override it with `-ContextSize`, for example `-Action Models -ModelId qwen3.5-9b -ContextSize 65536`.
+Context is sized from spare VRAM and each model's KV-cache cost: Qwen3.5 9B gets 65536 on a 16 GiB card, dense 8B models get 32768. Tool-capable models get at least 32768 tokens where memory allows, because VS Code Copilot Agent mode sends a large system prompt and tool list. Override it with `-ContextSize`, for example `-Action Models -ModelId qwen3.5-9b -ContextSize 49152`.
 
 ## If you already use GitHub Copilot
 

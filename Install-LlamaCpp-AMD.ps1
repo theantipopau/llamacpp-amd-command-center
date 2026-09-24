@@ -352,7 +352,7 @@ function Get-ModelCatalog {
         [pscustomobject]@{
             Id = 'qwen3.5-9b'; Name = 'Qwen3.5 9B'; Alias = 'qwen3.5:9b'
             Repo = 'unsloth/Qwen3.5-9B-GGUF'; File = 'Qwen3.5-9B-Q4_K_M.gguf'
-            Projector = 'mmproj-F16.gguf'; ApproxGiB = 6.20; Rank = 96
+            Projector = 'mmproj-F16.gguf'; ApproxGiB = 6.20; Rank = 96; KvGiBPer32k = 0.75
             Tag = 'FAST AGENT'; Description = 'Fast 9B reasoning and coding model with vision and tool support; designed for responsive local VS Code agents.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
@@ -713,9 +713,14 @@ function Get-SuggestedContext {
     # Below roughly 32k tokens it cannot fit the prompt and fails with
     # "No lowest priority node found", so tool-capable models get at least 32k
     # whenever the KV cache has room.
+    # KvGiBPer32k is the measured q8_0 KV cache (plus recurrent state) at 32k tokens.
+    # Hybrid models such as Qwen3.5 need far less than dense ones; 2.5 GiB is a
+    # conservative default for dense 4-12B models. 2 GiB is kept for compute buffers.
     $vramHeadroom = Get-VramHeadroom -Model $Model -Hardware $Hardware
-    if ($vramHeadroom -ge 10) { return 65536 }
-    if ($vramHeadroom -ge 3) { return 32768 }
+    $kvPer32k = if ($Model.PSObject.Properties.Name -contains 'KvGiBPer32k') { [double]$Model.KvGiBPer32k } else { 2.5 }
+    $spare = $vramHeadroom - 2
+    if ($spare -ge ($kvPer32k * 2)) { return 65536 }
+    if ($spare -ge $kvPer32k) { return 32768 }
     $budgetHeadroom = [double]$Hardware.ModelBudgetGiB - [double]$Model.ApproxGiB
     if ($Model.Tools -and $budgetHeadroom -ge 3 -and $Hardware.RamGiB -ge 30) { return 32768 }
     if ($vramHeadroom -ge 1.5 -or $Hardware.RamGiB -ge 16) { return 16384 }

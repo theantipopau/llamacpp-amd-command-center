@@ -51,7 +51,9 @@ try {
     $hw = [pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 15.8; RamGiB = 31.2; ModelBudgetGiB = 24.8 }
     $recommended = Get-RecommendedModel -Hardware $hw
     Assert-True ($recommended.Id -eq 'qwen3.5-9b') "recommends a VRAM-resident tool model (got $($recommended.Id))"
-    Assert-True ((Get-SuggestedContext -Model $recommended -Hardware $hw) -ge 32768) 'suggests at least 32k context for the recommended model'
+    Assert-True ((Get-SuggestedContext -Model $recommended -Hardware $hw) -eq 65536) 'suggests 64k for the hybrid Qwen3.5 model (small KV cache)'
+    Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3-8b') -Hardware $hw) -eq 32768) 'suggests 32k for a dense 8B model'
+    Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3.8-27b') -Hardware $hw) -eq 32768) 'keeps 32k for the RAM-spilling 27B model'
 
     Write-Host 'VS Code chatLanguageModels.json writer'
     $env:APPDATA = Join-Path $work 'appdata'
