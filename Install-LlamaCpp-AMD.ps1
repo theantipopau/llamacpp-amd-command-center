@@ -186,6 +186,7 @@ function Show-Banner {
     Write-Host 'AMD COMMAND CENTER' -NoNewline -ForegroundColor Magenta
     Write-Host '                                      LOCAL • PRIVATE • GPU+CPU  ║' -ForegroundColor DarkCyan
     Write-Host '  ╚══════════════════════════════════════════════════════════════════════════════╝' -ForegroundColor DarkCyan
+    Write-Host '  Created by Matt Hurley - matthurley.dev' -ForegroundColor DarkGray
 }
 
 # ---------------------------------------------------------------------
@@ -1223,6 +1224,9 @@ function Show-Dashboard {
         Write-Host "      Download ~$([Math]::Round($recommended.ApproxGiB,2)) GiB • suggested context $(Get-SuggestedContext -Model $recommended -Hardware $hardware)" -ForegroundColor DarkGray
         if ($null -ne $active) { Write-Host "    ACTIVE: $($active.name) • context $($active.context_size) • port $Port" -ForegroundColor Cyan }
 
+        Write-Host "`n  FIRST-TIME USER? [1] is the guided path: it explains each choice and asks before downloading." -ForegroundColor Yellow
+        Write-Host '  Already installed? [3] starts the active model. GitHub Copilot can stay installed and enabled.' -ForegroundColor DarkGray
+
         if ((-not $hardware.VulkanLoader) -or (-not $hardware.HasAmdGpu)) {
             Write-WarnLine 'ACTION REQUIRED: update the AMD Adrenalin driver, reboot, then run diagnostics.'
         }
@@ -1231,7 +1235,7 @@ function Show-Dashboard {
         }
 
         Write-Host "`n  ═══════════════════════════════════ COMMAND MENU ═══════════════════════════════════" -ForegroundColor DarkCyan
-        Write-Host '   [1]  ✨ One-click install — recommended model + llama.cpp' -ForegroundColor White
+        Write-Host '   [1]  ✨ First-time setup — install llama.cpp + recommended model (asks first)' -ForegroundColor White
         Write-Host '   [2]  ◈ Model browser — compare, download, and activate a model' -ForegroundColor White
         Write-Host '   [3]  ▶  Launch active model server + Web UI' -ForegroundColor White
         Write-Host '   [4]  ✦ Hardware & model advisor' -ForegroundColor White
@@ -1280,6 +1284,7 @@ function Show-Dashboard {
             }
         } catch {
             Write-Host "`n  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host '  First try: choose [6] Full diagnostics. Do not delete files until you have read the diagnostic output.' -ForegroundColor Yellow
             Pause-Screen
         }
     }

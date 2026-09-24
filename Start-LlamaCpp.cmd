@@ -42,6 +42,9 @@ echo   LLAMA.CPP FOR WINDOWS        AMD CPU + GPU CONTROL CENTER
 echo  =============================================================================
 echo   Created by Matt Hurley - matthurley.dev
 echo.
+echo   FIRST TIME HERE? Choose [1] to scan hardware and install.
+echo   NEW OR UNSURE? The command center explains every choice.
+echo.
 echo   [L] Local LLM engine       llama.cpp server + Web UI
 echo   [M] Model layer            verified GGUF models with hardware fit advice
 echo   [V] VS Code layer          official llama-vscode, Continue, and Cline
@@ -49,7 +52,7 @@ echo   [A] API layer              local OpenAI-compatible endpoint
 echo.
 echo   MENU
 echo   ---------------------------------------------------------------------
-echo   [1] Open the interactive llama.cpp command center
+echo   [1] Start first-time setup / hardware scan (recommended)
 echo   [2] Start the active local llama.cpp model server
 echo   [3] Install the official llama-vscode VS Code extension
 echo   [4] Create a safe Continue llama.cpp configuration template
@@ -87,6 +90,7 @@ color 0B
 echo.
 echo  Opening the llama.cpp AMD Command Center...
 echo  The next screen will detect your CPU, GPU, VRAM, RAM, and best model.
+echo  Nothing is downloaded until you approve the installation.
 echo.
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
@@ -119,8 +123,9 @@ if exist "%SERVER_CMD%" (
     echo  Server launcher closed.
 ) else (
     color 0E
-    echo  No generated server launcher was found yet.
-    echo  Choose [1] and run the one-click installer first.
+    echo    No generated server launcher was found yet.
+    echo    Choose [1] and run the guided first-time setup first.
+    echo    If you are unsure, choose [7] for the complete walkthrough.
     echo.
     powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action Launch
 )
@@ -144,8 +149,10 @@ echo.
 where code >nul 2>&1
 if errorlevel 1 (
     color 0E
-    echo  VS Code command was not found on PATH.
-    echo  Install VS Code first, reopen this window, and choose [3] again.
+    echo  VS Code is installed or may be installed, but its command was not found on PATH.
+    echo  This is common on Windows and does not mean VS Code is missing.
+    echo  Easiest route: open VS Code and select Extensions, search llama-vscode, and install it.
+    echo  Or add VS Code's bin folder to PATH, reopen this window, and choose [3] again.
     echo  Official download: https://code.visualstudio.com/download
     echo.
     call :wait_for_key
@@ -333,6 +340,20 @@ echo  Qwen3.8 is a strong general reasoning, chat, tool, and vision model.
 echo  The official llama-vscode extension may perform best for inline completion
 echo  with an FIM-capable coding model. The general model remains suitable for
 echo  chat, editing, and agent workflows.
+echo.
+echo  COPILOT AND LOCAL LLM
+echo  ---------------------------------------------------------------------
+echo  GitHub Copilot can stay installed and enabled. This project does not
+echo  remove or reconfigure Copilot. Use llama-vscode, Continue, or Cline
+echo  when you want a request handled by your local model instead.
+echo.
+echo  STEP 8 - IF SOMETHING GOES WRONG
+echo  ---------------------------------------------------------------------
+echo  API test fails: start the server with [2], wait for loading, test [6].
+echo  code not found: VS Code may still be installed. Open VS Code and select
+echo  Extensions, search llama-vscode, and install it there; or add VS Code to PATH.
+echo  Model too slow: use the model browser or hardware/model advisor.
+echo  GPU missing: update AMD Adrenalin, reboot, then run diagnostics.
 echo.
 call :wait_for_key
 goto :menu

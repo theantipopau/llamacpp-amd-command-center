@@ -1,5 +1,9 @@
 # llama.cpp AMD Windows Command Center
 
+<p align="center">
+  <img src="logo.png" alt="llama.cpp AMD Windows Command Center logo" width="180">
+</p>
+
 **A hardware-aware Windows command center for llama.cpp, local models, and VS Code.**
 
 Created by **Matt Hurley - [matthurley.dev](https://matthurley.dev)**
@@ -8,10 +12,13 @@ Created by **Matt Hurley - [matthurley.dev](https://matthurley.dev)**
 
 ## Start here
 
+**New to local LLMs?** You do not need to know ROCm, Vulkan, GGUF files, or API servers first. The command center explains the choices and asks before downloading.
+
+
 1. Install or update the AMD Adrenalin driver.
 2. Download this repository.
 3. Double-click `Start-LlamaCpp.cmd`.
-4. Select **Open the interactive llama.cpp command center**.
+4. Select **Start first-time setup / hardware scan**.
 5. Review the detected CPU, Radeon GPU, VRAM, RAM, backend, and model recommendation.
 6. Install the selected backend and model.
 7. Return to the batch menu and start the generated server launcher.
@@ -62,6 +69,10 @@ Models: http://127.0.0.1:8080/v1/models
 
 The server binds to `127.0.0.1` only.
 
+## Using Copilot and a local model together
+
+GitHub Copilot and llama.cpp can be used side by side. This project does not remove or reconfigure Copilot. Keep using Copilot Chat as usual, and use llama-vscode, Continue, or Cline when you want a request handled by your local model.
+
 ## Editor integrations
 
 ### Official llama-vscode
@@ -95,6 +106,14 @@ API key:  any non-empty placeholder
 
 Claude Code is a separate CLI client. Its documented gateway setup uses `ANTHROPIC_BASE_URL` and an Anthropic-compatible gateway. The local llama.cpp OpenAI-compatible endpoint is not promised to be a direct Claude Code backend. A gateway or protocol adapter may be needed and must be tested against the Claude Code version in use.
 
+## Beginner troubleshooting
+
+- **API test fails:** start the server with option `[2]`, wait for model loading, then test with `[6]`.
+- **`code` is not recognized:** VS Code may still be installed. Open VS Code > Extensions, search `llama-vscode`, and install it there; or add VS Code to PATH and reopen the terminal.
+- **The model is slow:** choose the model browser or hardware/model advisor and try a smaller model or lower context setting.
+- **The GPU is missing:** update AMD Adrenalin, reboot, and rerun diagnostics.
+- **Starting over:** use the uninstall option in the command center; it asks for confirmation and does not remove VS Code or Copilot.
+
 ## Safety model
 
 - Nothing is downloaded until the user chooses an installation or model action.
@@ -110,6 +129,7 @@ Claude Code is a separate CLI client. Its documented gateway setup uses `ANTHROP
 ```text
 Start-LlamaCpp.cmd             Interactive colorful front end
 Install-LlamaCpp-AMD.ps1       PowerShell command center
+logo.png                       Project logo
 docs/                          Documentation site
 .github/workflows/pages.yml    GitHub Pages deployment
 ```

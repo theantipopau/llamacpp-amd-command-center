@@ -1,5 +1,9 @@
 # llama.cpp AMD Windows Command Center
 
+<p align="center">
+  <img src="logo.png" alt="llama.cpp AMD Windows Command Center logo" width="180">
+</p>
+
 **A colorful, hardware-aware Windows front end for installing, configuring, running, and connecting [llama.cpp](https://github.com/ggml-org/llama.cpp) to VS Code.**
 
 **Created by Matt Hurley - [matthurley.dev](https://matthurley.dev)**
@@ -21,12 +25,27 @@ The project is designed for a user who wants one guided path from:
 - **[V] VS Code layer** — documents the official `llama-vscode` extension, Continue, and Cline/OpenAI-compatible settings.
 - **[A] API layer** — exposes a localhost-only OpenAI-compatible endpoint for local tools.
 
+## If you are new to local LLMs
+
+You do not need to understand ROCm, Vulkan, GGUF files, context sizes, or API servers before starting. The command center explains the choices and asks before it downloads a backend or model.
+
+**The simplest path is:**
+
+1. Double-click `Start-LlamaCpp.cmd`.
+2. Choose **[1] Start first-time setup / hardware scan**. The first model download can take a while, so keep the window open until it finishes.
+3. Accept the recommended model and backend when prompted.
+4. Return to the menu and choose **[2]** to start the local server.
+5. Choose **[6]** to confirm the local API is working.
+6. Choose **[3]** for the official VS Code extension, or **[4]** for a Continue template.
+
+If you are unsure which option to choose, start with **[1]**. If you only want to read first, choose **[7] Show the complete walkthrough**.
+
 ## Quick start
 
 1. Install a current AMD Adrenalin driver.
 2. Download or clone this repository.
 3. Double-click **`Start-LlamaCpp.cmd`**.
-4. Choose **[1] Open the interactive llama.cpp command center**.
+4. Choose **[1] Start first-time setup / hardware scan**.
 5. Let the hardware scan finish, then choose the recommended backend and model.
 6. Choose **[2]** in the batch menu to start the generated local server launcher.
 7. Choose **[6]** to test `http://127.0.0.1:8080/v1/models`.
@@ -84,6 +103,18 @@ For the tested Ryzen 7 9800X3D + Radeon RX 9070 XT system, the default recommend
 
 A 16 GiB Radeon card can run this model with a sensible memory budget, but context size, projector use, and runtime offload settings affect actual VRAM use. Always review the command center's fit estimate before downloading.
 
+## If you already use GitHub Copilot
+
+You can keep using GitHub Copilot and run a local llama.cpp model at the same time. This project does not remove, replace, reconfigure, or sign you out of Copilot.
+
+Use the local integrations when you want the request to stay on your computer:
+
+- **llama-vscode** for the official local llama.cpp experience.
+- **Continue** for a configurable local provider.
+- **Cline** or another client that supports an OpenAI-compatible base URL.
+
+Copilot Chat and a local model are separate clients. If you want to keep using Copilot Chat, leave it configured as-is and use the local extension or client when you want the local model.
+
 ## VS Code and local API
 
 The server exposes:
@@ -137,6 +168,28 @@ Claude Code is not the same type of client as the VS Code integrations above. It
 
 A separate gateway or protocol translator may be required, and compatibility must be tested against the specific Claude Code release. This project does not silently install a gateway or claim unsupported direct compatibility.
 
+## If something goes wrong
+
+### The API test says the server is not reachable
+
+Start the server first with batch option **[2]**, wait for the model to finish loading, then choose **[6]**. The server may take time to load a large model into VRAM/RAM.
+
+### VS Code says `code` is not recognized
+
+This can happen even when VS Code is already installed. The easiest route is to open VS Code, select **Extensions**, search for `llama-vscode`, and install the official extension there. Alternatively, add VS Code's `bin` folder to PATH, close and reopen the terminal, and run the batch file again.
+
+### The local model is slow or does not fit
+
+Return to the command center and choose the model browser or hardware/model advisor. A smaller model, fewer context tokens, or a different quantization can reduce memory use and improve speed.
+
+### The GPU is not detected
+
+Update the AMD Adrenalin driver, reboot Windows, and run the command center again. The diagnostics option can show detected adapters and the selected execution mode.
+
+### You want to undo the setup
+
+The uninstall option removes the managed llama.cpp installation and downloaded models. It does not remove VS Code, Copilot, or the source repository. It asks for confirmation before deleting anything.
+
 ## Safety and privacy
 
 - Downloads use official HTTPS sources where available.
@@ -152,6 +205,7 @@ A separate gateway or protocol translator may be required, and compatibility mus
 ```text
 Start-LlamaCpp.cmd             Colorful Windows menu and walkthrough
 Install-LlamaCpp-AMD.ps1       Hardware detection, installer, advisor, launcher, diagnostics
+logo.png                       Project logo used by the README and documentation site
 docs/                          GitHub Pages documentation
 .github/workflows/pages.yml   GitHub Pages deployment workflow
 ```
