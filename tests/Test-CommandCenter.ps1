@@ -34,6 +34,27 @@ function Assert-True([bool] $Condition, [string] $Message) {
 }
 
 try {
+    Write-Host 'Internal calls use real parameter names'
+    # Simple (non-advanced) functions silently ignore unknown named parameters, so a
+    # typo such as -Backend for -RequestedBackend never raises an error at runtime.
+    $declared = @{}
+    foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $params = @()
+        if ($null -ne $fn.Parameters) { $params += @($fn.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) }
+        if ($null -ne $fn.Body.ParamBlock) { $params += @($fn.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) }
+        $declared[$fn.Name] = $params
+    }
+    $badCalls = @()
+    foreach ($call in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $call.GetCommandName()
+        if ($null -eq $name -or -not $declared.ContainsKey($name)) { continue }
+        foreach ($element in $call.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] }) {
+            $matched = @($declared[$name] | Where-Object { $_ -like "$($element.ParameterName)*" })
+            if ($matched.Count -eq 0) { $badCalls += "$name -$($element.ParameterName) (line $($element.Extent.StartLineNumber))" }
+        }
+    }
+    Assert-True ($badCalls.Count -eq 0) "every named parameter exists$(if ($badCalls.Count) { ': ' + ($badCalls -join ', ') })"
+
     Write-Host 'Launcher generation (every catalog model)'
     foreach ($model in Get-ModelCatalog) {
         Set-ActiveModel -Model $model -EffectiveContext 32768 -SkipVerification

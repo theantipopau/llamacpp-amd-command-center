@@ -1,183 +1,374 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-chcp 65001 >nul 2>&1
-mode con: cols=140 lines=45 >nul 2>&1
-title llama.cpp for Windows - AMD CPU and GPU Command Center
+chcp 65001 <nul >nul 2>&1
+mode con: cols=120 lines=50 <nul >nul 2>&1
+title llama.cpp Command Center - AMD Radeon and Ryzen
 
 rem ============================================================================
-rem  LLAMA.CPP FOR WINDOWS - ALL-IN-ONE WALKTHROUGH AND CONTROL PANEL
+rem  LLAMA.CPP COMMAND CENTER FOR AMD WINDOWS PCs
 rem  Created by Matt Hurley - matthurley.dev
 rem
-rem  This batch file is intentionally self-documenting. It does not silently
-rem  install anything: every installation action is shown in the menu first.
-rem  The PowerShell command center performs hardware detection, backend
-rem  selection, llama.cpp installation, model download, hash verification, and
-rem  server launch.
+rem  Double-click this file. It never installs or downloads anything without
+rem  asking first. Install-LlamaCpp-AMD.ps1 (kept next to this file) does the
+rem  hardware scan, installation, verified model downloads, and VS Code setup.
+rem
+rem  Note: delayed expansion is on, so screen text must not contain the
+rem  exclamation mark character.
 rem ============================================================================
 
 set "SCRIPT_DIR=%~dp0"
 set "PS_SCRIPT=%SCRIPT_DIR%Install-LlamaCpp-AMD.ps1"
+set "PS_RUN=powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%""
 set "INSTALL_ROOT=%LOCALAPPDATA%\Programs\llama.cpp"
 set "SERVER_CMD=%INSTALL_ROOT%\Start-LlamaCpp.cmd"
 set "API_URL=http://127.0.0.1:8080"
-set "API_MODELS_URL=http://127.0.0.1:8080/v1/models"
 set "CONTINUE_TEMPLATE=%SCRIPT_DIR%Continue-llamacpp-config.yaml"
 set "EXTENSION_ID=ggml-org.llama-vscode"
-set "ACTIVE_ALIAS="
-set "ACTIVE_NAME="
+
+rem ANSI colours (Windows 10 and 11 consoles and Windows Terminal).
+for /f %%e in ('echo prompt $E^| cmd') do set "ESC=%%e"
+set "R=%ESC%[0m"
+set "B=%ESC%[1m"
+set "DIM=%ESC%[90m"
+set "CYAN=%ESC%[96m"
+set "GREEN=%ESC%[92m"
+set "YELLOW=%ESC%[93m"
+set "RED=%ESC%[91m"
+set "WHITE=%ESC%[97m"
+set "MAG=%ESC%[95m"
+set "OK_BADGE=%ESC%[30;102m"
+set "WARN_BADGE=%ESC%[30;103m"
+set "OFF_BADGE=%ESC%[97;100m"
+set "BAD_BADGE=%ESC%[97;101m"
+set "LINE=%DIM%  ----------------------------------------------------------------------------------------------------%R%"
 
 if not exist "%PS_SCRIPT%" (
-    color 0C
     echo.
-    echo  ERROR: Install-LlamaCpp-AMD.ps1 was not found next to this file.
-    echo  Expected: "%PS_SCRIPT%"
+    echo  %RED%%B%Install-LlamaCpp-AMD.ps1 is missing.%R%
+    echo  Keep it in the same folder as this file. Expected:
+    echo    "%PS_SCRIPT%"
+    echo.
+    echo  If you downloaded a ZIP, extract the whole ZIP first instead of running
+    echo  this file from inside it.
     echo.
     call :wait_for_key
     exit /b 1
 )
 
+rem ============================================================================
+rem  MAIN MENU
+rem ============================================================================
 :menu
-call :read_active_model
+call :read_status
 cls
-color 0F
 echo.
-echo  ========================================================================================================
-echo   LLAMA.CPP / AMD WINDOWS COMMAND CENTER
-echo   Local AI setup for AMD Ryzen and Radeon systems
-echo  ========================================================================================================
-echo   Created by Matt Hurley - matthurley.dev
+echo  %CYAN%%B%  LLAMA.CPP COMMAND CENTER%R%  %DIM%for AMD Radeon and Ryzen PCs%R%
+echo  %DIM%  Run AI models privately on your own PC and use them in VS Code. No cloud account needed.%R%
+echo %LINE%
 echo.
-if defined ACTIVE_ALIAS (echo  ACTIVE MODEL: %ACTIVE_NAME%  [%ACTIVE_ALIAS%]) else (echo  ACTIVE MODEL: none yet - choose [1])
+echo  %WHITE%%B%  STATUS%R%
+if defined ACTIVE_ALIAS (
+    echo     Model       %WHITE%%ACTIVE_NAME%%R%  %DIM%id %ACTIVE_ALIAS%, memory %ACTIVE_CTX% tokens%R%
+) else (
+    echo     Model       %OFF_BADGE% NONE YET %R%  %DIM%choose [1] to set one up%R%
+)
+if "%SERVER_STATE%"=="running" echo     AI server   %OK_BADGE% RUNNING %R%  %DIM%%API_URL%%R%
+if "%SERVER_STATE%"=="loading" echo     AI server   %WARN_BADGE% STARTING %R%  %DIM%loading the model into GPU memory...%R%
+if "%SERVER_STATE%"=="stopped" echo     AI server   %OFF_BADGE% STOPPED %R%
+if "%VSCODE_STATE%"=="yes" echo     VS Code     %OK_BADGE% CONNECTED %R%  %DIM%Copilot Chat can use this model%R%
+if "%VSCODE_STATE%"=="stale" echo     VS Code     %WARN_BADGE% NEEDS UPDATE %R%  %DIM%set up for a different model - choose [6]%R%
+if "%VSCODE_STATE%"=="no" echo     VS Code     %OFF_BADGE% NOT SET UP %R%
 echo.
-echo  [ FIRST-TIME PATH ]  Choose [1] if you are new to local LLMs.
-echo  [ ALREADY READY? ]   Choose [2] to start the active model, or [6] to test it.
-echo  [ L ]  LOCAL ENGINE     llama.cpp server, Web UI, and localhost API
-echo  [ M ]  MODEL LAYER      hardware-fit advice and verified GGUF downloads
-echo  [ V ]  VS CODE LAYER    Copilot Chat, llama-vscode, Continue, and Cline guidance
-echo  [ A ]  API LAYER        local OpenAI-compatible endpoint
+call :next_step
+echo  %YELLOW%%B%  NEXT STEP%R%  %YELLOW%%NEXT_STEP%%R%
+echo %LINE%
 echo.
-echo  --------------------------------------------------------------------------------------------------------
-echo   [1]  FIRST-TIME SETUP       Scan hardware, install backend, and activate the recommended model
-echo   [2]  START LOCAL SERVER     Run the active model with its Web UI and local API
-echo   [3]  INSTALL VS CODE        Install the official llama-vscode extension
-echo   [4]  CONTINUE TEMPLATE      Create a safe local-provider YAML template
-echo   [5]  CONFIGURE VS CODE      Point Copilot Chat at the active model (asks first) + Cline settings
-echo   [6]  TEST LOCAL API         Check whether the server is ready
-echo   [7]  COMPLETE WALKTHROUGH   Read the full beginner-friendly setup guide
-echo   [8]  OFFICIAL LINKS         Open trusted upstream project information
-echo   [9]  VIEW LATEST LOG        Read the most recent persistent run log
-echo   [0]  EXIT                   Close the command center
-echo  --------------------------------------------------------------------------------------------------------
+echo  %MAG%  GET STARTED%R%
+echo     %CYAN%[1]%R%  %WHITE%Setup and models%R%        %DIM%Scan your PC, install llama.cpp, download or switch models%R%
 echo.
-echo  TIP: Windows Terminal with Cascadia Mono or Consolas gives the cleanest display.
+echo  %MAG%  RUN%R%
+echo     %CYAN%[2]%R%  %WHITE%Start AI server%R%         %DIM%Opens in its own window - leave it open while you work%R%
+echo     %CYAN%[3]%R%  %WHITE%Stop AI server%R%          %DIM%Frees your GPU memory for games and other apps%R%
+echo     %CYAN%[4]%R%  %WHITE%Chat in your browser%R%    %DIM%Talk to the model in the built-in Web UI%R%
+echo     %CYAN%[5]%R%  %WHITE%Health check%R%            %DIM%Tests chat, tool calling, and memory in about 10 seconds%R%
+echo.
+echo  %MAG%  CONNECT%R%
+echo     %CYAN%[6]%R%  %WHITE%Connect VS Code%R%         %DIM%Adds the model to GitHub Copilot Chat - asks before changing anything%R%
+echo     %CYAN%[7]%R%  %WHITE%Other editors%R%           %DIM%llama-vscode extension, Continue, Cline and other tools%R%
+echo.
+echo  %MAG%  HELP%R%
+echo     %CYAN%[8]%R%  %WHITE%Beginner guide%R%          %DIM%What everything means, step by step, plus official links%R%
+echo     %CYAN%[9]%R%  %WHITE%Logs and fixes%R%          %DIM%Latest run log and answers to common problems%R%
+echo     %CYAN%[0]%R%  %WHITE%Exit%R%
+echo %LINE%
+echo  %DIM%  Created by Matt Hurley - matthurley.dev%R%
 echo.
 set "choice="
-set /p "choice=Choose an option (0 to exit): "
+set /p "choice=  Choose an option: "
 if defined choice set "choice=%choice:~0,1%"
 if not defined choice set "choice=0"
 
-if "%choice%"=="1" goto :dashboard
+if "%choice%"=="1" goto :setup
 if "%choice%"=="2" goto :start_server
-if "%choice%"=="3" goto :install_extension
-if "%choice%"=="4" goto :continue_template
-if "%choice%"=="5" goto :cline_settings
-if "%choice%"=="6" goto :test_api
-if "%choice%"=="7" goto :walkthrough
-if "%choice%"=="8" goto :links
-if "%choice%"=="9" goto :view_log
+if "%choice%"=="3" goto :stop_server
+if "%choice%"=="4" goto :open_webui
+if "%choice%"=="5" goto :health_check
+if "%choice%"=="6" goto :vscode
+if "%choice%"=="7" goto :editors
+if "%choice%"=="8" goto :guide
+if "%choice%"=="9" goto :logs
 if "%choice%"=="0" goto :done
 
-color 0E
 echo.
-echo  Please choose a number from the menu.
-timeout /t 2 /nobreak >nul
+echo  %YELLOW%Please choose a number from the menu.%R%
+timeout /t 2 /nobreak >nul 2>&1
 goto :menu
 
-:dashboard
+rem ============================================================================
+rem  [1] SETUP AND MODELS
+rem ============================================================================
+:setup
 cls
-color 0B
+call :header "SETUP AND MODELS"
+echo   The next screen scans your CPU, graphics card, and memory, then recommends
+echo   the best model for your PC. From there you can:
 echo.
-echo  Opening the llama.cpp AMD Command Center...
-echo  The next screen will detect your CPU, GPU, VRAM, RAM, and best model.
-echo  Nothing is downloaded until you approve the installation.
+echo     %CYAN%[1]%R%  First-time setup     install llama.cpp and the recommended model
+echo     %CYAN%[2]%R%  Model browser        compare, download, or switch models
+echo     %CYAN%[5]%R%  Update llama.cpp     keeps all downloaded models
+echo     %CYAN%[6]%R%  Diagnostics          if something is not working
 echo.
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
+echo   %GREEN%Nothing is downloaded until you type YES.%R% The first setup downloads
+echo   about 6 GB for the recommended model and usually takes 10 to 20 minutes.
+echo.
+call :wait_for_key
+%PS_RUN% %*
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 if not "%EXIT_CODE%"=="0" (
-    color 0C
-    echo  The command center exited with code %EXIT_CODE%.
+    echo  %RED%The setup screen closed with an error, code %EXIT_CODE%.%R% Choose [9] to read the log.
 ) else (
-    color 0A
-    echo  Command center closed normally.
+    echo  %GREEN%Back from setup.%R% If you changed the model, stop and start the AI server to use it.
 )
 call :wait_for_key
 goto :menu
 
+rem ============================================================================
+rem  [2] START AI SERVER
+rem ============================================================================
 :start_server
 cls
-color 0A
-echo.
-echo  STARTING THE ACTIVE LOCAL MODEL
-echo  --------------------------------------------------------------------------------------------------------
-echo  The active model is launched by:
-echo    "%SERVER_CMD%"
-echo.
-if exist "%SERVER_CMD%" (
-    echo  Opening the generated server launcher...
-    echo  Keep this window open while VS Code is using the model.
+call :header "START AI SERVER"
+call :read_status
+if "%SERVER_STATE%"=="running" (
+    echo   %GREEN%The AI server is already running.%R%
+    echo   Web UI and API: %WHITE%%API_URL%%R%
     echo.
-    call "%SERVER_CMD%"
+    call :wait_for_key
+    goto :menu
+)
+if not exist "%SERVER_CMD%" (
+    echo   %YELLOW%No model is set up yet.%R%
+    echo   Choose %CYAN%[1] Setup and models%R% first. It installs llama.cpp and a model that fits your PC.
     echo.
-    echo  Server launcher closed.
+    call :wait_for_key
+    goto :menu
+)
+if "%SERVER_STATE%"=="stopped" (
+    echo   Opening the server in its own window: %WHITE%"llama.cpp AI server"%R%
+    echo   %DIM%Keep that window open while you use the model. Closing it stops the server.%R%
+    echo.
+    start "llama.cpp AI server" "%SERVER_CMD%"
+)
+<nul set /p "=  Loading %ACTIVE_NAME% into GPU memory "
+set /a WAITED=0
+:start_wait
+call :server_ready
+if "%READY%"=="1" goto :start_ready
+set /a WAITED+=2
+if %WAITED% geq 180 goto :start_slow
+<nul set /p "=."
+ping -n 3 127.0.0.1 >nul
+goto :start_wait
+
+:start_ready
+echo.
+echo.
+echo   %OK_BADGE% READY %R%  %GREEN%The AI server is running.%R%  %DIM%took about %WAITED% seconds%R%
+echo.
+echo     Web UI   %WHITE%%API_URL%/%R%           %DIM%menu option [4] opens it%R%
+echo     API      %WHITE%%API_URL%/v1%R%         %DIM%for VS Code, Continue, Cline and other tools%R%
+echo.
+if not "%VSCODE_STATE%"=="yes" (
+    echo   Next: choose %CYAN%[6] Connect VS Code%R% to use this model in GitHub Copilot Chat.
 ) else (
-    color 0E
-    echo    No generated server launcher was found yet.
-    echo    Choose [1] and run the guided first-time setup first.
-    echo    If you are unsure, choose [7] for the complete walkthrough.
-    echo.
-    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action Launch
+    echo   VS Code is already connected. Pick %WHITE%%ACTIVE_NAME% - llama.cpp local%R% in the Copilot Chat model list.
 )
 echo.
 call :wait_for_key
+goto :menu
+
+:start_slow
+echo.
+echo.
+echo   %YELLOW%The server has not reported ready after 3 minutes.%R%
+echo   Look at the %WHITE%llama.cpp AI server%R% window for an error message, or choose [9] for common fixes.
+echo   Large models can take longer to load the first time. You can check again with [5].
+echo.
+call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [3] STOP AI SERVER
+rem ============================================================================
+:stop_server
+cls
+call :header "STOP AI SERVER"
+tasklist /fi "imagename eq llama-server.exe" 2>nul | find /i "llama-server.exe" >nul
+if errorlevel 1 (
+    echo   The AI server is not running. Nothing to stop.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo   This stops the local AI server and frees its GPU memory.
+echo   Anything using the model, such as a VS Code chat in progress, will stop getting replies.
+echo.
+set "confirm="
+set /p "confirm=  Type Y to stop the server: "
+if /i not "%confirm%"=="Y" (
+    echo.
+    echo   Cancelled. The server is still running.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+taskkill /im llama-server.exe /f >nul 2>&1
+echo.
+echo   %GREEN%The AI server has stopped.%R% You can close its window. Start it again any time with [2].
+echo.
+call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [4] CHAT IN YOUR BROWSER
+rem ============================================================================
+:open_webui
+cls
+call :header "CHAT IN YOUR BROWSER"
+call :server_ready
+if not "%READY%"=="1" (
+    echo   %YELLOW%The AI server is not running yet.%R% Choose [2] to start it, then try again.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo   Opening %WHITE%%API_URL%/%R% in your default browser.
+echo   %DIM%The Web UI talks only to the server on this PC. Nothing is sent to the internet.%R%
+start "" "%API_URL%/"
+echo.
+call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [5] HEALTH CHECK
+rem ============================================================================
+:health_check
+cls
+call :header "HEALTH CHECK"
+%PS_RUN% -Action SelfTest <nul
+echo.
+call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [6] CONNECT VS CODE
+rem ============================================================================
+:vscode
+cls
+call :header "CONNECT VS CODE (GITHUB COPILOT CHAT)"
+if not defined ACTIVE_ALIAS (
+    echo   %YELLOW%No model is set up yet.%R% Choose [1] first, then come back here.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo   This adds %WHITE%%ACTIVE_NAME%%R% to the model list in GitHub Copilot Chat.
+echo.
+echo     %GREEN%+%R%  Your Copilot sign-in, settings, and cloud models are kept as they are.
+echo     %GREEN%+%R%  A backup of the VS Code model settings file is made first.
+echo     %GREEN%+%R%  Only the entry named "llama.cpp local" is added or updated.
+echo.
+%PS_RUN% -Action VSCodeChat
+set "VSCODE_EXIT=%ERRORLEVEL%"
+call :read_status
+if not "%VSCODE_EXIT%"=="0" set "VSCODE_STATE=unchanged"
+if not "%VSCODE_STATE%"=="yes" (
+    echo.
+    echo   %YELLOW%VS Code was not changed.%R% Read the message above, or use the manual steps in [7].
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo.
+echo  %WHITE%%B%  NOW IN VS CODE%R%
+echo     1. Press %WHITE%Ctrl+Shift+P%R%, type %WHITE%Reload Window%R%, and press Enter.
+echo     2. Open Copilot Chat with %WHITE%Ctrl+Alt+I%R%.
+echo     3. Click the model name under the chat box and choose %WHITE%%ACTIVE_NAME% - llama.cpp local%R%.
+echo     4. Pick %WHITE%Agent%R% to let it read and edit files, or %WHITE%Ask%R% for questions.
+echo.
+echo   %DIM%Keep the AI server running [2] while you use it. Switch back to a cloud model any time%R%
+echo   %DIM%from the same model list.%R%
+echo.
+call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [7] OTHER EDITORS
+rem ============================================================================
+:editors
+cls
+call :header "OTHER EDITORS AND TOOLS"
+echo     %CYAN%[1]%R%  %WHITE%llama-vscode%R%       %DIM%Official llama.cpp extension for VS Code: completion, chat, agents%R%
+echo     %CYAN%[2]%R%  %WHITE%Continue%R%           %DIM%Create a Continue settings file for the active model%R%
+echo     %CYAN%[3]%R%  %WHITE%Cline and others%R%   %DIM%Settings for any tool that accepts an OpenAI-compatible server%R%
+echo     %CYAN%[0]%R%  %WHITE%Back%R%
+echo.
+set "sub="
+set /p "sub=  Choose an option: "
+if "%sub%"=="1" goto :install_extension
+if "%sub%"=="2" goto :continue_template
+if "%sub%"=="3" goto :openai_settings
 goto :menu
 
 :install_extension
 cls
-color 0B
-echo.
-echo  OFFICIAL VS CODE EXTENSION
-echo  --------------------------------------------------------------------------------------------------------
-echo  Extension: llama-vscode
-echo  Publisher: ggml.org / ggml.ai
-echo  ID: %EXTENSION_ID%
-echo.
-echo  This extension provides local completion, chat, and agent features.
-echo  It can also manage llama.cpp environments and local models.
+call :header "INSTALL THE llama-vscode EXTENSION"
+echo   Extension ID: %WHITE%%EXTENSION_ID%%R%   %DIM%published by ggml.org, the llama.cpp team%R%
 echo.
 set "CODE_CMD="
 for /f "delims=" %%I in ('where code 2^>nul') do if not defined CODE_CMD set "CODE_CMD=%%I"
 if not defined CODE_CMD for /f "delims=" %%I in ('powershell.exe -NoLogo -NoProfile -Command "$c=Get-Command code -ErrorAction SilentlyContinue; if ($null -ne $c) { $c.Source }"') do if not defined CODE_CMD set "CODE_CMD=%%I"
 if not defined CODE_CMD (
-    color 0E
-    echo  VS Code is installed or may be installed, but its command could not be found.
-    echo  This is common on Windows and does not mean VS Code is missing.
-    echo  VS Code may be open already; that is okay.
-    echo  Open VS Code and select Extensions, search llama-vscode, and install it.
-    echo  Official download: https://code.visualstudio.com/download
+    echo   %YELLOW%The VS Code "code" command was not found.%R% That is common and does not mean
+    echo   VS Code is missing. Install the extension from inside VS Code instead:
+    echo.
+    echo     1. Open VS Code and click %WHITE%Extensions%R% on the left, or press Ctrl+Shift+X.
+    echo     2. Search for %WHITE%llama-vscode%R% and click Install.
+    echo.
+    echo   %DIM%Get VS Code: https://code.visualstudio.com/download%R%
     echo.
     call :wait_for_key
     goto :menu
 )
-echo  Installing the official extension now...
-echo  Using: "%CODE_CMD%"
+echo   Installing with: %DIM%"%CODE_CMD%"%R%
 call "%CODE_CMD%" --install-extension %EXTENSION_ID%
 if errorlevel 1 (
-    color 0C
-    echo  VS Code extension installation failed.
+    echo.
+    echo   %RED%The extension could not be installed.%R% Try installing it from inside VS Code as above.
 ) else (
-    color 0A
-    echo  llama-vscode installed successfully.
+    echo.
+    echo   %GREEN%llama-vscode is installed.%R%
 )
 echo.
 call :wait_for_key
@@ -185,26 +376,17 @@ goto :menu
 
 :continue_template
 cls
-color 0A
-echo.
-echo  CONTINUE CONFIGURATION TEMPLATE
-echo  --------------------------------------------------------------------------------------------------------
-echo  This creates a separate template and does not overwrite your existing
-echo  Continue configuration.
-echo.
-if exist "%CONTINUE_TEMPLATE%" (
-    color 0E
-    echo  Template already exists:
-    echo    "%CONTINUE_TEMPLATE%"
-    echo  It was left unchanged.
-    goto :show_continue
-)
+call :header "CONTINUE SETTINGS"
 if not defined ACTIVE_ALIAS (
-    color 0E
-    echo  No active model yet. Choose [1] first so the template uses the right model.
+    echo   %YELLOW%No model is set up yet.%R% Choose [1] first so the settings use the right model.
     echo.
     call :wait_for_key
     goto :menu
+)
+if exist "%CONTINUE_TEMPLATE%" (
+    echo   %YELLOW%A settings file already exists and was left unchanged:%R%
+    echo     "%CONTINUE_TEMPLATE%"
+    goto :show_continue
 )
 (
     echo name: Local llama.cpp
@@ -217,306 +399,184 @@ if not defined ACTIVE_ALIAS (
     echo     model: %ACTIVE_ALIAS%
     echo     apiBase: %API_URL%
 ) > "%CONTINUE_TEMPLATE%"
-color 0A
-echo  Created safely:
-echo    "%CONTINUE_TEMPLATE%"
+echo   %GREEN%Created:%R% "%CONTINUE_TEMPLATE%"
 :show_continue
 echo.
-echo  Continue setup:
-echo    1. Install the Continue extension in VS Code.
-echo    2. Start the llama.cpp server with option [2].
-echo    3. Add or merge the YAML settings into your Continue configuration.
-echo    4. Select the model named in the template.
+echo     1. Install the %WHITE%Continue%R% extension in VS Code.
+echo     2. Start the AI server with [2].
+echo     3. Copy the contents of the file above into your Continue config.
+echo     4. Choose %WHITE%%ACTIVE_NAME%%R% in Continue.
 echo.
 call :wait_for_key
 goto :menu
 
-:cline_settings
+:openai_settings
 cls
-color 0B
+call :header "CLINE AND OTHER OPENAI-COMPATIBLE TOOLS"
+echo   Choose the %WHITE%OpenAI Compatible%R% provider in your tool and enter:
 echo.
-echo  CONFIGURING VS CODE COPILOT CHAT
-echo  --------------------------------------------------------------------------------------------------------
-echo  The command center will update the llama.cpp ROCm provider and back up
-echo  the existing VS Code chatLanguageModels.json file.
+echo     Base URL   %WHITE%%API_URL%/v1%R%
+if defined ACTIVE_ALIAS (echo     Model      %WHITE%%ACTIVE_ALIAS%%R%) else (echo     Model      %DIM%set up a model with [1] first%R%)
+echo     API key    %WHITE%local%R%   %DIM%any text works - the server is on your PC and needs no key%R%
 echo.
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action VSCodeChat
-if errorlevel 1 (
-    echo.
-    echo  VS Code Chat setup did not complete. Read the message above.
-    echo  You can still use the manual values shown below.
-)
+echo   %DIM%The server listens on 127.0.0.1 only, so other computers on your network cannot reach it.%R%
 echo.
-echo  COPILOT CHAT / CLINE / OPENAI-COMPATIBLE SETTINGS
-echo  --------------------------------------------------------------------------------------------------------
-echo  Provider:       OpenAI Compatible
-echo  Base URL:       %API_URL%/v1
-echo  Chat endpoint:  %API_URL%/v1/chat/completions
-if defined ACTIVE_ALIAS (echo  Model:          %ACTIVE_ALIAS%) else (echo  Model:          the id shown by option [6])
-echo  API key:        any non-empty placeholder, for example: local
-echo.
-echo  NATIVE COPILOT CHAT
-echo  1. Start the server with option [2] and wait for loading.
-echo  2. VS Code: Chat: Manage Language Models
-echo  3. Add Models -> Custom Endpoint -> Chat Completions
-echo  4. Use the Chat endpoint and model above.
-echo  5. Enable Tools and Vision, save chatLanguageModels.json, reload VS Code.
-echo.
-echo  The local server is bound to 127.0.0.1, so it is not exposed to your LAN.
-echo  Start the server with option [2] before testing Copilot, Cline, or another client.
-echo.
-echo  If Agent mode hides the model, verify toolCalling is true in the VS Code model entry.
-echo  If Agent mode fails with "No lowest priority node found", the context is too small:
-echo  re-activate the model with -ContextSize 32768, restart the server, and run [5] again.
-echo  For Cline, use the OpenAI-compatible provider and the Base URL above.
+echo  %WHITE%%B%  MANUAL COPILOT CHAT SETUP%R%  %DIM%if you prefer not to use option [6]%R%
+echo     1. In VS Code run %WHITE%Chat: Manage Language Models%R%.
+echo     2. Choose %WHITE%Add Models%R%, then %WHITE%Custom Endpoint%R%, then %WHITE%Chat Completions%R%.
+echo     3. Endpoint %WHITE%%API_URL%/v1/chat/completions%R%, the model above, and API key %WHITE%local%R%.
+echo     4. Turn on Tools and Vision, set the input limit to about 57000 tokens, and reload VS Code.
 echo.
 call :wait_for_key
 goto :menu
 
-:test_api
+rem ============================================================================
+rem  [8] BEGINNER GUIDE
+rem ============================================================================
+:guide
 cls
-color 0B
+call :header "BEGINNER GUIDE"
+echo  %WHITE%%B%  WHAT THIS DOES%R%
+echo    It runs an AI language model on your own graphics card with llama.cpp, then lets VS Code
+echo    and your browser talk to it. Your code and questions stay on your PC. No subscription.
 echo.
-echo  TESTING THE LOCAL LLAMA.CPP API
-echo  --------------------------------------------------------------------------------------------------------
-echo  Endpoint: %API_MODELS_URL%
+echo  %WHITE%%B%  THE FIVE STEPS%R%
+echo    %CYAN%1%R%  %WHITE%[1] Setup and models%R%  Scans your PC and recommends a model. On a 16 GB Radeon
+echo       RX 9070 XT that is Qwen3.5 9B: about 6 GB to download, fits fully in GPU memory,
+echo       and answers at around 60 to 90 words per second.
+echo    %CYAN%2%R%  %WHITE%[2] Start AI server%R%   Loads the model. Keep its window open while you work.
+echo    %CYAN%3%R%  %WHITE%[5] Health check%R%      Confirms chat, tool calling, and memory all work.
+echo    %CYAN%4%R%  %WHITE%[6] Connect VS Code%R%   Adds the model to GitHub Copilot Chat.
+echo    %CYAN%5%R%  %WHITE%Use it%R%                In Copilot Chat pick the model, then Agent or Ask.
 echo.
-powershell.exe -NoLogo -NoProfile -Command "$ErrorActionPreference='Stop'; $r=Invoke-RestMethod -Uri '%API_MODELS_URL%'; Write-Output 'API reachable. Server response:'; Write-Output $r"
-if errorlevel 1 (
-    color 0C
-    echo.
-    echo  API test failed. Is the server running?
-    echo  Start it with option [2] and wait for model loading to finish.
-) else (
-    color 0A
-    echo.
-    echo  API test passed.
-    echo  VS Code clients can now use the model id shown above.
-)
+echo  %WHITE%%B%  WORDS YOU WILL SEE%R%
+echo    %WHITE%Model%R%          The AI itself: a large file ending in .gguf.
+echo    %WHITE%ROCm / Vulkan%R%  Two ways to run on an AMD GPU. ROCm is faster on supported Radeon cards;
+echo                   Vulkan works almost everywhere. The setup picks for you.
+echo    %WHITE%VRAM%R%           Memory on your graphics card. Models that fit in it are much faster.
+echo    %WHITE%Context%R%        How much text the model can keep in mind at once, in tokens. Copilot Agent
+echo                   mode needs at least 32768; the recommended setup uses 65536.
+echo    %WHITE%Tool calling%R%   Lets the model ask VS Code to read files or run commands - needed for Agent mode.
+echo    %WHITE%Thinking%R%       Turned off for tool-capable models, because it made Copilot show
+echo                   "Sorry, no response was returned".
+echo.
+echo  %WHITE%%B%  GOOD TO KNOW%R%
+echo    - Copilot stays installed. Switch between cloud and local models in the chat model list.
+echo    - The server only listens on this PC, 127.0.0.1, not your network.
+echo    - Stop the server with [3] before gaming to free GPU memory.
+echo    - Files live in %DIM%%INSTALL_ROOT%%R%
+echo.
+echo  %WHITE%%B%  OFFICIAL LINKS%R%
+echo    Project and docs   %DIM%https://github.com/theantipopau/llamacpp-amd-command-center%R%
+echo    llama.cpp          %DIM%https://github.com/ggml-org/llama.cpp%R%
+echo    llama-vscode       %DIM%https://marketplace.visualstudio.com/items?itemName=ggml-org.llama-vscode%R%
+echo    AMD ROCm llama.cpp %DIM%https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html%R%
+echo    Qwen3.5 9B model   %DIM%https://huggingface.co/unsloth/Qwen3.5-9B-GGUF%R%
+echo    Continue           %DIM%https://docs.continue.dev/customize/model-providers/more/llamacpp%R%
 echo.
 call :wait_for_key
 goto :menu
 
-:walkthrough
+rem ============================================================================
+rem  [9] LOGS AND FIXES
+rem ============================================================================
+:logs
 cls
-color 0E
+%PS_RUN% -Action ViewLog <nul
 echo.
-echo  ========================================================================================================
-echo   COMPLETE WALKTHROUGH: LLAMA.CPP TO VISUAL STUDIO CODE
-echo  ========================================================================================================
+echo %LINE%
+echo  %WHITE%%B%  COMMON PROBLEMS%R%
+echo    %YELLOW%Health check says the server is not reachable%R%
+echo      Start it with [2] and wait for READY. Loading takes 10 to 60 seconds.
+echo    %YELLOW%VS Code: "No lowest priority node found"%R%
+echo      The model's memory is too small for Copilot. In [1] open the model browser and
+echo      activate the model again - it now uses 65536 tokens - then restart the server.
+echo    %YELLOW%VS Code: "Sorry, no response was returned"%R%
+echo      Re-activate the model in [1] so thinking is turned off, then restart the server.
+echo    %YELLOW%VS Code: "Server error: 500"%R%
+echo      Two large requests arrived at once. Re-activate the model in [1] to get the
+echo      two-conversation server settings, then restart the server.
+echo    %YELLOW%The model is not in the Copilot model list%R%
+echo      Run [6] again, then Reload Window in VS Code.
+echo    %YELLOW%Replies are very slow%R%
+echo      The model may be too big for your GPU. Pick one marked VRAM in the model browser.
+echo    %YELLOW%Graphics card not detected%R%
+echo      Update the AMD Adrenalin driver, restart Windows, then run Diagnostics from [1].
 echo.
-echo  STEP 1 - DETECT HARDWARE
-echo  --------------------------------------------------------------------------------------------------------
-echo  The PowerShell command center detects:
-echo    - AMD Ryzen / EPYC CPU cores and threads
-echo    - Radeon dGPU and Ryzen iGPU devices
-echo    - True DXGI dedicated VRAM, avoiding the WMI 4 GiB reporting cap
-echo    - System RAM, Vulkan loader, and AMD driver state
-echo.
-echo  STEP 2 - SELECT THE BACKEND
-echo  --------------------------------------------------------------------------------------------------------
-echo  Auto mode selects:
-echo    - AMD ROCm 7.2.1 for supported Radeon dGPUs such as RX 9070 XT
-echo    - Vulkan for Ryzen iGPUs, older Radeon cards, and unsupported GPUs
-echo.
-echo  ROCm is AMD's validated Windows path for supported Radeon hardware.
-echo  Vulkan is the portable fallback and uses the AMD Vulkan driver.
-echo.
-echo  STEP 3 - INSTALL LLAMA.CPP
-echo  --------------------------------------------------------------------------------------------------------
-echo  The command center downloads the official backend package, verifies the
-echo  available upstream SHA-256 digest, extracts llama-server.exe, validates
-echo  the runtime, and preserves models during updates.
-echo.
-echo  STEP 4 - INSTALL A GGUF MODEL
-echo  --------------------------------------------------------------------------------------------------------
-echo  The command center recommends the strongest tool-capable model that fits
-echo  entirely in your GPU memory. On a 16 GB Radeon RX 9070 XT that is:
-echo.
-echo  RECOMMENDED: Qwen3.5 9B Q4_K_M
-echo    Weights:     Qwen3.5-9B-Q4_K_M.gguf
-echo    Projector:   mmproj-F16.gguf
-echo    API alias:   qwen3.5:9b
-echo    Download:    approximately 6.20 GiB including projector
-echo    Best for:    fast VS Code Agent turns and tool calling
-echo    Context:     65536 tokens, room for Copilot Agent prompts of 26k+
-echo.
-echo  QUALITY OPTION: Qwen3.8 27B Q4_K_M
-echo  Stronger answers, but it does not fit in 16 GB of VRAM, so part of it runs
-echo  from system RAM at roughly 4-7 tokens per second.
-echo  llama.cpp alias:   qwen3.8:latest
-echo  Model weights:     Qwen3.8-27B-Q4_K_M.gguf
-echo  Vision projector:  mmproj-Qwen3.8-27B-Q8_0.gguf
-echo  Download:          approximately 18.25 GiB including projector
-echo.
-echo  The script resolves Hugging Face metadata at download time and verifies
-echo  each Git LFS SHA-256 digest.
-echo.
-echo  STEP 5 - START THE LOCAL SERVER
-echo  --------------------------------------------------------------------------------------------------------
-echo  Use the generated launcher:
-echo    "%SERVER_CMD%"
-echo.
-echo  Web UI and API:
-echo    %API_URL%/
-echo    %API_URL%/v1
-echo.
-echo  The server binds to 127.0.0.1 only. It is private to this PC.
-echo.
-echo  STEP 6 - CONNECT VS CODE
-echo  --------------------------------------------------------------------------------------------------------
-echo  Official llama-vscode extension:
-echo    code --install-extension %EXTENSION_ID%
-echo.
-echo  Native VS Code Copilot Chat custom endpoint:
-echo    Option [5] can configure this automatically for the active model.
-echo    It preserves Copilot settings and creates a JSON backup.
-echo    After it finishes, run Developer: Reload Window in VS Code.
-echo.
-echo    Manual fallback:
-echo    1. Start the server with option [2] and wait for loading.
-echo    2. Run: Chat: Manage Language Models
-echo    3. Add Models -> Custom Endpoint -> Chat Completions
-echo    4. Endpoint: %API_URL%/v1/chat/completions
-echo    5. Model: the id shown by option [6], for example qwen3.5:9b
-echo    6. API key: any non-empty placeholder, such as local
-echo    7. Enable Tools and Vision, save chatLanguageModels.json, reload VS Code
-echo.
-echo  Continue:
-echo    provider: llama.cpp
-echo    apiBase:  %API_URL%
-echo    model:    the active model id, for example qwen3.5:9b
-echo.
-echo  Cline or another OpenAI-compatible extension:
-echo    Base URL: %API_URL%/v1
-echo    Model:    the active model id, for example qwen3.5:9b
-echo    API key:  any non-empty placeholder
-echo.
-echo  STEP 7 - TEST THE CONNECTION
-echo  --------------------------------------------------------------------------------------------------------
-echo  From this menu choose [6], or run:
-echo    Invoke-RestMethod %API_MODELS_URL%
-echo.
-echo  If the response lists your active model id, the server is ready for VS Code.
-echo.
-echo  IMPORTANT MODEL NOTE
-echo  --------------------------------------------------------------------------------------------------------
-echo  The Qwen models are general reasoning, chat, tool, and vision models.
-echo  The official llama-vscode extension may perform best for inline completion
-echo  with an FIM-capable coding model. The general model remains suitable for
-echo  chat, editing, and agent workflows.
-echo.
-echo  COPILOT AND LOCAL LLM
-echo  --------------------------------------------------------------------------------------------------------
-echo  GitHub Copilot can stay installed and enabled. This project does not
-echo  remove or reconfigure Copilot. Use the Custom Endpoint steps above
-echo  when you want Copilot Chat to use the local model. Continue, Cline,
-echo  and llama-vscode are separate local-client options.
-echo.
-echo  If Agent mode hides the model, verify toolCalling is true in
-echo  chatLanguageModels.json. If Agent mode fails with "No lowest priority
-echo  node found", the model's context is too small for Copilot's prompt:
-echo  use at least 32768 tokens.
-echo.
-echo  STEP 8 - IF SOMETHING GOES WRONG
-echo  --------------------------------------------------------------------------------------------------------
-echo  API test fails: start the server with [2], wait for loading, test [6].
-echo  code not found: VS Code may still be installed. Open VS Code and select
-echo  Extensions, search llama-vscode, and install it there; or add VS Code to PATH.
-echo  Model too slow: use the model browser or hardware/model advisor.
-echo  Qwen3.5 9B is the recommended Agent model; Qwen3.8 27B is slower but stronger.
-echo  GPU missing: update AMD Adrenalin, reboot, then run diagnostics.
-echo.
-echo  RELEASE DOWNLOAD
-echo  --------------------------------------------------------------------------------------------------------
-echo  GitHub Releases (latest) provides a ZIP with Start-LlamaCpp.cmd,
-echo  Install-LlamaCpp-AMD.ps1, README.md, LICENSE, and logo.png.
-echo  Download the ZIP, extract it, and keep both script files together.
+echo   %DIM%When asking for help, share the log above and the matching -summary.json file from%R%
+echo   %DIM%%INSTALL_ROOT%\logs. Common keys and tokens are removed automatically.%R%
 echo.
 call :wait_for_key
 goto :menu
 
-:links
-cls
-color 0F
+rem ============================================================================
+rem  HELPERS
+rem ============================================================================
+:header
 echo.
-echo  OFFICIAL INFORMATION AND LINKS
-echo  ========================================================================================================
+echo  %CYAN%%B%  %~1%R%
+echo %LINE%
 echo.
-echo  Official llama.cpp VS Code extension:
-echo    https://marketplace.visualstudio.com/items?itemName=ggml-org.llama-vscode
-echo    https://github.com/ggml-org/llama.vscode
-echo.
-echo  Official llama.cpp:
-echo    https://github.com/ggml-org/llama.cpp
-echo    https://github.com/ggml-org/llama.cpp/releases
-echo.
-echo  AMD Windows ROCm llama.cpp package:
-echo    https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html
-echo.
-echo  AMD Windows ROCm compatibility matrix:
-echo    https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html
-echo.
-echo  AMD ROCm llama.cpp documentation:
-echo    https://rocm.docs.amd.com/projects/llama-cpp/en/docs-26.02/install/llama-cpp-install.html
-echo.
-echo  Continue llama.cpp provider:
-echo    https://docs.continue.dev/customize/model-providers/more/llamacpp
-echo.
-echo  Qwen / Ollama qwen3.8:
-echo    https://ollama.com/library/qwen3.8
-echo    https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF
-echo.
-echo  Qwen3.5 fast local-agent model:
-echo    https://huggingface.co/unsloth/Qwen3.5-9B-GGUF
-echo.
-echo  AMD Vulkan and UMA guidance:
-echo    https://www.amd.com/en/resources/support-articles/faqs/PA-280.html
-echo.
-echo  --------------------------------------------------------------------------------------------------------------
-echo  Created by Matt Hurley - matthurley.dev
-echo  ----------------------------------------------------------------------------------------------------------------
-echo.
-call :wait_for_key
-goto :menu
+exit /b 0
 
-:view_log
-cls
-color 0F
-echo.
-echo  VIEWING THE LATEST RUN LOG
-echo  The log is stored under the managed install directory.
-echo.
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action ViewLog
-echo.
-call :wait_for_key
-goto :menu
-
-:read_active_model
+:read_status
 set "ACTIVE_ALIAS="
 set "ACTIVE_NAME="
-if not exist "%INSTALL_ROOT%\active-model.json" exit /b 0
-for /f "usebackq tokens=1* delims=|" %%A in (`powershell.exe -NoLogo -NoProfile -Command "try { $m = ConvertFrom-Json (Get-Content -Raw -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp\active-model.json')); Write-Output ($m.alias + '|' + $m.name) } catch { }"`) do (
-    set "ACTIVE_ALIAS=%%A"
-    set "ACTIVE_NAME=%%B"
+set "ACTIVE_CTX="
+set "SERVER_STATE=stopped"
+set "VSCODE_STATE=no"
+for /f "usebackq tokens=1-5 delims=|" %%A in (`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action Status ^<nul 2^>nul`) do (
+    if not "%%A"=="-" set "ACTIVE_ALIAS=%%A"
+    if not "%%B"=="-" set "ACTIVE_NAME=%%B"
+    if not "%%C"=="-" set "ACTIVE_CTX=%%C"
+    set "SERVER_STATE=%%D"
+    set "VSCODE_STATE=%%E"
 )
+exit /b 0
+
+:next_step
+if not defined ACTIVE_ALIAS (
+    set "NEXT_STEP=Choose [1] to scan your PC and set up your first model."
+    exit /b 0
+)
+if "%SERVER_STATE%"=="stopped" (
+    set "NEXT_STEP=Choose [2] to start the AI server."
+    exit /b 0
+)
+if "%SERVER_STATE%"=="loading" (
+    set "NEXT_STEP=The model is loading. Wait a moment, then choose [5] to check it."
+    exit /b 0
+)
+if not "%VSCODE_STATE%"=="yes" (
+    set "NEXT_STEP=Choose [6] to use this model in VS Code Copilot Chat."
+    exit /b 0
+)
+set "NEXT_STEP=All set. In Copilot Chat, pick %ACTIVE_NAME% - llama.cpp local."
+exit /b 0
+
+:server_ready
+set "READY=0"
+curl.exe -s -m 2 "%API_URL%/health" 2>nul | findstr /r /c:"status.:.ok" >nul && set "READY=1"
 exit /b 0
 
 :wait_for_key
 if defined LLAMACPP_NO_PAUSE exit /b 0
-pause
+echo  %DIM%  Press any key to continue...%R%
+pause >nul
 exit /b 0
 
 :done
 cls
-color 0A
 echo.
-echo  ========================================================================================================
-echo   Thank you for using the llama.cpp for Windows command center.
-echo   Created by Matt Hurley - matthurley.dev
-echo  ========================================================================================================
+echo  %CYAN%%B%  Thanks for using the llama.cpp Command Center.%R%
 echo.
-echo  Official project: https://github.com/ggml-org/llama.cpp
-echo  VS Code extension: https://marketplace.visualstudio.com/items?itemName=ggml-org.llama-vscode
+call :read_status
+if "%SERVER_STATE%"=="running" (
+    echo   %DIM%The AI server is still running in its own window, so VS Code can keep using it.%R%
+    echo   %DIM%Close that window, or run this again and choose [3], to stop it.%R%
+    echo.
+)
+echo   %DIM%Created by Matt Hurley - matthurley.dev%R%
+echo   %DIM%https://github.com/theantipopau/llamacpp-amd-command-center%R%
 echo.
 exit /b 0

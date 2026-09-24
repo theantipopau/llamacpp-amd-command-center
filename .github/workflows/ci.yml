@@ -52,7 +52,12 @@ jobs:
         env:
           LLAMACPP_NO_PAUSE: '1'
         run: |
-          (echo x& echo 0) | call .\Start-LlamaCpp.cmd > menu.log 2>&1
+          rem A redirected file feeds set /p one line at a time; a pipe only delivers the first line.
+          (echo x& echo 5& echo 8& echo 0) > choices.txt
+          call .\Start-LlamaCpp.cmd < choices.txt > menu.log 2>&1
           type menu.log
+          findstr /C:"was unexpected at this time" menu.log >nul && (echo Batch syntax error.& exit /b 1)
           findstr /C:"Please choose a number from the menu." menu.log >nul || (echo Invalid input was not handled.& exit /b 1)
-          findstr /C:"Thank you for using" menu.log >nul || (echo Menu did not exit cleanly.& exit /b 1)
+          findstr /C:"Server is running" menu.log >nul || (echo Health check did not run.& exit /b 1)
+          findstr /C:"THE FIVE STEPS" menu.log >nul || (echo Beginner guide did not open.& exit /b 1)
+          findstr /C:"Thanks for using" menu.log >nul || (echo Menu did not exit cleanly.& exit /b 1)

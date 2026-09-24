@@ -80,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -332,13 +332,19 @@ function Pause-Screen {
 }
 
 function Show-Banner {
-    Write-Host '  ╔══════════════════════════════════════════════════════════════════════════════╗' -ForegroundColor DarkCyan
-    Write-Host '  ║  ' -NoNewline -ForegroundColor DarkCyan
+    # Built from a fixed inner width so the right border always lines up.
+    $inner = 80
+    $h = [string][char]0x2550; $v = [string][char]0x2551; $dot = [string][char]0x2022
+    $right = "LOCAL $dot PRIVATE $dot GPU+CPU  "
+    $pad = $inner - 2 - 'LLAMA.CPP // AMD COMMAND CENTER'.Length - $right.Length
+    Write-Host ('  ' + [char]0x2554 + ($h * $inner) + [char]0x2557) -ForegroundColor DarkCyan
+    Write-Host "  $v  " -NoNewline -ForegroundColor DarkCyan
     Write-Host 'LLAMA.CPP' -NoNewline -ForegroundColor White
     Write-Host ' // ' -NoNewline -ForegroundColor DarkGray
     Write-Host 'AMD COMMAND CENTER' -NoNewline -ForegroundColor Magenta
-    Write-Host '                                      LOCAL • PRIVATE • GPU+CPU  ║' -ForegroundColor DarkCyan
-    Write-Host '  ╚══════════════════════════════════════════════════════════════════════════════╝' -ForegroundColor DarkCyan
+    Write-Host ((' ' * $pad) + $right) -NoNewline -ForegroundColor DarkCyan
+    Write-Host $v -ForegroundColor DarkCyan
+    Write-Host ('  ' + [char]0x255A + ($h * $inner) + [char]0x255D) -ForegroundColor DarkCyan
     Write-Host '  Created by Matt Hurley - matthurley.dev' -ForegroundColor DarkGray
 }
 
@@ -683,6 +689,11 @@ function Get-ModelAssessment {
         if ($headroom -ge 4) { $status = 'EXCELLENT'; $color = 'Green'; $recommended = $true }
         elseif ($headroom -ge 1) { $status = 'GOOD'; $color = 'Cyan'; $recommended = $true }
         elseif ($headroom -ge -1) { $status = 'TIGHT'; $color = 'Yellow'; $recommended = $true }
+        # On a discrete Radeon, a model that spills out of VRAM still runs but much more
+        # slowly; say so plainly rather than rating it EXCELLENT.
+        if ($recommended -and $Hardware.HasAmdGpu -and $Hardware.MaxAmdVramGiB -ge 4 -and $vramHeadroom -lt 1.5) {
+            $status = 'SLOWER'; $color = 'Yellow'
+        }
         $assessments += [pscustomobject]@{
             Model = $model
             HeadroomGiB = [Math]::Round($headroom, 1)
@@ -783,15 +794,15 @@ function Show-HardwareAdvisor {
 
     Write-Host "`n  ╭─ RECOMMENDED FOR THIS MACHINE ───────────────────────────────────────────────╮" -ForegroundColor DarkGreen
     Write-Host "  │  ◆ $($recommended.Name)  [$($recommended.Tag)]" -ForegroundColor Green
-    Write-Host "  │  $($recommended.Description)" -ForegroundColor Gray
+    Write-Host "  │  $(Limit-Text $recommended.Description 76)" -ForegroundColor Gray
     $context = Get-SuggestedContext -Model $recommended -Hardware $Hardware
     Write-Host "  │  Suggested start: $context context tokens, Q4/Q8 weights, Flash Attention on." -ForegroundColor DarkGray
     $larger = @($assessment | Where-Object { $_.Recommended -and -not $_.GpuResident -and $_.Model.Rank -gt $recommended.Rank } | Select-Object -First 1)
     if ($larger.Count -gt 0) {
         Write-Host "  │  QUALITY OPTION: $($larger[0].Model.Name) is stronger but spills into system RAM; expect much slower replies." -ForegroundColor Cyan
     }
-    Write-Host "  BACKEND: $(if ($Hardware.RocmRecommended) { 'AMD ROCm 7.2.1 (validated Windows package)' } else { 'Vulkan (portable AMD fallback)' })" -ForegroundColor $(if ($Hardware.RocmRecommended) { 'Green' } else { 'Cyan' })
-    Write-Host "  REASON: $($Hardware.RocmReason)" -ForegroundColor DarkGray
+    Write-Host "  │  Backend: $(if ($Hardware.RocmRecommended) { 'AMD ROCm 7.2.1 (validated Windows package)' } else { 'Vulkan (portable AMD fallback)' })" -ForegroundColor $(if ($Hardware.RocmRecommended) { 'Green' } else { 'Cyan' })
+    Write-Host "  │  $(Limit-Text $Hardware.RocmReason 76)" -ForegroundColor DarkGray
     if ($recommended.ApproxGiB -gt ($Hardware.RamGiB * 0.75)) {
         Write-WarnLine 'This is an ambitious fit. Expect CPU/UMA participation and reduced speed.'
     }
@@ -1048,6 +1059,17 @@ function Ensure-LlamaCppInstalled {
     $current = Join-Path $InstallRoot 'current'
     $backup = Join-Path $InstallRoot ('.backup-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+
+    if (-not $Force) {
+        $sizeGiB = [Math]::Round(([double]$asset.size / 1GB), 2)
+        $sourceHost = ([Uri][string]$asset.browser_download_url).Host
+        Write-Host "`n  About to download llama.cpp ($backendChoice build $tag, ~$sizeGiB GiB) from $sourceHost." -ForegroundColor Yellow
+        Write-Host "  It is installed to $current. Downloaded models are kept." -ForegroundColor DarkGray
+        if ((Read-ConsoleLine -Prompt '  Type YES to continue') -ine 'YES') {
+            Write-WarnLine 'llama.cpp download cancelled. Nothing was downloaded.'
+            return $null
+        }
+    }
 
     Get-VerifiedDownload -Url $asset.browser_download_url -Destination $archive -ExpectedSize ([long]$asset.size) -ExpectedSha256 $digest
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
@@ -1434,6 +1456,124 @@ function Start-ActiveServer {
     try { & $server @arguments } finally { Pop-Location }
 }
 
+function Get-CommandCenterStatus {
+    # One pipe-separated line for the batch menu: alias|name|context|server|vscode
+    # server: running, loading (process up, model not ready) or stopped.
+    # vscode: yes (active model configured), stale (other model configured) or no.
+    $active = Get-ActiveModel
+    # '-' marks an empty field: cmd's for /f collapses consecutive delimiters.
+    $alias = '-'; $name = '-'; $context = '-'
+    if ($null -ne $active) { $alias = [string]$active.alias; $name = [string]$active.name; $context = [string]$active.context_size }
+
+    $server = 'stopped'
+    if ($null -ne (Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)) {
+        $server = 'loading'
+        try {
+            if ((Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2).status -eq 'ok') { $server = 'running' }
+        } catch { }
+    }
+
+    $vscode = 'no'
+    $configPath = Join-Path $env:APPDATA 'Code\User\chatLanguageModels.json'
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        try {
+            $parsed = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            $local = @($parsed | Where-Object { $null -ne $_ -and $_.name -eq 'llama.cpp local' } | Select-Object -First 1)
+            if ($local.Count -gt 0) {
+                $ids = @($local[0].models | ForEach-Object { $_.id })
+                $vscode = if ($ids -contains $alias) { 'yes' } else { 'stale' }
+            }
+        } catch { }
+    }
+    return "$alias|$name|$context|$server|$vscode"
+}
+
+function Test-LocalServer {
+    # Plain-language end-to-end check: server, model, chat reply, tool call, context.
+    $base = "http://127.0.0.1:$Port"
+    $active = Get-ActiveModel
+    $alias = if ($null -ne $active) { [string]$active.alias } else { '' }
+    $results = @()
+    function Send-Json($Uri, $Body, $Timeout) {
+        $json = $Body | ConvertTo-Json -Depth 12
+        return Invoke-RestMethod -Method Post -Uri $Uri -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec $Timeout
+    }
+    function Write-Check([string] $Label, [bool] $Ok, [string] $Detail) {
+        $badge = if ($Ok) { ' PASS ' } else { ' FAIL ' }
+        Write-Host '  ' -NoNewline
+        Write-Host $badge -NoNewline -ForegroundColor Black -BackgroundColor $(if ($Ok) { 'Green' } else { 'Red' })
+        Write-Host ("  {0,-22}" -f $Label) -NoNewline -ForegroundColor White
+        Write-Host $Detail -ForegroundColor $(if ($Ok) { 'Gray' } else { 'Yellow' })
+    }
+
+    Write-Host ''
+    Write-Host '  Checking the local AI server step by step...' -ForegroundColor Cyan
+    Write-Host ''
+
+    $healthy = $false
+    try { $healthy = ((Invoke-RestMethod -Uri "$base/health" -TimeoutSec 5).status -eq 'ok') } catch { }
+    Write-Check 'Server is running' $healthy $(if ($healthy) { "$base" } else { 'Not reachable. Start it with menu option [2] and wait until it says READY.' })
+    if (-not $healthy) { return $false }
+
+    $modelOk = $false; $served = ''
+    try { $served = [string]((Invoke-RestMethod -Uri "$base/v1/models" -TimeoutSec 10).data[0].id); $modelOk = -not [string]::IsNullOrWhiteSpace($served) } catch { }
+    Write-Check 'Model is loaded' $modelOk $(if ($modelOk) { $served } else { 'The server did not report a model. Restart it with [3] then [2].' })
+    if (-not $modelOk) { return $false }
+
+    $chatOk = $false; $chatDetail = ''
+    try {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $r = Send-Json "$base/v1/chat/completions" @{ model = $served; max_tokens = 32; messages = @(@{ role = 'user'; content = 'Reply with exactly one word: READY' }) } 120
+        $sw.Stop()
+        $text = [string]$r.choices[0].message.content
+        $chatOk = -not [string]::IsNullOrWhiteSpace($text)
+        $speed = if ($r.PSObject.Properties.Name -contains 'timings') { " at $([Math]::Round($r.timings.predicted_per_second)) tokens/s" } else { '' }
+        $chatDetail = if ($chatOk) { "replied `"$($text.Trim())`" in $([Math]::Round($sw.Elapsed.TotalSeconds,1)) s$speed" } else { 'Empty reply. Re-activate the model from [1] so the launcher is regenerated.' }
+    } catch { $chatDetail = "Request failed: $($_.Exception.Message)" }
+    Write-Check 'Chat reply' $chatOk $chatDetail
+
+    $toolOk = $false; $toolDetail = ''
+    $toolCapable = ($null -eq $active) -or -not ($active.PSObject.Properties.Name -contains 'tool_calling') -or [bool]$active.tool_calling
+    if ($toolCapable) {
+        try {
+            $tools = @(@{ type = 'function'; function = @{ name = 'get_weather'; description = 'Get the current weather for a city'; parameters = @{ type = 'object'; properties = @{ city = @{ type = 'string' } }; required = @('city') } } })
+            $r = Send-Json "$base/v1/chat/completions" @{ model = $served; max_tokens = 256; tools = $tools; messages = @(@{ role = 'user'; content = 'What is the weather in London? Use the tool.' }) } 120
+            $message = $r.choices[0].message
+            $calls = @(if ($message.PSObject.Properties.Name -contains 'tool_calls') { $message.tool_calls })
+            $toolOk = $calls.Count -gt 0
+            $toolDetail = if ($toolOk) { "called $($calls[0].function.name) $($calls[0].function.arguments)" } else { 'No tool call returned. VS Code Agent mode needs this; re-activate the model from [1].' }
+        } catch { $toolDetail = "Request failed: $($_.Exception.Message)" }
+        Write-Check 'Tool calling (Agent)' $toolOk $toolDetail
+    } else {
+        $toolOk = $true
+        Write-Host '  ' -NoNewline; Write-Host ' SKIP ' -NoNewline -ForegroundColor Black -BackgroundColor DarkGray
+        Write-Host '  Tool calling (Agent)   This model is not tool-capable; use it for chat only.' -ForegroundColor Gray
+    }
+
+    $contextOk = $false; $contextDetail = ''
+    try {
+        $props = Invoke-RestMethod -Uri "$base/props" -TimeoutSec 10
+        $perConversation = [int]$props.default_generation_settings.n_ctx
+        $slots = if ($props.PSObject.Properties.Name -contains 'total_slots') { [int]$props.total_slots } else { 1 }
+        $contextOk = $perConversation -ge 32768
+        $contextDetail = "$perConversation tokens per conversation, $slots at once"
+        if (-not $contextOk) { $contextDetail += ' (VS Code Agent mode needs 32768 or more; re-activate with -ContextSize 65536)' }
+    } catch { $contextDetail = 'Could not read server settings.' }
+    Write-Check 'Room for Agent mode' $contextOk $contextDetail
+
+    $all = $healthy -and $modelOk -and $chatOk -and $toolOk -and $contextOk
+    Write-Host ''
+    if ($all) {
+        Write-Host "  All checks passed. VS Code can use $served." -ForegroundColor Green
+    } else {
+        Write-Host '  Some checks failed. Follow the hint next to each FAIL, then run this test again.' -ForegroundColor Yellow
+    }
+    if ($alias -and $served -and $alias -ne $served) {
+        Write-Host "  Note: the server is running $served, but the active model is $alias. Stop and start the server to switch." -ForegroundColor Yellow
+    }
+    return $all
+}
+
 function Install-VsCodeChatEndpoint {
     $active = Get-ActiveModel
     if ($null -eq $active) {
@@ -1498,7 +1638,7 @@ function Install-VsCodeChatEndpoint {
         Write-Host '  Your Copilot and unrelated custom providers will be preserved.' -ForegroundColor Gray
         if ((Read-ConsoleLine -Prompt '  Type YES to update VS Code Chat') -ine 'YES') {
             Write-WarnLine 'VS Code Chat configuration cancelled.'
-            return
+            return $false
         }
     } elseif (-not $Force) {
         Write-Host "`n  About to configure VS Code Chat with:" -ForegroundColor Yellow
@@ -1507,7 +1647,7 @@ function Install-VsCodeChatEndpoint {
         Write-Host "    Config: $configPath" -ForegroundColor DarkGray
         if ((Read-ConsoleLine -Prompt '  Type YES to configure VS Code Chat') -ine 'YES') {
             Write-WarnLine 'VS Code Chat configuration cancelled.'
-            return
+            return $false
         }
     }
 
@@ -1525,6 +1665,7 @@ function Install-VsCodeChatEndpoint {
     if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Write-Info "Backup: $backupPath" }
     Write-Info 'In VS Code: run Developer: Reload Window, then select the model from Chat: Manage Language Models.'
     Write-Info 'The model remains local; the API key value is only a placeholder.'
+    return $true
 }
 
 function Remove-Installation {
@@ -1613,8 +1754,15 @@ function Show-Dashboard {
         try {
             switch ($choice) {
                 '1' {
-                    $tag = Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend
-                    if (Confirm-ModelDownload -Model $recommended -Hardware $hardware) {
+                    if (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')) {
+                        Write-Info 'llama.cpp is already installed, so setup goes straight to the model. Use [5] to update llama.cpp.'
+                        $tag = 'installed'
+                    } else {
+                        $tag = Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend
+                    }
+                    if ($null -eq $tag) {
+                        Write-WarnLine 'Setup cancelled. Nothing was changed.'
+                    } elseif (Confirm-ModelDownload -Model $recommended -Hardware $hardware) {
                         Install-Model -Model $recommended -Hardware $hardware
                         Write-Success "Ready: llama.cpp $tag + $($recommended.Name)"
                     } else { Write-WarnLine 'Model download cancelled; llama.cpp remains installed.' }
@@ -1623,10 +1771,13 @@ function Show-Dashboard {
                 '2' {
                     $selected = Select-ModelInteractively -Hardware $hardware
                     if ($null -ne $selected) {
+                        $ready = $true
                         if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'))) {
-                            [void](Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend)
+                            $ready = $null -ne (Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend)
                         }
-                        if (Confirm-ModelDownload -Model $selected -Hardware $hardware) {
+                        if (-not $ready) {
+                            Write-WarnLine 'llama.cpp is needed before a model can be activated. Nothing was changed.'
+                        } elseif (Confirm-ModelDownload -Model $selected -Hardware $hardware) {
                             Install-Model -Model $selected -Hardware $hardware
                         } else { Write-WarnLine 'Download cancelled.' }
                     }
@@ -1634,7 +1785,7 @@ function Show-Dashboard {
                 }
                 '3' { Start-ActiveServer -Hardware $hardware; Pause-Screen 'Press Enter after stopping the server' }
                 '4' { Show-HardwareAdvisor -Hardware $hardware; Pause-Screen }
-                '5' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend); Pause-Screen }
+                '5' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend); Pause-Screen }
                 '6' { Show-Diagnostics -Hardware $hardware; Pause-Screen }
                 '7' {
                     $answer = Read-ConsoleLine -Prompt '  Type DELETE to remove llama.cpp and ALL downloaded models'
@@ -1661,6 +1812,16 @@ function Show-Dashboard {
 try {
     if ($Uninstall) { $Action = 'Uninstall' }
     if ($DryRun) { $Action = 'Advisor' }
+
+    if ($Action -eq 'Status') {
+        Write-Output (Get-CommandCenterStatus)
+        exit 0
+    }
+
+    if ($Action -eq 'SelfTest') {
+        $passed = Test-LocalServer
+        if ($passed) { exit 0 } else { exit 1 }
+    }
 
     if ($Action -eq 'ViewLog') {
         Show-LatestRunLog
@@ -1704,11 +1865,18 @@ try {
     switch ($Action) {
         'Advisor' { Show-HardwareAdvisor -Hardware $hardware }
         'Diagnostics' { Show-Diagnostics -Hardware $hardware }
-        'VSCodeChat' { Install-VsCodeChatEndpoint }
-        'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend) }
+        'VSCodeChat' {
+            # Exit code 2 tells the batch menu the user cancelled and nothing changed.
+            if (-not (Install-VsCodeChatEndpoint)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
+        }
+        'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
         'Install' {
-            $tag = Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend
+            $tag = Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend
+            if ($null -eq $tag) {
+                Complete-RunLogging -Status 'cancelled'
+                exit 2
+            }
             if (-not $SkipModel) {
                 $model = if ($ModelId -ieq 'auto') { Get-RecommendedModel -Hardware $hardware } else { Get-ModelById -Id $ModelId }
                 if (Confirm-ModelDownload -Model $model -Hardware $hardware) {
@@ -1723,7 +1891,10 @@ try {
             $model = if ($ModelId -ieq 'auto') { Select-ModelInteractively -Hardware $hardware } else { Get-ModelById -Id $ModelId }
             if ($null -ne $model) {
                 if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'))) {
-                    [void](Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend)
+                    if ($null -eq (Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend)) {
+                        Complete-RunLogging -Status 'cancelled'
+                        exit 2
+                    }
                 }
                 if (Confirm-ModelDownload -Model $model -Hardware $hardware) {
                     Install-Model -Model $model -Hardware $hardware
