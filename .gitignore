@@ -1,0 +1,22 @@
+# Freebuff workspace metadata
+.freebuff/
+
+# Generated local integration files
+Continue-llamacpp-config.yaml
+
+# Runtime output and logs
+*.log
+*.tmp
+*.bak
+
+# Local model/runtime directories
+models/
+runtime/
+backups/
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
