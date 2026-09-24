@@ -38,7 +38,7 @@ You do not need to understand ROCm, Vulkan, GGUF files, context sizes, or API se
 5. Choose **[6]** to confirm the local API is working.
 6. Choose **[3]** for the official VS Code extension, or **[4]** for a Continue template.
 
-If you are unsure which option to choose, start with **[1]**. If you only want to read first, choose **[7] Show the complete walkthrough**.
+If you are unsure which option to choose, start with **[1]**. If you only want to read first, choose **[7] Show the complete walkthrough**. Choose **[9]** any time to view the latest run log.
 
 ## Quick start
 
@@ -189,6 +189,29 @@ Update the AMD Adrenalin driver, reboot Windows, and run the command center agai
 ### You want to undo the setup
 
 The uninstall option removes the managed llama.cpp installation and downloaded models. It does not remove VS Code, Copilot, or the source repository. It asks for confirmation before deleting anything.
+
+## Run logs and diagnostics
+
+Every command-center run creates a persistent log bundle under:
+
+```text
+%LOCALAPPDATA%\Programs\llama.cpp\logs
+```
+
+The bundle contains:
+
+- `run-*.log` — human-readable console transcript;
+- `run-*.jsonl` — structured JSON events;
+- `run-*-summary.json` — final status, action, backend, model, and timing;
+- `latest.log` and `latest-summary.json` — easy-to-find copies of the latest completed run.
+
+Choose **[9] View the latest run log** from the batch menu, or run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action ViewLog
+```
+
+Logs redact common API-key, token, authorization, and bearer patterns. They do not intentionally record secrets. When reporting a problem, attach the human-readable log and the JSON summary after reviewing them for anything personal.
 
 ## Safety and privacy
 

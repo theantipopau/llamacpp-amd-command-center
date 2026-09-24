@@ -70,7 +70,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'Uninstall')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'Uninstall', 'ViewLog')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -114,26 +114,163 @@ function Clear-Screen {
     try { Clear-Host } catch { }
 }
 
+$script:RunLogDirectory = $null
+$script:RunLogPath = $null
+$script:RunJsonlPath = $null
+$script:RunSummaryPath = $null
+$script:RunStarted = $null
+$script:RunTranscriptStarted = $false
+
+function Get-RunLogDirectory {
+    if ([string]::IsNullOrWhiteSpace($script:RunLogDirectory)) {
+        $script:RunLogDirectory = Join-Path $InstallRoot 'logs'
+    }
+    return $script:RunLogDirectory
+}
+
+function Protect-LogText {
+    param([AllowNull()][string] $Text)
+    if ($null -eq $Text) { return '' }
+    $safe = [string]$Text
+    $safe = [regex]::Replace($safe, '(?i)(api[_ -]?key|token|authorization|bearer)\s*[:=]\s*\S+', '$1=[REDACTED]')
+    $safe = [regex]::Replace($safe, '(?i)sk-[A-Za-z0-9_-]{10,}', '[REDACTED]')
+    return $safe
+}
+
+function Write-RunLogEvent {
+    param(
+        [string] $Event = 'info',
+        [AllowNull()][string] $Message = '',
+        [hashtable] $Data = @{}
+    )
+    if ([string]::IsNullOrWhiteSpace($script:RunJsonlPath)) { return }
+    $record = [ordered]@{
+        timestamp = (Get-Date).ToUniversalTime().ToString('o')
+        event = $Event
+        message = Protect-LogText $Message
+        data = $Data
+    }
+    try {
+        ($record | ConvertTo-Json -Compress -Depth 8) | Add-Content -LiteralPath $script:RunJsonlPath -Encoding UTF8
+    } catch { }
+}
+
+function Start-RunLogging {
+    try {
+        $directory = Get-RunLogDirectory
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        $runId = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + $PID
+        $script:RunLogPath = Join-Path $directory ("run-$runId.log")
+        $script:RunJsonlPath = Join-Path $directory ("run-$runId.jsonl")
+        $script:RunSummaryPath = Join-Path $directory ("run-$runId-summary.json")
+        $script:RunStarted = Get-Date
+        Set-Content -LiteralPath $script:RunLogPath -Value ("llama.cpp AMD Command Center run $runId") -Encoding UTF8
+        try {
+            Start-Transcript -Path $script:RunLogPath -Append | Out-Null
+            $script:RunTranscriptStarted = $true
+        } catch {
+            $script:RunTranscriptStarted = $false
+        }
+        Write-RunLogEvent -Event 'run_started' -Message 'Run started.' -Data @{
+            action = $Action
+            backend = $Backend
+            model_id = $ModelId
+            install_root = $InstallRoot
+            port = $Port
+            dry_run = [bool]$DryRun
+            force = [bool]$Force
+        }
+    } catch {
+        $script:RunLogPath = $null
+        $script:RunJsonlPath = $null
+        $script:RunSummaryPath = $null
+    }
+}
+
+function Complete-RunLogging {
+    param(
+        [ValidateSet('completed', 'failed', 'cancelled')][string] $Status = 'completed',
+        [AllowNull()][string] $Message = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($script:RunLogPath)) { return }
+    $ended = Get-Date
+    Write-RunLogEvent -Event 'run_finished' -Message $Message -Data @{
+        status = $Status
+        duration_seconds = [Math]::Round(($ended - $script:RunStarted).TotalSeconds, 2)
+    }
+    if ($script:RunTranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+        $script:RunTranscriptStarted = $false
+    }
+    $summary = [ordered]@{
+        run_id = [IO.Path]::GetFileNameWithoutExtension($script:RunLogPath)
+        started_at = $script:RunStarted.ToUniversalTime().ToString('o')
+        finished_at = $ended.ToUniversalTime().ToString('o')
+        duration_seconds = [Math]::Round(($ended - $script:RunStarted).TotalSeconds, 2)
+        status = $Status
+        action = $Action
+        backend = $Backend
+        model_id = $ModelId
+        install_root = $InstallRoot
+        port = $Port
+        log_file = $script:RunLogPath
+        jsonl_file = $script:RunJsonlPath
+        message = Protect-LogText $Message
+    }
+    try {
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:RunSummaryPath -Encoding UTF8
+        Copy-Item -LiteralPath $script:RunLogPath -Destination (Join-Path (Get-RunLogDirectory) 'latest.log') -Force
+        Copy-Item -LiteralPath $script:RunSummaryPath -Destination (Join-Path (Get-RunLogDirectory) 'latest-summary.json') -Force
+    } catch { }
+}
+
+function Show-LatestRunLog {
+    $directory = Get-RunLogDirectory
+    $latest = Join-Path $directory 'latest.log'
+    if ((-not [string]::IsNullOrWhiteSpace($script:RunLogPath)) -and (Test-Path -LiteralPath $script:RunLogPath -PathType Leaf)) {
+        $latest = $script:RunLogPath
+    }
+    if (-not (Test-Path -LiteralPath $latest -PathType Leaf)) {
+        $candidate = Get-ChildItem -LiteralPath $directory -Filter 'run-*.log' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($null -eq $candidate) {
+            Write-Host '  No run log exists yet. Start the command center once to create one.' -ForegroundColor Yellow
+            return
+        }
+        $latest = $candidate.FullName
+    }
+    Clear-Screen
+    Show-Banner
+    Write-Host "  LATEST RUN LOG" -ForegroundColor White
+    Write-Host "  $latest" -ForegroundColor Cyan
+    Write-Host "  Showing the final 80 lines. Full log: $latest" -ForegroundColor DarkGray
+    Write-Host ''
+    Get-Content -LiteralPath $latest -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+}
+
 function Write-Step {
     param([string] $Message)
+    Write-RunLogEvent -Event 'step' -Message $Message
     Write-Host "`n  ║ " -NoNewline -ForegroundColor DarkCyan
     Write-Host $Message -ForegroundColor Cyan
 }
 
 function Write-Info {
     param([string] $Message)
+    Write-RunLogEvent -Event 'info' -Message $Message
     Write-Host "  ║ " -NoNewline -ForegroundColor DarkGray
     Write-Host $Message -ForegroundColor Gray
 }
 
 function Write-Success {
     param([string] $Message)
+    Write-RunLogEvent -Event 'success' -Message $Message
     Write-Host "  ║ " -NoNewline -ForegroundColor DarkGreen
     Write-Host $Message -ForegroundColor Green
 }
 
 function Write-WarnLine {
     param([string] $Message)
+    Write-RunLogEvent -Event 'warning' -Message $Message
     Write-Host "  ║ " -NoNewline -ForegroundColor DarkYellow
     Write-Host $Message -ForegroundColor Yellow
 }
@@ -823,6 +960,12 @@ function Ensure-LlamaCppInstalled {
     if ($backendChoice -eq 'Auto') {
         $backendChoice = if ($Hardware.RocmRecommended) { 'ROCm' } else { 'Vulkan' }
     }
+    Write-RunLogEvent -Event 'backend_selected' -Message "Selected backend: $backendChoice" -Data @{
+        requested = $RequestedBackend
+        selected = $backendChoice
+        rocm_recommended = [bool]$Hardware.RocmRecommended
+        gpu = [string]$Hardware.RocmGpu
+    }
     if (($backendChoice -eq 'ROCm') -and (-not $Hardware.RocmRecommended) -and -not $Force) {
         throw 'ROCm was requested, but this Radeon is not in the current AMD Windows ROCm matrix. Use -Backend Vulkan or -Force.'
     }
@@ -1038,6 +1181,15 @@ function Install-Model {
     Write-Step "Resolving verified model metadata for $($Model.Name)"
     $descriptor = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.File
     Write-Info "Revision $($descriptor.Revision.Substring(0,12)); SHA-256 $($descriptor.Sha256.Substring(0,12))..."
+    Write-RunLogEvent -Event 'model_metadata' -Message "Resolved model metadata for $($Model.Name)" -Data @{
+        model_id = $Model.Id
+        repo = $Model.Repo
+        file = $Model.File
+        projector = [string]$Model.Projector
+        revision = $descriptor.Revision
+        sha256 = $descriptor.Sha256
+        size_bytes = $descriptor.Size
+    }
     Get-VerifiedDownload -Url $descriptor.Url -Destination (Join-Path $modelsRoot $Model.File) -ExpectedSize $descriptor.Size -ExpectedSha256 $descriptor.Sha256
 
     if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
@@ -1164,6 +1316,12 @@ function Start-ActiveServer {
     $active = Get-ActiveModel
     if ($null -eq $active) { throw 'No model is active. Use the model browser to install and activate one.' }
     if (-not (Test-Path -LiteralPath ([string]$active.model_path) -PathType Leaf)) { throw 'The active model file is missing. Reinstall it from the model browser.' }
+    Write-RunLogEvent -Event 'server_start' -Message "Starting active model: $($active.name)" -Data @{
+        model_id = [string]$active.id
+        alias = [string]$active.alias
+        context_size = [int]$active.context_size
+        port = $Port
+    }
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
     $arguments = @(
@@ -1275,10 +1433,12 @@ function Show-Dashboard {
         Write-Host '   [6]  ⚙  Full diagnostics' -ForegroundColor White
         Write-Host '   [7]  ×  Uninstall command center' -ForegroundColor White
         Write-Host '   [8]  ⚡ Backend selector — ROCm / Vulkan' -ForegroundColor White
+        Write-Host '   [9]  📄 View latest run log' -ForegroundColor White
         Write-Host '   [0]  Exit' -ForegroundColor DarkGray
         Write-Host '  ═══════════════════════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
 
         $choice = Read-ConsoleLine -Prompt '  Select'
+        Write-RunLogEvent -Event 'menu_choice' -Message "Dashboard selection: $choice"
         try {
             switch ($choice) {
                 '1' {
@@ -1311,6 +1471,7 @@ function Show-Dashboard {
                     Write-WarnLine 'Uninstall cancelled.'; Pause-Screen
                 }
                 '8' { Select-BackendInteractively }
+                '9' { Show-LatestRunLog; Pause-Screen }
                 '0' { return }
                 default { Write-WarnLine 'Choose a menu number.'; Start-Sleep -Milliseconds 400 }
             }
@@ -1330,19 +1491,42 @@ try {
     if ($Uninstall) { $Action = 'Uninstall' }
     if ($DryRun) { $Action = 'Advisor' }
 
+    if ($Action -eq 'ViewLog') {
+        Show-LatestRunLog
+        exit 0
+    }
+
+    Start-RunLogging
+
     if ($Action -eq 'Dashboard') {
         Show-Dashboard
+        Complete-RunLogging -Status 'completed'
         exit 0
     }
 
     if ($Action -eq 'Uninstall') {
         Remove-Installation
+        Complete-RunLogging -Status 'completed'
         exit 0
     }
 
     $hardware = Get-HardwareProfile
+    Write-RunLogEvent -Event 'hardware_detected' -Message 'Hardware profile detected.' -Data @{
+        cpu = [string]$hardware.CpuName
+        cores = $hardware.CpuCores
+        threads = $hardware.CpuThreads
+        ram_gib = $hardware.RamGiB
+        max_amd_vram_gib = $hardware.MaxAmdVramGiB
+        execution_mode = [string]$hardware.ExecutionMode
+        profile = [string]$hardware.Profile
+        has_amd_gpu = [bool]$hardware.HasAmdGpu
+        has_integrated_gpu = [bool]$hardware.HasAmdIntegratedGpu
+        vulkan_loader = [bool]$hardware.VulkanLoader
+        recommended_model = [string](Get-RecommendedModel -Hardware $hardware).Id
+    }
     if ($DryRun) {
         Show-HardwareAdvisor -Hardware $hardware
+        Complete-RunLogging -Status 'completed'
         exit 0
     }
 
@@ -1375,10 +1559,14 @@ try {
             }
         }
     }
+    Complete-RunLogging -Status 'completed'
+    exit 0
 } catch {
+    Write-RunLogEvent -Event 'error' -Message $_.Exception.Message
     Write-Host "`n  COMMAND FAILED: $($_.Exception.Message)" -ForegroundColor Red
     if ($_.Exception.Message -match '(?i)driver|vulkan') {
         Write-Host '  Install the current AMD Adrenalin driver from https://www.amd.com/en/support and reboot.' -ForegroundColor Yellow
     }
+    Complete-RunLogging -Status 'failed' -Message $_.Exception.Message
     exit 1
 }

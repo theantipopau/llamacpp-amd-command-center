@@ -13,6 +13,7 @@ Continue-llamacpp-config.yaml
 models/
 runtime/
 backups/
+logs/
 
 # Editor and OS files
 .vscode/

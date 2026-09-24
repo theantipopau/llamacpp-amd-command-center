@@ -100,7 +100,7 @@ models:
     apiBase: http://127.0.0.1:8080
 ```
 
-The batch menu can create `Continue-llamacpp-config.yaml` without overwriting an existing file.
+The batch menu can create `Continue-llamacpp-config.yaml` without overwriting an existing file. Choose **[9]** to view the latest run log at any time.
 
 ### Cline / OpenAI-compatible clients
 
@@ -121,6 +121,16 @@ Claude Code is a separate CLI client. Its documented gateway setup uses `ANTHROP
 - **The model is slow:** choose the model browser or hardware/model advisor and try a smaller model or lower context setting.
 - **The GPU is missing:** update AMD Adrenalin, reboot, and rerun diagnostics.
 - **Starting over:** use the uninstall option in the command center; it asks for confirmation and does not remove VS Code or Copilot.
+
+## Run logs and diagnostics
+
+Each command-center run writes a human-readable transcript, JSONL events, and a JSON summary under:
+
+```text
+%LOCALAPPDATA%\Programs\llama.cpp\logs
+```
+
+Choose **[9]** to view the latest run log. The log bundle is useful for diagnosing driver, download, model-fit, and server-startup issues. Common API-key, token, authorization, and bearer patterns are redacted; review logs before sharing them.
 
 ## Safety model
 

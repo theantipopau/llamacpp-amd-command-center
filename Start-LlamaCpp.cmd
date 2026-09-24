@@ -60,6 +60,7 @@ echo   [5] Show Cline / OpenAI-compatible connection settings
 echo   [6] Test the local llama.cpp OpenAI-compatible API
 echo   [7] Show the complete walkthrough and technical notes
 echo   [8] Show official links and author information
+echo   [9] View the latest run log
 echo   [0] Exit
 echo   ---------------------------------------------------------------------
 echo.
@@ -76,6 +77,7 @@ if "%choice%"=="5" goto :cline_settings
 if "%choice%"=="6" goto :test_api
 if "%choice%"=="7" goto :walkthrough
 if "%choice%"=="8" goto :links
+if "%choice%"=="9" goto :view_log
 if "%choice%"=="0" goto :done
 
 color 0E
@@ -395,6 +397,18 @@ echo.
 echo  -----------------------------------------------------------------------------
 echo  Created by Matt Hurley - matthurley.dev
 echo  -----------------------------------------------------------------------------
+echo.
+call :wait_for_key
+goto :menu
+
+:view_log
+cls
+color 0F
+echo.
+echo  VIEWING THE LATEST RUN LOG
+echo  The log is stored under the managed install directory.
+echo.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action ViewLog
 echo.
 call :wait_for_key
 goto :menu
