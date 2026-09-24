@@ -899,22 +899,22 @@ function Get-ActiveModel {
 function New-Launchers {
     param($ActiveModel, $EffectiveContext)
     $current = Join-Path $InstallRoot 'current'
-    $modelPath = [string]$ActiveModel.ModelPath
-    $mmprojPath = [string]$ActiveModel.MmprojPath
-    $alias = [string]$ActiveModel.Alias
+    $modelPath = [string]$ActiveModel.model_path
+    $mmprojPath = [string]$ActiveModel.mmproj_path
+    $alias = [string]$ActiveModel.alias
     $mmprojArg = ''
     if (-not [string]::IsNullOrWhiteSpace($mmprojPath)) {
         $mmprojArg = "  --mmproj `"$mmprojPath`" ^"
     }
     $reasoningArg = ''
-    if ([bool]$ActiveModel.Reasoning) {
+    if ([bool]$ActiveModel.reasoning) {
         $reasoningArg = "  --reasoning-format deepseek ^`r`n  --reasoning-budget 2048 ^"
     }
 
     $start = @"
 @echo off
 setlocal
-title llama.cpp - $($ActiveModel.Name) - AMD backend
+title llama.cpp - $($ActiveModel.name) - AMD backend
 pushd "$current"
 llama-server.exe ^
   --model "$modelPath" ^
@@ -1056,8 +1056,17 @@ function Confirm-ModelDownload {
     if ($Force) { return $true }
     $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Model.Id -eq $Model.Id }) | Select-Object -First 1
     $status = if ($null -eq $assessment) { 'UNKNOWN' } else { $assessment.Status }
-    Write-Host "`n  About to download $($Model.Name): ~$([Math]::Round($Model.ApproxGiB,2)) GiB [$status]" -ForegroundColor Yellow
-    $answer = Read-ConsoleLine -Prompt '  Type YES to continue'
+    $modelsRoot = Join-Path $InstallRoot 'models'
+    $modelPath = Join-Path $modelsRoot $Model.File
+    $projectorPath = if ([string]::IsNullOrWhiteSpace([string]$Model.Projector)) { '' } else { Join-Path $modelsRoot $Model.Projector }
+    $filesPresent = (Test-Path -LiteralPath $modelPath -PathType Leaf) -and ([string]::IsNullOrWhiteSpace($projectorPath) -or (Test-Path -LiteralPath $projectorPath -PathType Leaf))
+    if ($filesPresent) {
+        Write-Host "`n  $($Model.Name) is already downloaded. The next step will verify the existing files and activate them." -ForegroundColor Green
+        $answer = Read-ConsoleLine -Prompt '  Type YES to verify and activate'
+    } else {
+        Write-Host "`n  About to download $($Model.Name): ~$([Math]::Round($Model.ApproxGiB,2)) GiB [$status]" -ForegroundColor Yellow
+        $answer = Read-ConsoleLine -Prompt '  Type YES to continue'
+    }
     return ($answer -ieq 'YES')
 }
 

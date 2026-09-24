@@ -26,6 +26,14 @@ Created by **Matt Hurley - [matthurley.dev](https://matthurley.dev)**
 
 The managed installation lives under `%LOCALAPPDATA%\Programs\llama.cpp`; model files are kept outside the source checkout.
 
+## See the actual setup
+
+These screenshots show the intended first-time experience: the hardware-aware dashboard, the verified model download, and the local server launch screen.
+
+| First-time dashboard | Verified installation | Local server launch |
+|---|---|---|
+| ![First-time user dashboard](firsttimeuser.png) | ![Installation screen](installing.png) | ![Local server launch screen](launchscreen.png) |
+
 ## One menu, four layers
 
 | Layer | Purpose |

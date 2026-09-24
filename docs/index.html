@@ -23,6 +23,10 @@
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
     .card, pre { border: 1px solid var(--line); border-radius: 16px; background: #10182ddd; }
     .card { padding: 20px; }
+    .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .gallery figure { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: #10182dcc; }
+    .gallery img { display: block; width: 100%; height: auto; border-radius: 10px; }
+    .gallery figcaption { padding: 10px 4px 2px; color: var(--muted); }
     pre { overflow-x: auto; padding: 18px; color: #d9e7ff; }
     a { color: var(--cyan); }
     table { width: 100%; border-collapse: collapse; margin: 18px 0; background: #10182dcc; }
@@ -69,6 +73,14 @@
     <li>Install the selected backend and model, return to the menu, and choose <strong>[2]</strong> to start the local server.</li>
     <li>Choose <strong>[6]</strong> to test the API, then use <strong>[3]</strong> or <strong>[4]</strong> for VS Code setup.</li>
   </ol>
+
+  <h2>See the actual setup</h2>
+  <p>These screenshots show the intended first-time experience: the hardware-aware dashboard, the verified model download, and the local server launch screen.</p>
+  <div class="gallery">
+    <figure><img src="firsttimeuser.png" alt="First-time user dashboard showing detected AMD hardware and recommended model" loading="lazy"><figcaption>First-time dashboard: hardware, backend, model fit, and next steps.</figcaption></figure>
+    <figure><img src="installing.png" alt="Installation screen downloading and verifying the local Qwen model" loading="lazy"><figcaption>Installation: official download followed by size and SHA-256 verification.</figcaption></figure>
+    <figure><img src="launchscreen.png" alt="Local llama.cpp server launch screen" loading="lazy"><figcaption>Launch screen: the local server and Web UI/API address.</figcaption></figure>
+  </div>
 
   <h2>One menu, four layers</h2>
   <div class="grid">
