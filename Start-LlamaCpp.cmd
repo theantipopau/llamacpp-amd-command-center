@@ -150,20 +150,23 @@ echo.
 echo  This extension provides local completion, chat, and agent features.
 echo  It can also manage llama.cpp environments and local models.
 echo.
-where code >nul 2>&1
-if errorlevel 1 (
+set "CODE_CMD="
+for /f "delims=" %%I in ('where code 2^>nul') do if not defined CODE_CMD set "CODE_CMD=%%I"
+if not defined CODE_CMD for /f "delims=" %%I in ('powershell.exe -NoLogo -NoProfile -Command "$c=Get-Command code -ErrorAction SilentlyContinue; if ($null -ne $c) { $c.Source }"') do if not defined CODE_CMD set "CODE_CMD=%%I"
+if not defined CODE_CMD (
     color 0E
-    echo  VS Code is installed or may be installed, but its command was not found on PATH.
+    echo  VS Code is installed or may be installed, but its command could not be found.
     echo  This is common on Windows and does not mean VS Code is missing.
-    echo  Easiest route: open VS Code and select Extensions, search llama-vscode, and install it.
-    echo  Or add VS Code's bin folder to PATH, reopen this window, and choose [3] again.
+    echo  VS Code may be open already; that is okay.
+    echo  Open VS Code and select Extensions, search llama-vscode, and install it.
     echo  Official download: https://code.visualstudio.com/download
     echo.
     call :wait_for_key
     goto :menu
 )
 echo  Installing the official extension now...
-code --install-extension %EXTENSION_ID%
+echo  Using: "%CODE_CMD%"
+call "%CODE_CMD%" --install-extension %EXTENSION_ID%
 if errorlevel 1 (
     color 0C
     echo  VS Code extension installation failed.
