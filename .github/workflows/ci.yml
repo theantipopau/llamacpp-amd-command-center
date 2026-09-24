@@ -1,0 +1,58 @@
+name: Windows checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check CRLF line endings
+        shell: pwsh
+        run: |
+          $bad = @()
+          foreach ($file in @('Start-LlamaCpp.cmd', 'Install-LlamaCpp-AMD.ps1', 'tests/Test-CommandCenter.ps1')) {
+            $text = [IO.File]::ReadAllText((Join-Path $PWD $file))
+            if ($text -match '(?<!\r)\n') { $bad += $file }
+          }
+          if ($bad.Count -gt 0) { throw "LF-only line endings found in: $($bad -join ', ')" }
+          Write-Output 'All Windows scripts use CRLF.'
+
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\Install-LlamaCpp-AMD.ps1", [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Output; exit 1 }
+          Write-Output 'AST parse OK'
+
+      - name: PSScriptAnalyzer (errors only)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+          $issues = @(Invoke-ScriptAnalyzer -Path .\Install-LlamaCpp-AMD.ps1, .\tests\Test-CommandCenter.ps1 -Severity Error)
+          $issues | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
+          if ($issues.Count -gt 0) { exit 1 }
+
+      - name: Offline command-center tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\tests\Test-CommandCenter.ps1
+
+      - name: Batch menu smoke test
+        shell: cmd
+        env:
+          LLAMACPP_NO_PAUSE: '1'
+        run: |
+          (echo x& echo 0) | call .\Start-LlamaCpp.cmd > menu.log 2>&1
+          type menu.log
+          findstr /C:"Please choose a number from the menu." menu.log >nul || (echo Invalid input was not handled.& exit /b 1)
+          findstr /C:"Thank you for using" menu.log >nul || (echo Menu did not exit cleanly.& exit /b 1)

@@ -315,6 +315,7 @@ logo.png                       Project logo used by the README and documentation
 docs/                          GitHub Pages documentation
 .github/workflows/pages.yml   GitHub Pages deployment workflow
 .github/workflows/release.yml Release ZIP + SHA-256 packaging for v* tags
+.github/workflows/ci.yml      Windows checks: CRLF, parse, analyzer, tests, menu smoke test
 tests/Test-CommandCenter.ps1  Offline checks for launchers and VS Code config
 ```
 
@@ -341,7 +342,6 @@ The batch front end can be smoke-tested with redirected menu input. Normal inter
 - Keep the release ZIP and checksum manifest updated for every tagged release.
 - Add optional Claude Code gateway guidance with an explicitly tested adapter.
 - Add hardware/model benchmark presets.
-- Add automated Windows CI for parser, menu, and template tests.
 - Add screenshots and short demo recordings to the documentation site.
 
 ## License
