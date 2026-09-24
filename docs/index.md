@@ -16,7 +16,7 @@ Created by **Matt Hurley - [matthurley.dev](https://matthurley.dev)**
 
 
 1. Install or update the AMD Adrenalin driver.
-2. Download this repository.
+2. Download and extract the [release ZIP](https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest), or clone this repository.
 3. Double-click `Start-LlamaCpp.cmd`.
 4. Select **Start first-time setup / hardware scan**.
 5. Review the detected CPU, Radeon GPU, VRAM, RAM, backend, and model recommendation.
@@ -40,7 +40,7 @@ These screenshots show the intended first-time experience: the hardware-aware da
 |---|---|
 | **L — Local engine** | `llama-server.exe`, Web UI, localhost API |
 | **M — Model** | GGUF discovery, hardware fit advice, revision resolution, SHA-256 verification |
-| **V — VS Code** | Official llama-vscode, Continue, and Cline instructions |
+| **V — VS Code** | Copilot Chat custom endpoints, official llama-vscode, Continue, and Cline instructions |
 | **A — API** | OpenAI-compatible local endpoint for compatible tools |
 
 ## Console appearance
@@ -69,7 +69,9 @@ The command center has been validated for a system with:
 - Radeon integrated GPU / UMA reporting
 - Windows DXGI adapter inventory
 
-For that target, the default model recommendation is Qwen3.8 27B Q4_K_M with its vision projector, exposed as `qwen3.8:latest`.
+The command center recommends the strongest tool-capable model that fits entirely in VRAM. For that target it is Qwen3.5 9B Q4_K_M with its vision projector, exposed as `qwen3.5:9b`, at 32768 tokens of context. It runs fully on the GPU at roughly 70 tokens per second and handles 20k-token Agent prompts with tool calls.
+
+Qwen3.8 27B Q4_K_M (`qwen3.8:latest`) is offered as a quality option. It does not fit in 16 GiB of VRAM, so part of it runs from system RAM at roughly 4–7 tokens per second. The model source is [Unsloth Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF), and the installer verifies the current Hugging Face Git LFS SHA-256 digest.
 
 ## Local endpoints
 
@@ -85,6 +87,26 @@ The server binds to `127.0.0.1` only.
 
 GitHub Copilot and llama.cpp can be used side by side. This project does not remove or reconfigure Copilot. Keep using Copilot Chat as usual, and use llama-vscode, Continue, or Cline when you want a request handled by your local model.
 
+### Local model in Copilot Chat
+
+Current VS Code supports local models through **Chat: Manage Language Models → Add Models → Custom Endpoint**:
+
+1. Start the server with option **[2]** and wait for loading to finish.
+2. Choose **Custom Endpoint** and API type **Chat Completions**.
+3. Use `http://127.0.0.1:8080/v1/chat/completions` as the endpoint.
+4. Use the model ID from `/v1/models`, such as `qwen3.5:9b`.
+5. Use any non-empty placeholder API key, enable **Tools** and **Vision** for the Qwen models, save the generated `chatLanguageModels.json`, and reload VS Code.
+
+The API key is only a client placeholder; the llama.cpp server is local and requires no cloud key. Conversation compaction and other VS Code utility requests can be slower or less compatible than normal Chat requests. If the model is hidden in Agent mode, verify `toolCalling: true` and keep the server running. If Agent mode fails with **No lowest priority node found**, the context is too small for Copilot's prompt: re-activate the model with `-ContextSize 32768` (or larger), restart the server, and run option **[5]** again.
+
+## One-click VS Code setup
+
+The main `Start-LlamaCpp.cmd` menu option **[5] Configure VS Code** calls the PowerShell `VSCodeChat` action. It reads the active model, updates or creates only the `llama.cpp local` provider (replacing the older `llama.cpp ROCm` entry) in `%APPDATA%\Code\User\chatLanguageModels.json`, preserves existing Copilot and unrelated providers, and creates a `chatLanguageModels.json.command-center.bak` backup when possible.
+
+The action configures the current model alias, localhost Chat Completions endpoint, context budget, tool-calling capability, and vision capability. It does not delete models or modify the llama.cpp server. If the existing VS Code JSON is malformed, the command refuses to overwrite it so unknown settings are not lost. Run **Developer: Reload Window** after it finishes.
+
+For a manual setup or a different VS Code installation, use the Custom Endpoint values documented above.
+
 ## Editor integrations
 
 ### Official llama-vscode
@@ -98,9 +120,9 @@ name: Local llama.cpp
 version: 0.0.1
 schema: v1
 models:
-  - name: Qwen3.8 27B
+  - name: Qwen3.5 9B
     provider: llama.cpp
-    model: qwen3.8:latest
+    model: qwen3.5:9b
     apiBase: http://127.0.0.1:8080
 ```
 
@@ -110,7 +132,7 @@ The batch menu can create `Continue-llamacpp-config.yaml` without overwriting an
 
 ```text
 Base URL: http://127.0.0.1:8080/v1
-Model:    qwen3.8:latest
+Model:    qwen3.5:9b
 API key:  any non-empty placeholder
 ```
 
@@ -125,6 +147,10 @@ Claude Code is a separate CLI client. Its documented gateway setup uses `ANTHROP
 - **The model is slow:** choose the model browser or hardware/model advisor and try a smaller model or lower context setting.
 - **The GPU is missing:** update AMD Adrenalin, reboot, and rerun diagnostics.
 - **Starting over:** use the uninstall option in the command center; it asks for confirmation and does not remove VS Code or Copilot.
+
+## Release download
+
+Download the runnable ZIP from the [latest GitHub release](https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest), extract it, and double-click `Start-LlamaCpp.cmd`. Keep `Install-LlamaCpp-AMD.ps1` next to the BAT file. The release ZIP contains the two runnable scripts, README, license, and logo; models and the ROCm runtime remain separate downloads.
 
 ## Run logs and diagnostics
 

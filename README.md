@@ -22,7 +22,7 @@ The project is designed for a user who wants one guided path from:
 
 - **[L] Local LLM engine** — installs and launches `llama-server.exe` and its local Web UI.
 - **[M] Model layer** — finds hardware-appropriate GGUF models, resolves current metadata, and verifies published SHA-256 digests.
-- **[V] VS Code layer** — documents the official `llama-vscode` extension, Continue, and Cline/OpenAI-compatible settings.
+- **[V] VS Code layer** — documents Copilot Chat custom endpoints, the official `llama-vscode` extension, Continue, and Cline/OpenAI-compatible settings.
 - **[A] API layer** — exposes a localhost-only OpenAI-compatible endpoint for local tools.
 
 ## If you are new to local LLMs
@@ -40,10 +40,14 @@ You do not need to understand ROCm, Vulkan, GGUF files, context sizes, or API se
 
 If you are unsure which option to choose, start with **[1]**. If you only want to read first, choose **[7] Show the complete walkthrough**. Choose **[9]** any time to view the latest run log.
 
+### Easiest download for beginners
+
+The [latest GitHub release](https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest) provides a ready-to-run ZIP. Download `llamacpp-amd-command-center-vX.Y.Z.zip`, extract it, and keep `Start-LlamaCpp.cmd` and `Install-LlamaCpp-AMD.ps1` together. The ZIP also includes the README, license, and logo. Models and the ROCm runtime are downloaded separately after you approve them in the command center.
+
 ## Quick start
 
 1. Install a current AMD Adrenalin driver.
-2. Download or clone this repository.
+2. Download and extract the release ZIP, or clone this repository.
 3. Double-click **`Start-LlamaCpp.cmd`**.
 4. Choose **[1] Start first-time setup / hardware scan**.
 5. Let the hardware scan finish, then choose the recommended backend and model.
@@ -94,22 +98,78 @@ Users can explicitly select the backend from the PowerShell command center. Auto
 
 Model availability and filenames can change, so the installer resolves the current Hugging Face revision and Git LFS SHA-256 values at download time.
 
-For the tested Ryzen 7 9800X3D + Radeon RX 9070 XT system, the default recommendation is:
+The command center recommends the strongest tool-capable model that fits **entirely in dedicated VRAM**. A model that spills into system RAM is much slower, and VS Code Agent mode also needs room for a large context. For the tested Ryzen 7 9800X3D + Radeon RX 9070 XT system, the recommendation is:
 
 | Item | Value |
 |---|---|
-| Model family | Qwen3.8 27B |
+| Model family | Qwen3.5 9B |
 | Quantization | Q4_K_M |
+| Weights | `Qwen3.5-9B-Q4_K_M.gguf` |
+| Vision projector | `mmproj-F16.gguf` |
+| API model ID | `qwen3.5:9b` |
+| Approximate download | 6.20 GiB including projector |
+| Context | 32768 tokens |
+
+On the RX 9070 XT it runs fully on the GPU (about 6 GiB of 16 GiB in use at 32k context) and generates roughly 70 tokens per second. A 20k-token Agent-style prompt with tool definitions returns a correct tool call in under 10 seconds. Choose it from the PowerShell command center with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b
+```
+
+The model source is the [Unsloth Qwen3.5-9B-GGUF repository](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF). The installer resolves the current Hugging Face revision and verifies the published Git LFS SHA-256 digest before activating the files.
+
+### Quality option: Qwen3.8 27B
+
+| Item | Value |
+|---|---|
 | Weights | `Qwen3.8-27B-Q4_K_M.gguf` |
 | Vision projector | `mmproj-Qwen3.8-27B-Q8_0.gguf` |
 | API model ID | `qwen3.8:latest` |
 | Approximate download | 18.25 GiB including projector |
 
-A 16 GiB Radeon card can run this model with a sensible memory budget, but context size, projector use, and runtime offload settings affect actual VRAM use. Always review the command center's fit estimate before downloading.
+Stronger answers, but it does not fit in 16 GiB of VRAM: about 4.8 GiB runs from system RAM and generation drops to roughly 4–7 tokens per second. Use it for chat where quality matters more than speed.
+
+### Context size
+
+Context is sized from spare VRAM. Tool-capable models get at least 32768 tokens where memory allows, because VS Code Copilot Agent mode sends a large system prompt and tool list. Override it with `-ContextSize`, for example `-Action Models -ModelId qwen3.5-9b -ContextSize 65536`.
 
 ## If you already use GitHub Copilot
 
 You can keep using GitHub Copilot and run a local llama.cpp model at the same time. This project does not remove, replace, reconfigure, or sign you out of Copilot.
+
+### Use the local model in Copilot Chat
+
+Current VS Code supports a local **Custom Endpoint** in **Chat: Manage Language Models**:
+
+1. Start the local server with batch option **[2]** and wait for the model to finish loading.
+2. In VS Code, run **Chat: Manage Language Models**.
+3. Choose **Add Models → Custom Endpoint**.
+4. Set the API type to **Chat Completions**.
+5. Use the endpoint `http://127.0.0.1:8080/v1/chat/completions`, the model ID shown by `/v1/models`, and any non-empty placeholder API key such as `local`.
+6. Enable **Tools** and **Vision** for the Qwen models, save `chatLanguageModels.json`, then run **Developer: Reload Window**.
+
+The endpoint is local-only and does not require a cloud API key. If the model is not shown in Agent mode, check that its model entry has `toolCalling: true` and that the server is still running. Conversation compaction and other VS Code utility features can behave differently from normal Chat requests; use a smaller utility model or a cloud Copilot model for long-history summaries if needed.
+
+### One-click VS Code setup from the batch menu
+
+The main `Start-LlamaCpp.cmd` menu includes **[5] Configure VS Code**. That option calls the PowerShell action `VSCodeChat`, which:
+
+1. Reads the active model from `%LOCALAPPDATA%\Programs\llama.cpp\active-model.json`.
+2. Updates or creates only the `llama.cpp local` provider (replacing the older `llama.cpp ROCm` entry) in `%APPDATA%\Code\User\chatLanguageModels.json`.
+3. Preserves existing Copilot settings and unrelated custom providers.
+4. Writes a backup to `chatLanguageModels.json.command-center.bak` when the file already exists.
+5. Configures the current model alias, localhost endpoint, context budget (28672 input / 4096 output tokens at 32k), tool-calling capability, and vision capability.
+6. Tells you to run **Developer: Reload Window** in VS Code.
+
+The action never deletes your model files or changes the llama.cpp server. It refuses to edit a malformed existing `chatLanguageModels.json`; fix that JSON first so unknown settings are not overwritten. If you prefer manual configuration, use the endpoint and model values shown after the automatic step or follow the manual Custom Endpoint instructions above.
+
+You can run the same action directly with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action VSCodeChat
+```
+
+### Other local integrations
 
 Use the local integrations when you want the request to stay on your computer:
 
@@ -137,7 +197,7 @@ The official extension is:
 ggml-org.llama-vscode
 ```
 
-It provides local completion, chat, agent features, environment/model management, and direct Hugging Face model browsing. The official extension is particularly suited to FIM-capable coding models for inline completion. The general Qwen3.8 model remains useful for chat, editing, tools, and agent workflows.
+It provides local completion, chat, agent features, environment/model management, and direct Hugging Face model browsing. The official extension is particularly suited to FIM-capable coding models for inline completion. The general Qwen models remain useful for chat, editing, tools, and agent workflows.
 
 ### Continue
 
@@ -148,9 +208,9 @@ name: Local llama.cpp
 version: 0.0.1
 schema: v1
 models:
-  - name: Qwen3.8 27B
+  - name: Qwen3.5 9B
     provider: llama.cpp
-    model: qwen3.8:latest
+    model: qwen3.5:9b
     apiBase: http://127.0.0.1:8080
 ```
 
@@ -160,11 +220,11 @@ Use:
 
 ```text
 Base URL: http://127.0.0.1:8080/v1
-Model:    qwen3.8:latest
+Model:    qwen3.5:9b
 API key:  any non-empty placeholder
 ```
 
-The API key is only a placeholder for clients that require one. The server is local and does not need a cloud API key.
+Use the model ID your server reports at `/v1/models`; menu option [4] writes the active model into the Continue template for you. The API key is only a placeholder for clients that require one. The server is local and does not need a cloud API key.
 
 ## Claude Code and other CLI agents
 
@@ -186,6 +246,14 @@ This can happen even when VS Code is already installed. The easiest route is to 
 
 Return to the command center and choose the model browser or hardware/model advisor. A smaller model, fewer context tokens, or a different quantization can reduce memory use and improve speed.
 
+### VS Code Agent mode fails with "No lowest priority node found"
+
+Copilot could not fit its Agent prompt into the model's token budget. This happens when the server runs with a small context (8192 tokens leaves only about 7k for input). Re-activate the model with at least 32k context, restart the server, run batch option **[5]** again, and reload VS Code:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -ContextSize 32768
+```
+
 ### The GPU is not detected
 
 Update the AMD Adrenalin driver, reboot Windows, and run the command center again. The diagnostics option can show detected adapters and the selected execution mode.
@@ -193,6 +261,17 @@ Update the AMD Adrenalin driver, reboot Windows, and run the command center agai
 ### You want to undo the setup
 
 The uninstall option removes the managed llama.cpp installation and downloaded models. It does not remove VS Code, Copilot, or the source repository. It asks for confirmation before deleting anything.
+
+## Release download
+
+The easiest install for beginners is the ZIP asset from the [latest GitHub release](https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest):
+
+1. Download `llamacpp-amd-command-center-vX.Y.Z.zip` (and optionally its `.sha256` file).
+2. Extract it to a normal folder, such as Desktop.
+3. Double-click `Start-LlamaCpp.cmd`.
+4. Keep `Install-LlamaCpp-AMD.ps1` next to the BAT file; the front end requires both files.
+
+The release workflow also creates a SHA-256 checksum next to the ZIP. The ZIP contains the runnable BAT/PS1 pair, README, license, and logo; it does not contain downloaded models or a preconfigured ROCm installation.
 
 ## Run logs and diagnostics
 
@@ -235,6 +314,8 @@ Install-LlamaCpp-AMD.ps1       Hardware detection, installer, advisor, launcher,
 logo.png                       Project logo used by the README and documentation site
 docs/                          GitHub Pages documentation
 .github/workflows/pages.yml   GitHub Pages deployment workflow
+.github/workflows/release.yml Release ZIP + SHA-256 packaging for v* tags
+tests/Test-CommandCenter.ps1  Offline checks for launchers and VS Code config
 ```
 
 ## Development and validation
@@ -247,11 +328,17 @@ Before publishing a change, validate at minimum:
 powershell.exe -NoLogo -NoProfile -Command "[System.Management.Automation.Language.Parser]::ParseFile('.\Install-LlamaCpp-AMD.ps1',[ref]$null,[ref]$null) | Out-Null; Write-Output 'AST parse OK'"
 ```
 
+Run the offline checks (launcher generation for every catalog model, model recommendation, and the VS Code JSON writer) with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CommandCenter.ps1
+```
+
 The batch front end can be smoke-tested with redirected menu input. Normal interactive use should be tested by double-clicking `Start-LlamaCpp.cmd`.
 
 ## Roadmap
 
-- Add a signed release package and checksum manifest.
+- Keep the release ZIP and checksum manifest updated for every tagged release.
 - Add optional Claude Code gateway guidance with an explicitly tested adapter.
 - Add hardware/model benchmark presets.
 - Add automated Windows CI for parser, menu, and template tests.

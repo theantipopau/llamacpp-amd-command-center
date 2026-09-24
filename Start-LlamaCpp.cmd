@@ -23,6 +23,8 @@ set "API_URL=http://127.0.0.1:8080"
 set "API_MODELS_URL=http://127.0.0.1:8080/v1/models"
 set "CONTINUE_TEMPLATE=%SCRIPT_DIR%Continue-llamacpp-config.yaml"
 set "EXTENSION_ID=ggml-org.llama-vscode"
+set "ACTIVE_ALIAS="
+set "ACTIVE_NAME="
 
 if not exist "%PS_SCRIPT%" (
     color 0C
@@ -35,6 +37,7 @@ if not exist "%PS_SCRIPT%" (
 )
 
 :menu
+call :read_active_model
 cls
 color 0F
 echo.
@@ -44,11 +47,13 @@ echo   Local AI setup for AMD Ryzen and Radeon systems
 echo  ========================================================================================================
 echo   Created by Matt Hurley - matthurley.dev
 echo.
+if defined ACTIVE_ALIAS (echo  ACTIVE MODEL: %ACTIVE_NAME%  [%ACTIVE_ALIAS%]) else (echo  ACTIVE MODEL: none yet - choose [1])
+echo.
 echo  [ FIRST-TIME PATH ]  Choose [1] if you are new to local LLMs.
 echo  [ ALREADY READY? ]   Choose [2] to start the active model, or [6] to test it.
 echo  [ L ]  LOCAL ENGINE     llama.cpp server, Web UI, and localhost API
 echo  [ M ]  MODEL LAYER      hardware-fit advice and verified GGUF downloads
-echo  [ V ]  VS CODE LAYER    llama-vscode, Continue, and Cline guidance
+echo  [ V ]  VS CODE LAYER    Copilot Chat, llama-vscode, Continue, and Cline guidance
 echo  [ A ]  API LAYER        local OpenAI-compatible endpoint
 echo.
 echo  --------------------------------------------------------------------------------------------------------
@@ -56,13 +61,13 @@ echo   [1]  FIRST-TIME SETUP       Scan hardware, install backend, and activate 
 echo   [2]  START LOCAL SERVER     Run the active model with its Web UI and local API
 echo   [3]  INSTALL VS CODE        Install the official llama-vscode extension
 echo   [4]  CONTINUE TEMPLATE      Create a safe local-provider YAML template
-echo   [5]  CLINE SETTINGS         Show OpenAI-compatible connection values
+echo   [5]  CONFIGURE VS CODE      Point Copilot Chat at the active model (asks first) + Cline settings
 echo   [6]  TEST LOCAL API         Check whether the server is ready
 echo   [7]  COMPLETE WALKTHROUGH   Read the full beginner-friendly setup guide
 echo   [8]  OFFICIAL LINKS         Open trusted upstream project information
 echo   [9]  VIEW LATEST LOG        Read the most recent persistent run log
 echo   [0]  EXIT                   Close the command center
-echo  ----------------------------------------------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo.
 echo  TIP: Windows Terminal with Cascadia Mono or Consolas gives the cleanest display.
 echo.
@@ -194,15 +199,22 @@ if exist "%CONTINUE_TEMPLATE%" (
     echo  It was left unchanged.
     goto :show_continue
 )
+if not defined ACTIVE_ALIAS (
+    color 0E
+    echo  No active model yet. Choose [1] first so the template uses the right model.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
 (
     echo name: Local llama.cpp
     echo version: 0.0.1
     echo schema: v1
     echo.
     echo models:
-    echo   - name: Qwen3.8 27B
+    echo   - name: %ACTIVE_NAME%
     echo     provider: llama.cpp
-    echo     model: qwen3.8:latest
+    echo     model: %ACTIVE_ALIAS%
     echo     apiBase: %API_URL%
 ) > "%CONTINUE_TEMPLATE%"
 color 0A
@@ -214,7 +226,7 @@ echo  Continue setup:
 echo    1. Install the Continue extension in VS Code.
 echo    2. Start the llama.cpp server with option [2].
 echo    3. Add or merge the YAML settings into your Continue configuration.
-echo    4. Select Qwen3.8 27B as the model.
+echo    4. Select the model named in the template.
 echo.
 call :wait_for_key
 goto :menu
@@ -223,18 +235,40 @@ goto :menu
 cls
 color 0B
 echo.
-echo  CLINE / OPENAI-COMPATIBLE SETTINGS
+echo  CONFIGURING VS CODE COPILOT CHAT
+echo  --------------------------------------------------------------------------------------------------------
+echo  The command center will update the llama.cpp ROCm provider and back up
+echo  the existing VS Code chatLanguageModels.json file.
+echo.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action VSCodeChat
+if errorlevel 1 (
+    echo.
+    echo  VS Code Chat setup did not complete. Read the message above.
+    echo  You can still use the manual values shown below.
+)
+echo.
+echo  COPILOT CHAT / CLINE / OPENAI-COMPATIBLE SETTINGS
 echo  --------------------------------------------------------------------------------------------------------
 echo  Provider:       OpenAI Compatible
 echo  Base URL:       %API_URL%/v1
-echo  Model:          qwen3.8:latest
-echo  API key:        any non-empty placeholder, for example: local-llama
+echo  Chat endpoint:  %API_URL%/v1/chat/completions
+if defined ACTIVE_ALIAS (echo  Model:          %ACTIVE_ALIAS%) else (echo  Model:          the id shown by option [6])
+echo  API key:        any non-empty placeholder, for example: local
+echo.
+echo  NATIVE COPILOT CHAT
+echo  1. Start the server with option [2] and wait for loading.
+echo  2. VS Code: Chat: Manage Language Models
+echo  3. Add Models -> Custom Endpoint -> Chat Completions
+echo  4. Use the Chat endpoint and model above.
+echo  5. Enable Tools and Vision, save chatLanguageModels.json, reload VS Code.
 echo.
 echo  The local server is bound to 127.0.0.1, so it is not exposed to your LAN.
-echo  Start the server with option [2] before testing Cline.
+echo  Start the server with option [2] before testing Copilot, Cline, or another client.
 echo.
-echo  If the extension offers a native llama.cpp provider, the OpenAI-compatible
-echo  provider is usually the most straightforward connection method.
+echo  If Agent mode hides the model, verify toolCalling is true in the VS Code model entry.
+echo  If Agent mode fails with "No lowest priority node found", the context is too small:
+echo  re-activate the model with -ContextSize 32768, restart the server, and run [5] again.
+echo  For Cline, use the OpenAI-compatible provider and the Base URL above.
 echo.
 call :wait_for_key
 goto :menu
@@ -296,10 +330,20 @@ echo  the runtime, and preserves models during updates.
 echo.
 echo  STEP 4 - INSTALL A GGUF MODEL
 echo  --------------------------------------------------------------------------------------------------------
-echo  The recommended model for a Radeon RX 9070 XT with 16 GB VRAM and 32 GB
-echo  system RAM is Qwen3.8-27B Q4_K_M.
+echo  The command center recommends the strongest tool-capable model that fits
+echo  entirely in your GPU memory. On a 16 GB Radeon RX 9070 XT that is:
 echo.
-echo  Ollama name:       qwen3.8:latest
+echo  RECOMMENDED: Qwen3.5 9B Q4_K_M
+echo    Weights:     Qwen3.5-9B-Q4_K_M.gguf
+echo    Projector:   mmproj-F16.gguf
+echo    API alias:   qwen3.5:9b
+echo    Download:    approximately 6.20 GiB including projector
+echo    Best for:    fast VS Code Agent turns and tool calling
+echo    Context:     32768 tokens, enough for Copilot Agent mode
+echo.
+echo  QUALITY OPTION: Qwen3.8 27B Q4_K_M
+echo  Stronger answers, but it does not fit in 16 GB of VRAM, so part of it runs
+echo  from system RAM at roughly 4-7 tokens per second.
 echo  llama.cpp alias:   qwen3.8:latest
 echo  Model weights:     Qwen3.8-27B-Q4_K_M.gguf
 echo  Vision projector:  mmproj-Qwen3.8-27B-Q8_0.gguf
@@ -324,14 +368,28 @@ echo  --------------------------------------------------------------------------
 echo  Official llama-vscode extension:
 echo    code --install-extension %EXTENSION_ID%
 echo.
+echo  Native VS Code Copilot Chat custom endpoint:
+echo    Option [5] can configure this automatically for the active model.
+echo    It preserves Copilot settings and creates a JSON backup.
+echo    After it finishes, run Developer: Reload Window in VS Code.
+echo.
+echo    Manual fallback:
+echo    1. Start the server with option [2] and wait for loading.
+echo    2. Run: Chat: Manage Language Models
+echo    3. Add Models -> Custom Endpoint -> Chat Completions
+echo    4. Endpoint: %API_URL%/v1/chat/completions
+echo    5. Model: the id shown by option [6], for example qwen3.5:9b
+echo    6. API key: any non-empty placeholder, such as local
+echo    7. Enable Tools and Vision, save chatLanguageModels.json, reload VS Code
+echo.
 echo  Continue:
 echo    provider: llama.cpp
 echo    apiBase:  %API_URL%
-echo    model:    qwen3.8:latest
+echo    model:    the active model id, for example qwen3.5:9b
 echo.
 echo  Cline or another OpenAI-compatible extension:
 echo    Base URL: %API_URL%/v1
-echo    Model:    qwen3.8:latest
+echo    Model:    the active model id, for example qwen3.5:9b
 echo    API key:  any non-empty placeholder
 echo.
 echo  STEP 7 - TEST THE CONNECTION
@@ -339,11 +397,11 @@ echo  --------------------------------------------------------------------------
 echo  From this menu choose [6], or run:
 echo    Invoke-RestMethod %API_MODELS_URL%
 echo.
-echo  If the response includes qwen3.8:latest, the server is ready for VS Code.
+echo  If the response lists your active model id, the server is ready for VS Code.
 echo.
 echo  IMPORTANT MODEL NOTE
 echo  --------------------------------------------------------------------------------------------------------
-echo  Qwen3.8 is a strong general reasoning, chat, tool, and vision model.
+echo  The Qwen models are general reasoning, chat, tool, and vision models.
 echo  The official llama-vscode extension may perform best for inline completion
 echo  with an FIM-capable coding model. The general model remains suitable for
 echo  chat, editing, and agent workflows.
@@ -351,8 +409,14 @@ echo.
 echo  COPILOT AND LOCAL LLM
 echo  --------------------------------------------------------------------------------------------------------
 echo  GitHub Copilot can stay installed and enabled. This project does not
-echo  remove or reconfigure Copilot. Use llama-vscode, Continue, or Cline
-echo  when you want a request handled by your local model instead.
+echo  remove or reconfigure Copilot. Use the Custom Endpoint steps above
+echo  when you want Copilot Chat to use the local model. Continue, Cline,
+echo  and llama-vscode are separate local-client options.
+echo.
+echo  If Agent mode hides the model, verify toolCalling is true in
+echo  chatLanguageModels.json. If Agent mode fails with "No lowest priority
+echo  node found", the model's context is too small for Copilot's prompt:
+echo  use at least 32768 tokens.
 echo.
 echo  STEP 8 - IF SOMETHING GOES WRONG
 echo  --------------------------------------------------------------------------------------------------------
@@ -360,7 +424,14 @@ echo  API test fails: start the server with [2], wait for loading, test [6].
 echo  code not found: VS Code may still be installed. Open VS Code and select
 echo  Extensions, search llama-vscode, and install it there; or add VS Code to PATH.
 echo  Model too slow: use the model browser or hardware/model advisor.
+echo  Qwen3.5 9B is the recommended Agent model; Qwen3.8 27B is slower but stronger.
 echo  GPU missing: update AMD Adrenalin, reboot, then run diagnostics.
+echo.
+echo  RELEASE DOWNLOAD
+echo  --------------------------------------------------------------------------------------------------------
+echo  GitHub Releases (latest) provides a ZIP with Start-LlamaCpp.cmd,
+echo  Install-LlamaCpp-AMD.ps1, README.md, LICENSE, and logo.png.
+echo  Download the ZIP, extract it, and keep both script files together.
 echo.
 call :wait_for_key
 goto :menu
@@ -396,6 +467,9 @@ echo  Qwen / Ollama qwen3.8:
 echo    https://ollama.com/library/qwen3.8
 echo    https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF
 echo.
+echo  Qwen3.5 fast local-agent model:
+echo    https://huggingface.co/unsloth/Qwen3.5-9B-GGUF
+echo.
 echo  AMD Vulkan and UMA guidance:
 echo    https://www.amd.com/en/resources/support-articles/faqs/PA-280.html
 echo.
@@ -417,6 +491,16 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -A
 echo.
 call :wait_for_key
 goto :menu
+
+:read_active_model
+set "ACTIVE_ALIAS="
+set "ACTIVE_NAME="
+if not exist "%INSTALL_ROOT%\active-model.json" exit /b 0
+for /f "usebackq tokens=1* delims=|" %%A in (`powershell.exe -NoLogo -NoProfile -Command "try { $m = ConvertFrom-Json (Get-Content -Raw -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp\active-model.json')); Write-Output ($m.alias + '|' + $m.name) } catch { }"`) do (
+    set "ACTIVE_ALIAS=%%A"
+    set "ACTIVE_NAME=%%B"
+)
+exit /b 0
 
 :wait_for_key
 if defined LLAMACPP_NO_PAUSE exit /b 0

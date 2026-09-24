@@ -20,5 +20,7 @@ Before opening a pull request:
 3. Exercise the documentation, links, and Continue-template screens.
 4. Confirm that no model, extension, or server installation occurs during documentation tests.
 5. Check that the README and documentation match the actual menu and configuration values.
+6. Validate the release workflow package contains `Start-LlamaCpp.cmd`, `Install-LlamaCpp-AMD.ps1`, `README.md`, `LICENSE`, and `logo.png`.
+7. Run `tests/Test-CommandCenter.ps1` and confirm every check passes.
 
 Do not run large model downloads or server launches as part of a basic smoke test unless the change specifically requires it and the user has approved the resource use.

@@ -9,6 +9,9 @@ Continue-llamacpp-config.yaml
 *.tmp
 *.bak
 
+# Local release package output
+dist/
+
 # Local model/runtime directories
 models/
 runtime/
@@ -21,3 +24,6 @@ logs/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Private working notes (kept out of the public repo and Pages site)
+notes/

@@ -1,0 +1,49 @@
+name: Package and attach release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to attach the package to, for example v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Create beginner release ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          rm -rf dist release-package
+          mkdir -p dist release-package
+          cp Start-LlamaCpp.cmd Install-LlamaCpp-AMD.ps1 README.md LICENSE logo.png release-package/
+          (cd release-package && zip -r "../dist/llamacpp-amd-command-center-${tag}.zip" .)
+          (cd dist && sha256sum "llamacpp-amd-command-center-${tag}.zip" > "llamacpp-amd-command-center-${tag}.zip.sha256")
+          unzip -l "dist/llamacpp-amd-command-center-${tag}.zip"
+
+      - name: Attach ZIP and checksum to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/llamacpp-amd-command-center-${{ inputs.tag || github.ref_name }}.zip
+            dist/llamacpp-amd-command-center-${{ inputs.tag || github.ref_name }}.zip.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -11,6 +11,8 @@
         validated Windows ROCm package, depending on detected hardware.
       * Download verified GGUF models from ggml-org Hugging Face repositories.
       * Activate a model, generate launch scripts, and start the local Web UI/API.
+      * Configure the active model as a native VS Code Copilot Chat custom endpoint
+        while preserving unrelated VS Code settings and creating a backup.
       * Run device diagnostics, update llama.cpp without deleting models, and uninstall.
 
     Backend selection:
@@ -31,6 +33,11 @@
       * Model metadata, revisions, sizes, and Git LFS SHA-256 values are resolved from
         Hugging Face over HTTPS immediately before download.
       * Ollama's qwen3.8:latest currently means Qwen3.8-27B, not an 8B model.
+      * The recommendation prefers the strongest tool-capable model that fits entirely
+        in dedicated VRAM (Qwen3.5-9B on a 16 GB Radeon). Larger models that spill
+        into system RAM are offered as a slower quality option.
+      * Context size is sized from spare VRAM. Tool-capable models get at least 32k
+        tokens where possible because VS Code Copilot Agent mode needs that much.
 
     Hardware guidance:
       * A current AMD Adrenalin driver must expose a Vulkan device.
@@ -47,6 +54,9 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Install -ModelId qwen3.8-27b
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -ContextSize 32768
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Launch
@@ -70,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'Uninstall', 'ViewLog')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -337,42 +347,49 @@ function Get-ModelCatalog {
             Repo = 'ggml-org/Qwen3.8-27B-GGUF'; File = 'Qwen3.8-27B-Q4_K_M.gguf'
             Projector = 'mmproj-Qwen3.8-27B-Q8_0.gguf'; ApproxGiB = 18.25; Rank = 100
             Tag = 'BEST QUALITY'; Description = 'Flagship reasoning, coding, tools, vision and video. Ollama qwen3.8:latest equivalent.'
-            Reasoning = $true; Vision = $true
+            Reasoning = $true; Vision = $true; Tools = $true
+        },
+        [pscustomobject]@{
+            Id = 'qwen3.5-9b'; Name = 'Qwen3.5 9B'; Alias = 'qwen3.5:9b'
+            Repo = 'unsloth/Qwen3.5-9B-GGUF'; File = 'Qwen3.5-9B-Q4_K_M.gguf'
+            Projector = 'mmproj-F16.gguf'; ApproxGiB = 6.20; Rank = 96
+            Tag = 'FAST AGENT'; Description = 'Fast 9B reasoning and coding model with vision and tool support; designed for responsive local VS Code agents.'
+            Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
             Id = 'gemma3-12b'; Name = 'Gemma 3 12B Vision'; Alias = 'gemma3:12b'
             Repo = 'ggml-org/gemma-3-12b-it-GGUF'; File = 'gemma-3-12b-it-Q4_K_M.gguf'
             Projector = 'mmproj-model-f16.gguf'; ApproxGiB = 7.60; Rank = 92
             Tag = 'VISION'; Description = 'Strong general assistant and image understanding with a balanced memory footprint.'
-            Reasoning = $false; Vision = $true
+            Reasoning = $false; Vision = $true; Tools = $false
         },
         [pscustomobject]@{
             Id = 'qwen3-8b'; Name = 'Qwen3 8B'; Alias = 'qwen3:8b'
             Repo = 'ggml-org/Qwen3-8B-GGUF'; File = 'Qwen3-8B-Q8_0.gguf'
             Projector = $null; ApproxGiB = 8.10; Rank = 88
             Tag = 'REASONING'; Description = 'High-quality Q8 reasoning and tool use; excellent quality per byte on modern Ryzen CPUs.'
-            Reasoning = $true; Vision = $false
+            Reasoning = $true; Vision = $false; Tools = $true
         },
         [pscustomobject]@{
             Id = 'llama3.1-8b'; Name = 'Llama 3.1 8B'; Alias = 'llama3.1:8b'
             Repo = 'ggml-org/Meta-Llama-3.1-8B-Instruct-Q4_0-GGUF'; File = 'meta-llama-3.1-8b-instruct-q4_0.gguf'
             Projector = $null; ApproxGiB = 5.62; Rank = 82
             Tag = 'GENERAL'; Description = 'Proven general-purpose instruct model with broad ecosystem support and modest memory use.'
-            Reasoning = $false; Vision = $false
+            Reasoning = $false; Vision = $false; Tools = $true
         },
         [pscustomobject]@{
             Id = 'gemma3-4b'; Name = 'Gemma 3 4B Vision'; Alias = 'gemma3:4b'
             Repo = 'ggml-org/gemma-3-4b-it-GGUF'; File = 'gemma-3-4b-it-Q4_K_M.gguf'
             Projector = 'mmproj-model-f16.gguf'; ApproxGiB = 3.11; Rank = 70
             Tag = 'VISION'; Description = 'Compact multimodal model for 8 GB systems; fast on Ryzen integrated graphics.'
-            Reasoning = $false; Vision = $true
+            Reasoning = $false; Vision = $true; Tools = $false
         },
         [pscustomobject]@{
             Id = 'qwen3-4b'; Name = 'Qwen3 4B'; Alias = 'qwen3:4b'
             Repo = 'ggml-org/Qwen3-4B-GGUF'; File = 'Qwen3-4B-Q4_K_M.gguf'
             Projector = $null; ApproxGiB = 2.33; Rank = 68
             Tag = 'FASTEST'; Description = 'Small, fast reasoning and tool-use model; ideal for 8–16 GB systems and CPU fallback.'
-            Reasoning = $true; Vision = $false
+            Reasoning = $true; Vision = $false; Tools = $true
         }
     )
 }
@@ -653,6 +670,7 @@ function Get-ModelAssessment {
     $assessments = @()
     foreach ($model in $catalog) {
         $headroom = [double]$Hardware.ModelBudgetGiB - [double]$model.ApproxGiB
+        $vramHeadroom = Get-VramHeadroom -Model $model -Hardware $Hardware
         $status = 'NOT RECOMMENDED'
         $color = 'Red'
         $recommended = $false
@@ -662,6 +680,7 @@ function Get-ModelAssessment {
         $assessments += [pscustomobject]@{
             Model = $model
             HeadroomGiB = [Math]::Round($headroom, 1)
+            GpuResident = ($vramHeadroom -ge 1.5)
             Status = $status
             Color = $color
             Recommended = $recommended
@@ -670,19 +689,37 @@ function Get-ModelAssessment {
     return $assessments
 }
 
+function Get-VramHeadroom {
+    param($Model, $Hardware)
+    # Spare dedicated VRAM after the weights; only meaningful for a discrete Radeon.
+    if (-not $Hardware.HasAmdGpu -or $Hardware.MaxAmdVramGiB -lt 4) { return -1.0 }
+    return ([double]$Hardware.MaxAmdVramGiB * 0.9) - [double]$Model.ApproxGiB
+}
+
 function Get-RecommendedModel {
     param($Hardware)
-    $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Recommended } | Select-Object -First 1)
+    $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Recommended })
+    # Agent use needs speed and a large context, so prefer the best tool-capable
+    # model that stays entirely in VRAM over a larger model that spills to RAM.
+    $resident = @($assessment | Where-Object { $_.GpuResident -and $_.Model.Tools } | Select-Object -First 1)
+    if ($resident.Count -gt 0) { return $resident[0].Model }
     if ($assessment.Count -eq 0) { return (Get-ModelCatalog | Sort-Object ApproxGiB | Select-Object -First 1) }
     return $assessment[0].Model
 }
 
 function Get-SuggestedContext {
     param($Model, $Hardware)
-    if ($Model.ApproxGiB -ge 15 -and $Hardware.RamGiB -ge 48) { return 16384 }
-    if ($Model.ApproxGiB -ge 7 -and $Hardware.RamGiB -ge 32) { return 16384 }
-    if ($Hardware.RamGiB -ge 16) { return 8192 }
-    return 4096
+    # VS Code Copilot Agent mode sends a large system prompt plus tool definitions.
+    # Below roughly 32k tokens it cannot fit the prompt and fails with
+    # "No lowest priority node found", so tool-capable models get at least 32k
+    # whenever the KV cache has room.
+    $vramHeadroom = Get-VramHeadroom -Model $Model -Hardware $Hardware
+    if ($vramHeadroom -ge 10) { return 65536 }
+    if ($vramHeadroom -ge 3) { return 32768 }
+    $budgetHeadroom = [double]$Hardware.ModelBudgetGiB - [double]$Model.ApproxGiB
+    if ($Model.Tools -and $budgetHeadroom -ge 3 -and $Hardware.RamGiB -ge 30) { return 32768 }
+    if ($vramHeadroom -ge 1.5 -or $Hardware.RamGiB -ge 16) { return 16384 }
+    return 8192
 }
 
 function Get-ModelById {
@@ -727,7 +764,8 @@ function Show-HardwareAdvisor {
         $badge = $item.Status.PadRight(17)
         Write-Host ('    {0} ' -f $badge) -NoNewline -ForegroundColor $item.Color
         Write-Host ('{0,-25}' -f $item.Model.Name) -NoNewline -ForegroundColor White
-        Write-Host ('{0,6:N1} GiB  headroom {1,5:N1} GiB' -f $item.Model.ApproxGiB, $item.HeadroomGiB) -ForegroundColor DarkGray
+        $placement = if ($item.GpuResident) { 'fits in VRAM' } else { 'VRAM + system RAM (slower)' }
+        Write-Host ('{0,6:N1} GiB  headroom {1,5:N1} GiB  {2}' -f $item.Model.ApproxGiB, $item.HeadroomGiB, $placement) -ForegroundColor DarkGray
     }
 
     Write-Host "`n  ╭─ RECOMMENDED FOR THIS MACHINE ───────────────────────────────────────────────╮" -ForegroundColor DarkGreen
@@ -735,6 +773,10 @@ function Show-HardwareAdvisor {
     Write-Host "  │  $($recommended.Description)" -ForegroundColor Gray
     $context = Get-SuggestedContext -Model $recommended -Hardware $Hardware
     Write-Host "  │  Suggested start: $context context tokens, Q4/Q8 weights, Flash Attention on." -ForegroundColor DarkGray
+    $larger = @($assessment | Where-Object { $_.Recommended -and -not $_.GpuResident -and $_.Model.Rank -gt $recommended.Rank } | Select-Object -First 1)
+    if ($larger.Count -gt 0) {
+        Write-Host "  │  QUALITY OPTION: $($larger[0].Model.Name) is stronger but spills into system RAM; expect much slower replies." -ForegroundColor Cyan
+    }
     Write-Host "  BACKEND: $(if ($Hardware.RocmRecommended) { 'AMD ROCm 7.2.1 (validated Windows package)' } else { 'Vulkan (portable AMD fallback)' })" -ForegroundColor $(if ($Hardware.RocmRecommended) { 'Green' } else { 'Cyan' })
     Write-Host "  REASON: $($Hardware.RocmReason)" -ForegroundColor DarkGray
     if ($recommended.ApproxGiB -gt ($Hardware.RamGiB * 0.75)) {
@@ -1039,42 +1081,63 @@ function Get-ActiveModel {
     try { return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } catch { return $null }
 }
 
+function Get-ServerArguments {
+    param($ActiveModel, [int] $EffectiveContext)
+    # Single source of truth for both the generated launcher and Start-ActiveServer.
+    $arguments = @(
+        '--model', [string]$ActiveModel.model_path
+    )
+    if (-not [string]::IsNullOrWhiteSpace([string]$ActiveModel.mmproj_path)) {
+        $arguments += @('--mmproj', [string]$ActiveModel.mmproj_path)
+    }
+    $arguments += @(
+        '--alias', [string]$ActiveModel.alias,
+        '--host', '127.0.0.1',
+        '--port', [string]$Port,
+        '--gpu-layers', 'auto',
+        '--fit', 'on',
+        '--fit-target', '1024',
+        '--ctx-size', [string]$EffectiveContext,
+        '--flash-attn', 'on',
+        '--cache-type-k', 'q8_0',
+        '--cache-type-v', 'q8_0',
+        '--jinja'
+    )
+    if ([bool]$ActiveModel.reasoning) {
+        $arguments += @('--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
+    }
+    $arguments += '--metrics'
+    return ,$arguments
+}
+
 function New-Launchers {
     param($ActiveModel, $EffectiveContext)
     $current = Join-Path $InstallRoot 'current'
-    $modelPath = [string]$ActiveModel.model_path
-    $mmprojPath = [string]$ActiveModel.mmproj_path
-    $alias = [string]$ActiveModel.alias
-    $mmprojArg = ''
-    if (-not [string]::IsNullOrWhiteSpace($mmprojPath)) {
-        $mmprojArg = "  --mmproj `"$mmprojPath`" ^"
+
+    # Pair each flag with its value on one line. Every line except the last ends
+    # with a caret; a blank line inside a caret continuation would split the
+    # command, so optional arguments must never leave an empty line behind.
+    $serverArgs = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext
+    $lines = @()
+    for ($i = 0; $i -lt $serverArgs.Count; $i++) {
+        $line = $serverArgs[$i]
+        if (($i + 1) -lt $serverArgs.Count -and -not $serverArgs[$i + 1].StartsWith('--')) {
+            $value = $serverArgs[$i + 1]
+            if ($value -match '[\s\\]') { $value = "`"$value`"" }
+            $line = "$line $value"
+            $i++
+        }
+        $lines += "  $line"
     }
-    $reasoningArg = ''
-    if ([bool]$ActiveModel.reasoning) {
-        $reasoningArg = "  --reasoning-format deepseek ^`r`n  --reasoning-budget 2048 ^"
-    }
+    $argumentBlock = $lines -join " ^`r`n"
 
     $start = @"
 @echo off
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
 pushd "$current"
-llama-server.exe ^
-  --model "$modelPath" ^
-$mmprojArg
-  --alias "$alias" ^
-  --host 127.0.0.1 ^
-  --port $Port ^
-  --gpu-layers auto ^
-  --fit on ^
-  --fit-target 1024 ^
-  --ctx-size $EffectiveContext ^
-  --flash-attn on ^
-  --cache-type-k q8_0 ^
-  --cache-type-v q8_0 ^
-  --jinja ^
-$reasoningArg
-  --metrics
+"$current\llama-server.exe" ^
+$argumentBlock
 set "LLAMA_EXIT=%ERRORLEVEL%"
 popd
 echo.
@@ -1086,7 +1149,7 @@ pause
     $devices = @"
 @echo off
 pushd "$current"
-llama-server.exe --list-devices
+"$current\llama-server.exe" --list-devices
 echo.
 echo Add --device DEVICE --split-mode none to select one GPU.
 pause
@@ -1160,6 +1223,7 @@ function Set-ActiveModel {
         model_path = $modelPath
         mmproj_path = $mmprojPath
         reasoning = [bool]$Model.Reasoning
+        tool_calling = [bool]$Model.Tools
         vision = [bool]$Model.Vision
         context_size = $EffectiveContext
         port = $Port
@@ -1234,7 +1298,8 @@ function Select-ModelInteractively {
         $mark = if ($installed) { '✓' } else { ' ' }
         Write-Host ("  [{0}] {1} " -f ($i + 1), $mark) -NoNewline -ForegroundColor White
         Write-Host ('{0,-25}' -f $item.Model.Name) -NoNewline -ForegroundColor $item.Color
-        Write-Host ('{0,6:N1} GiB  {1,-18} {2}' -f $item.Model.ApproxGiB, $item.Status, $item.Model.Tag) -ForegroundColor DarkGray
+        $placement = if ($item.GpuResident) { 'VRAM' } else { 'VRAM+RAM' }
+        Write-Host ('{0,6:N1} GiB  {1,-10} {2,-9} {3}' -f $item.Model.ApproxGiB, $item.Status, $placement, $item.Model.Tag) -ForegroundColor DarkGray
         Write-Host "      $(Limit-Text $item.Model.Description 92)" -ForegroundColor DarkGray
     }
     $answer = Read-ConsoleLine -Prompt "`n  Choose 1-$($assessment.Count), or 0 to return"
@@ -1324,27 +1389,7 @@ function Start-ActiveServer {
     }
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
-    $arguments = @(
-        '--model', [string]$active.model_path,
-        '--alias', [string]$active.alias,
-        '--host', '127.0.0.1',
-        '--port', [string]$Port,
-        '--gpu-layers', 'auto',
-        '--fit', 'on',
-        '--fit-target', '1024',
-        '--ctx-size', [string]$context,
-        '--flash-attn', 'on',
-        '--cache-type-k', 'q8_0',
-        '--cache-type-v', 'q8_0',
-        '--jinja',
-        '--metrics'
-    )
-    if (-not [string]::IsNullOrWhiteSpace([string]$active.mmproj_path)) {
-        $arguments += @('--mmproj', [string]$active.mmproj_path)
-    }
-    if ([bool]$active.reasoning) {
-        $arguments += @('--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
-    }
+    $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context
 
     Clear-Screen
     Show-Banner
@@ -1354,6 +1399,99 @@ function Start-ActiveServer {
     Write-Info 'Press Ctrl+C in this terminal to stop the server.'
     Push-Location (Split-Path -Parent $server)
     try { & $server @arguments } finally { Pop-Location }
+}
+
+function Install-VsCodeChatEndpoint {
+    $active = Get-ActiveModel
+    if ($null -eq $active) {
+        throw 'No model is active. Choose the model browser and install a model before configuring VS Code.'
+    }
+
+    $vsCodeRoot = Join-Path $env:APPDATA 'Code\User'
+    $configPath = Join-Path $vsCodeRoot 'chatLanguageModels.json'
+    $backupPath = $configPath + '.command-center.bak'
+    $context = [int]$active.context_size
+    if ($context -lt 2048) { $context = 8192 }
+    $maxOutputTokens = [Math]::Min(8192, [Math]::Max(1024, [int]($context / 8)))
+    $maxInputTokens = $context - $maxOutputTokens
+    $toolCalling = if ($active.PSObject.Properties.Name -contains 'tool_calling') {
+        [bool]$active.tool_calling
+    } else {
+        $catalogModel = @(Get-ModelCatalog | Where-Object { $_.Id -eq [string]$active.id } | Select-Object -First 1)
+        if ($catalogModel.Count -gt 0) { [bool]$catalogModel[0].Tools } else { [bool]$active.reasoning }
+    }
+    if ($toolCalling -and $context -lt 32768) {
+        Write-WarnLine "The active model runs with a $context-token context. VS Code Agent mode needs about 32768;"
+        Write-WarnLine 'below that it fails with "No lowest priority node found". Re-activate the model with -ContextSize 32768.'
+    }
+    $modelConfig = [pscustomobject]@{
+        id = [string]$active.alias
+        name = [string]$active.name + ' - llama.cpp local'
+        url = "http://127.0.0.1:$Port/v1/chat/completions"
+        toolCalling = $toolCalling
+        vision = [bool]$active.vision
+        maxInputTokens = $maxInputTokens
+        maxOutputTokens = $maxOutputTokens
+        streaming = $true
+    }
+    $providerName = 'llama.cpp local'
+    # Earlier releases named the provider after the ROCm backend; replace it too.
+    $managedNames = @($providerName, 'llama.cpp ROCm')
+    $provider = [pscustomobject]@{
+        name = $providerName
+        vendor = 'customendpoint'
+        apiKey = 'local'
+        apiType = 'chat-completions'
+        models = @($modelConfig)
+    }
+
+    $configs = @()
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        try {
+            $raw = Get-Content -LiteralPath $configPath -Raw
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                $parsed = $raw | ConvertFrom-Json
+                $configs = @($parsed | Where-Object { $null -ne $_ })
+            }
+        } catch {
+            throw "VS Code's chatLanguageModels.json is not valid JSON. Fix or remove it, then run option [5] again. Existing file was not changed: $configPath"
+        }
+    }
+
+    $existing = @($configs | Where-Object { $managedNames -contains $_.name })
+    if ($existing.Count -gt 0 -and -not $Force) {
+        Write-Host "`n  This will update the existing llama.cpp provider in:" -ForegroundColor Yellow
+        Write-Host "    $configPath" -ForegroundColor White
+        Write-Host '  Your Copilot and unrelated custom providers will be preserved.' -ForegroundColor Gray
+        if ((Read-ConsoleLine -Prompt '  Type YES to update VS Code Chat') -ine 'YES') {
+            Write-WarnLine 'VS Code Chat configuration cancelled.'
+            return
+        }
+    } elseif (-not $Force) {
+        Write-Host "`n  About to configure VS Code Chat with:" -ForegroundColor Yellow
+        Write-Host "    Model:  $($active.alias)" -ForegroundColor White
+        Write-Host "    API:    http://127.0.0.1:$Port/v1/chat/completions" -ForegroundColor White
+        Write-Host "    Config: $configPath" -ForegroundColor DarkGray
+        if ((Read-ConsoleLine -Prompt '  Type YES to configure VS Code Chat') -ine 'YES') {
+            Write-WarnLine 'VS Code Chat configuration cancelled.'
+            return
+        }
+    }
+
+    New-Item -ItemType Directory -Path $vsCodeRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        Copy-Item -LiteralPath $configPath -Destination $backupPath -Force
+    }
+    $kept = @($configs | Where-Object { $managedNames -notcontains $_.name })
+    $updated = @($kept + $provider)
+    # -InputObject keeps a one-element list as a JSON array in Windows PowerShell 5.1,
+    # and VS Code expects the file without a byte-order mark.
+    $json = ConvertTo-Json -InputObject $updated -Depth 20
+    [System.IO.File]::WriteAllText($configPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Success "VS Code Chat endpoint configured for $($active.alias) ($maxInputTokens input / $maxOutputTokens output tokens)."
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Write-Info "Backup: $backupPath" }
+    Write-Info 'In VS Code: run Developer: Reload Window, then select the model from Chat: Manage Language Models.'
+    Write-Info 'The model remains local; the API key value is only a placeholder.'
 }
 
 function Remove-Installation {
@@ -1533,6 +1671,7 @@ try {
     switch ($Action) {
         'Advisor' { Show-HardwareAdvisor -Hardware $hardware }
         'Diagnostics' { Show-Diagnostics -Hardware $hardware }
+        'VSCodeChat' { Install-VsCodeChatEndpoint }
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -Backend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
         'Install' {
