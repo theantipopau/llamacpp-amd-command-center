@@ -1094,13 +1094,30 @@ function Select-ModelInteractively {
     return $assessment[$number - 1].Model
 }
 
+function Write-NativeCommandOutput {
+    param(
+        [Parameter(Mandatory = $true)][string] $FilePath,
+        [string[]] $Arguments = @()
+    )
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    foreach ($line in $output) { Write-Host ([string]$line) }
+    return $exitCode
+}
+
 function Test-LlamaCppRuntime {
     $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) { return $false }
     Push-Location (Split-Path -Parent $server)
     try {
-        & $server --list-devices 2>&1 | Out-String | Write-Host
-        return ($LASTEXITCODE -eq 0)
+        $exitCode = Write-NativeCommandOutput -FilePath $server -Arguments @('--list-devices')
+        return ($exitCode -eq 0)
     } finally { Pop-Location }
 }
 
@@ -1121,9 +1138,15 @@ function Show-Diagnostics {
     Push-Location (Split-Path -Parent $server)
     try {
         Write-Step 'llama.cpp version'
-        & $server --version 2>&1 | Write-Host
+        $versionExit = Write-NativeCommandOutput -FilePath $server -Arguments @('--version')
+        if ($versionExit -ne 0) { Write-WarnLine "llama-server --version exited with code $versionExit." }
         Write-Step 'llama.cpp devices'
-        & $server --list-devices 2>&1 | Write-Host
+        $deviceExit = Write-NativeCommandOutput -FilePath $server -Arguments @('--list-devices')
+        if ($deviceExit -eq 0) {
+            Write-Info 'ROCm/HIP device lines are informational when a device is listed and the exit code is 0.'
+        } else {
+            Write-WarnLine "llama-server --list-devices exited with code $deviceExit."
+        }
         $active = Get-ActiveModel
         if ($null -eq $active) {
             Write-WarnLine 'No active model is configured.'
