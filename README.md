@@ -254,6 +254,16 @@ Copilot could not fit its Agent prompt into the model's token budget. This happe
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -ContextSize 32768
 ```
 
+### VS Code says "Sorry, no response was returned"
+
+With thinking enabled, Qwen reasoning models often write their tool call inside the thinking block. llama.cpp then returns it as reasoning, so the reply has no text and no tool call, and VS Code shows this message (in testing, 3 of 5 Agent steps failed this way). The command center therefore turns thinking **off** by default for tool-capable models; the generated launcher sets `LLAMA_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}`. With thinking off, 8 of 8 Agent steps returned a valid tool call.
+
+If you activated your model with an older version, re-activate it so the launcher is regenerated, then restart the server. For plain chat in the Web UI you can turn thinking back on with `-Thinking On`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -Thinking On
+```
+
 ### The GPU is not detected
 
 Update the AMD Adrenalin driver, reboot Windows, and run the command center again. The diagnostics option can show detected adapters and the selected execution mode.

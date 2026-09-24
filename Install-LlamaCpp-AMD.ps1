@@ -90,6 +90,8 @@ param(
     [int] $ContextSize = 0,
     [ValidateRange(1, 65535)]
     [int] $Port = 8080,
+    [ValidateSet('Auto', 'On', 'Off')]
+    [string] $Thinking = 'Auto',
     [switch] $SkipModel,
     [switch] $NoPath,
     [switch] $Force,
@@ -1108,11 +1110,33 @@ function Get-ServerArguments {
         '--cache-type-v', 'q8_0',
         '--jinja'
     )
-    if ([bool]$ActiveModel.reasoning) {
+    if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
         $arguments += @('--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
     }
     $arguments += '--metrics'
     return ,$arguments
+}
+
+function Test-ThinkingEnabled {
+    param($ActiveModel)
+    if ($ActiveModel.PSObject.Properties.Name -contains 'thinking') { return [bool]$ActiveModel.thinking }
+    if ($ActiveModel -is [System.Collections.IDictionary] -and $ActiveModel.Contains('thinking')) { return [bool]$ActiveModel['thinking'] }
+    # Older active-model.json files predate the setting: keep thinking only for non-tool models.
+    $tools = if ($ActiveModel.PSObject.Properties.Name -contains 'tool_calling') { [bool]$ActiveModel.tool_calling } else { $false }
+    return ([bool]$ActiveModel.reasoning -and -not $tools)
+}
+
+function Get-ServerEnvironment {
+    param($ActiveModel)
+    # Qwen reasoning models often place the tool call inside the thinking block when
+    # thinking is on; the server then returns it as reasoning, leaving no content and
+    # no tool_calls, and VS Code reports "Sorry, no response was returned". Passed as
+    # an environment variable because JSON quoting does not survive cmd/PS 5.1 argv.
+    $environment = [ordered]@{}
+    if ([bool]$ActiveModel.reasoning -and -not (Test-ThinkingEnabled -ActiveModel $ActiveModel)) {
+        $environment['LLAMA_CHAT_TEMPLATE_KWARGS'] = '{"enable_thinking":false}'
+    }
+    return $environment
 }
 
 function New-Launchers {
@@ -1135,11 +1159,14 @@ function New-Launchers {
         $lines += "  $line"
     }
     $argumentBlock = $lines -join " ^`r`n"
+    $environment = Get-ServerEnvironment -ActiveModel $ActiveModel
+    $environmentBlock = (@($environment.Keys | ForEach-Object { "set `"$_=$($environment[$_])`"" }) -join "`r`n")
 
     $start = @"
 @echo off
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
+$environmentBlock
 pushd "$current"
 "$current\llama-server.exe" ^
 $argumentBlock
@@ -1229,6 +1256,11 @@ function Set-ActiveModel {
         mmproj_path = $mmprojPath
         reasoning = [bool]$Model.Reasoning
         tool_calling = [bool]$Model.Tools
+        thinking = switch ($Thinking) {
+            'On' { [bool]$Model.Reasoning }
+            'Off' { $false }
+            default { [bool]$Model.Reasoning -and -not [bool]$Model.Tools }
+        }
         vision = [bool]$Model.Vision
         context_size = $EffectiveContext
         port = $Port
@@ -1395,6 +1427,8 @@ function Start-ActiveServer {
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
     $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context
+    $environment = Get-ServerEnvironment -ActiveModel $active
+    foreach ($name in @($environment.Keys)) { Set-Item -Path "Env:$name" -Value $environment[$name] }
 
     Clear-Screen
     Show-Banner

@@ -22,6 +22,7 @@ New-Item -ItemType Directory -Path $work | Out-Null
 $InstallRoot = Join-Path $work 'install'
 $Port = 8080
 $Force = $true
+$Thinking = 'Auto'
 # Run logging is not started here; the helpers skip logging when these are empty.
 $script:RunJsonlPath = $null; $script:RunLogPath = $null; $script:RunSummaryPath = $null
 $script:RunLogDirectory = $null; $script:RunStarted = $null; $script:RunTranscriptStarted = $false
@@ -45,6 +46,9 @@ try {
         Assert-True ($block -match '--jinja' -and $block -match '--ctx-size 32768' -and $block -match "--alias $([regex]::Escape($model.Alias))") "$($model.Id): launcher keeps jinja, context, and alias"
         $state = Get-Content -LiteralPath (Join-Path $InstallRoot 'active-model.json') -Raw | ConvertFrom-Json
         Assert-True ($state.tool_calling -eq [bool]$model.Tools) "$($model.Id): tool_calling follows the catalog Tools flag"
+        $thinkingOffLine = $launcher -match [regex]::Escape('set "LLAMA_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}"')
+        $expectOff = [bool]$model.Reasoning -and [bool]$model.Tools
+        Assert-True (($thinkingOffLine -eq $expectOff) -and (($block -match '--reasoning-budget') -eq ([bool]$model.Reasoning -and -not $expectOff))) "$($model.Id): thinking is off for tool-capable reasoning models"
     }
 
     Write-Host 'Hardware recommendation (16 GB Radeon, 31 GB RAM)'
