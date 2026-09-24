@@ -23,6 +23,7 @@ $InstallRoot = Join-Path $work 'install'
 $Port = 8080
 $Force = $true
 $Thinking = 'Auto'
+$script:ServerSlots = 2
 # Run logging is not started here; the helpers skip logging when these are empty.
 $script:RunJsonlPath = $null; $script:RunLogPath = $null; $script:RunSummaryPath = $null
 $script:RunLogDirectory = $null; $script:RunStarted = $null; $script:RunTranscriptStarted = $false
@@ -43,12 +44,12 @@ try {
         $danglingCaret = $lines[-1].TrimEnd().EndsWith('^')
         $missingCaret = @($lines | Select-Object -SkipLast 1 | Where-Object { -not $_.TrimEnd().EndsWith('^') }).Count
         Assert-True (($blank -eq 0) -and -not $danglingCaret -and ($missingCaret -eq 0)) "$($model.Id): continuation lines are well formed"
-        Assert-True ($block -match '--jinja' -and $block -match '--ctx-size 32768' -and $block -match "--alias $([regex]::Escape($model.Alias))") "$($model.Id): launcher keeps jinja, context, and alias"
+        Assert-True ($block -match '--jinja' -and $block -match '--parallel 2' -and $block -match '--ctx-size 65536' -and $block -match "--alias $([regex]::Escape($model.Alias))") "$($model.Id): launcher keeps jinja, alias, and a 2-slot pool sized for two conversations"
         $state = Get-Content -LiteralPath (Join-Path $InstallRoot 'active-model.json') -Raw | ConvertFrom-Json
         Assert-True ($state.tool_calling -eq [bool]$model.Tools) "$($model.Id): tool_calling follows the catalog Tools flag"
-        $thinkingOffLine = $launcher -match [regex]::Escape('set "LLAMA_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}"')
         $expectOff = [bool]$model.Reasoning -and [bool]$model.Tools
-        Assert-True (($thinkingOffLine -eq $expectOff) -and (($block -match '--reasoning-budget') -eq ([bool]$model.Reasoning -and -not $expectOff))) "$($model.Id): thinking is off for tool-capable reasoning models"
+        $expectOn = [bool]$model.Reasoning -and -not $expectOff
+        Assert-True ((($block -match '--reasoning off') -eq $expectOff) -and (($block -match '--reasoning on') -eq $expectOn)) "$($model.Id): thinking is off for tool-capable reasoning models"
     }
 
     Write-Host 'Hardware recommendation (16 GB Radeon, 31 GB RAM)'

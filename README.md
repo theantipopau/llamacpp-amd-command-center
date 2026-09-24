@@ -131,7 +131,7 @@ Stronger answers, but it does not fit in 16 GiB of VRAM: about 4.8 GiB runs from
 
 ### Context size
 
-Context is sized from spare VRAM and each model's KV-cache cost: Qwen3.5 9B gets 65536 on a 16 GiB card, dense 8B models get 32768. Tool-capable models get at least 32768 tokens where memory allows, because VS Code Copilot Agent mode sends a large system prompt and tool list. Override it with `-ContextSize`, for example `-Action Models -ModelId qwen3.5-9b -ContextSize 49152`.
+Context is sized per conversation from spare VRAM and each model's KV-cache cost (the server holds two conversations at once, so the pool is twice this size): Qwen3.5 9B gets 65536 on a 16 GiB card, dense 8B models get 32768. Tool-capable models get at least 32768 tokens where memory allows, because VS Code Copilot Agent mode sends a large system prompt and tool list. Override it with `-ContextSize`, for example `-Action Models -ModelId qwen3.5-9b -ContextSize 49152`.
 
 ## If you already use GitHub Copilot
 
@@ -256,13 +256,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 
 ### VS Code says "Sorry, no response was returned"
 
-With thinking enabled, Qwen reasoning models often write their tool call inside the thinking block. llama.cpp then returns it as reasoning, so the reply has no text and no tool call, and VS Code shows this message (in testing, 3 of 5 Agent steps failed this way). The command center therefore turns thinking **off** by default for tool-capable models; the generated launcher sets `LLAMA_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}`. With thinking off, 8 of 8 Agent steps returned a valid tool call.
+With thinking enabled, Qwen reasoning models often write their tool call inside the thinking block. llama.cpp then returns it as reasoning, so the reply has no text and no tool call, and VS Code shows this message (in testing, 3 of 5 Agent steps failed this way). The command center therefore turns thinking **off** by default for tool-capable models; the generated launcher passes `--reasoning off`. With thinking off, 8 of 8 Agent steps returned a valid tool call.
 
 If you activated your model with an older version, re-activate it so the launcher is regenerated, then restart the server. For plain chat in the Web UI you can turn thinking back on with `-Thinking On`:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -Thinking On
 ```
+
+### VS Code says "Server error: 500" and the server log says "Context size has been exceeded"
+
+VS Code can send a second large request (for example a conversation summary) while an Agent turn is still running. If the server's KV cache only holds one conversation, both requests fail. The launcher now starts two slots (`--parallel 2`) with a shared pool twice the per-conversation context (`--ctx-size 131072` for 64k conversations), so two full-size requests fit at once. On an RX 9070 XT with Qwen3.5 9B, two simultaneous 55k- and 58k-token requests both completed. Re-activate your model and restart the server to pick this up.
 
 ### The GPU is not detected
 

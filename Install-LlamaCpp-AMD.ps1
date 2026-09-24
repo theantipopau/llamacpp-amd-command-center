@@ -112,6 +112,10 @@ $script:GitHubHeaders = @{
     'X-GitHub-Api-Version' = '2022-11-28'
 }
 $script:HfApi = 'https://huggingface.co/api/models'
+# Two server slots share one KV pool sized for two full conversations. VS Code sends
+# a compaction/summary request while an Agent turn is still running; with a pool
+# only one conversation deep, both fail with "Context size has been exceeded" (500).
+$script:ServerSlots = 2
 $script:HfRepositoryCache = @{}
 $script:AmdRocmPackageUrl = 'https://repo.radeon.com/rocm/llama.cpp/windows/rocm-rel-7.2.1/llama-b8407-windows-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip'
 $script:AmdRocmPackageName = 'llama-b8407-windows-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip'
@@ -720,9 +724,11 @@ function Get-SuggestedContext {
     # conservative default for dense 4-12B models. 2 GiB is kept for compute buffers.
     $vramHeadroom = Get-VramHeadroom -Model $Model -Hardware $Hardware
     $kvPer32k = if ($Model.PSObject.Properties.Name -contains 'KvGiBPer32k') { [double]$Model.KvGiBPer32k } else { 2.5 }
+    # The server keeps $script:ServerSlots conversations in one shared KV pool, so
+    # each conversation's context must fit that many times over.
     $spare = $vramHeadroom - 2
-    if ($spare -ge ($kvPer32k * 2)) { return 65536 }
-    if ($spare -ge $kvPer32k) { return 32768 }
+    if ($spare -ge ($kvPer32k * 2 * $script:ServerSlots)) { return 65536 }
+    if ($spare -ge ($kvPer32k * $script:ServerSlots)) { return 32768 }
     $budgetHeadroom = [double]$Hardware.ModelBudgetGiB - [double]$Model.ApproxGiB
     if ($Model.Tools -and $budgetHeadroom -ge 3 -and $Hardware.RamGiB -ge 30) { return 32768 }
     if ($vramHeadroom -ge 1.5 -or $Hardware.RamGiB -ge 16) { return 16384 }
@@ -1104,14 +1110,20 @@ function Get-ServerArguments {
         '--gpu-layers', 'auto',
         '--fit', 'on',
         '--fit-target', '1024',
-        '--ctx-size', [string]$EffectiveContext,
+        '--parallel', [string]$script:ServerSlots,
+        '--ctx-size', [string]($EffectiveContext * $script:ServerSlots),
         '--flash-attn', 'on',
         '--cache-type-k', 'q8_0',
         '--cache-type-v', 'q8_0',
         '--jinja'
     )
     if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
-        $arguments += @('--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
+        $arguments += @('--reasoning', 'on', '--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
+    } elseif ([bool]$ActiveModel.reasoning) {
+        # Qwen reasoning models often place the tool call inside the thinking block;
+        # the server then returns it as reasoning with no content and no tool_calls,
+        # and VS Code reports "Sorry, no response was returned".
+        $arguments += @('--reasoning', 'off')
     }
     $arguments += '--metrics'
     return ,$arguments
@@ -1124,19 +1136,6 @@ function Test-ThinkingEnabled {
     # Older active-model.json files predate the setting: keep thinking only for non-tool models.
     $tools = if ($ActiveModel.PSObject.Properties.Name -contains 'tool_calling') { [bool]$ActiveModel.tool_calling } else { $false }
     return ([bool]$ActiveModel.reasoning -and -not $tools)
-}
-
-function Get-ServerEnvironment {
-    param($ActiveModel)
-    # Qwen reasoning models often place the tool call inside the thinking block when
-    # thinking is on; the server then returns it as reasoning, leaving no content and
-    # no tool_calls, and VS Code reports "Sorry, no response was returned". Passed as
-    # an environment variable because JSON quoting does not survive cmd/PS 5.1 argv.
-    $environment = [ordered]@{}
-    if ([bool]$ActiveModel.reasoning -and -not (Test-ThinkingEnabled -ActiveModel $ActiveModel)) {
-        $environment['LLAMA_CHAT_TEMPLATE_KWARGS'] = '{"enable_thinking":false}'
-    }
-    return $environment
 }
 
 function New-Launchers {
@@ -1159,14 +1158,11 @@ function New-Launchers {
         $lines += "  $line"
     }
     $argumentBlock = $lines -join " ^`r`n"
-    $environment = Get-ServerEnvironment -ActiveModel $ActiveModel
-    $environmentBlock = (@($environment.Keys | ForEach-Object { "set `"$_=$($environment[$_])`"" }) -join "`r`n")
 
     $start = @"
 @echo off
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
-$environmentBlock
 pushd "$current"
 "$current\llama-server.exe" ^
 $argumentBlock
@@ -1427,8 +1423,6 @@ function Start-ActiveServer {
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
     $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context
-    $environment = Get-ServerEnvironment -ActiveModel $active
-    foreach ($name in @($environment.Keys)) { Set-Item -Path "Env:$name" -Value $environment[$name] }
 
     Clear-Screen
     Show-Banner
