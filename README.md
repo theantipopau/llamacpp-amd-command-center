@@ -59,6 +59,10 @@ The installer stores its managed files under:
 
 Models and runtime files are kept separate from this source repository. The batch front end does not silently install or download anything until the corresponding action is selected.
 
+## Console appearance
+
+The batch front end sets a wide 140-column console and uses high-contrast CMD colors. CMD cannot reliably change the active font from inside a `.cmd` file; for the intended appearance, use **Windows Terminal** with **Cascadia Mono** or **Consolas**. The menu uses safe text labels and geometric separators so it remains readable even when emoji glyphs are unavailable in the current console font.
+
 ## Supported Windows path
 
 | Component | Behavior |

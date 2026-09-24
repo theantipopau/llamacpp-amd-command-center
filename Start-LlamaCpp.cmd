@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul 2>&1
+mode con: cols=140 lines=45 >nul 2>&1
 title llama.cpp for Windows - AMD CPU and GPU Command Center
 
 rem ============================================================================
@@ -35,37 +36,38 @@ if not exist "%PS_SCRIPT%" (
 
 :menu
 cls
-color 0B
+color 0F
 echo.
-echo  =============================================================================
-echo   LLAMA.CPP FOR WINDOWS        AMD CPU + GPU CONTROL CENTER
-echo  =============================================================================
+echo  ========================================================================================================
+echo   LLAMA.CPP / AMD WINDOWS COMMAND CENTER
+echo   Local AI setup for AMD Ryzen and Radeon systems
+echo  ========================================================================================================
 echo   Created by Matt Hurley - matthurley.dev
 echo.
-echo   FIRST TIME HERE? Choose [1] to scan hardware and install.
-echo   NEW OR UNSURE? The command center explains every choice.
+echo  [ FIRST-TIME PATH ]  Choose [1] if you are new to local LLMs.
+echo  [ ALREADY READY? ]   Choose [2] to start the active model, or [6] to test it.
+echo  [ L ]  LOCAL ENGINE     llama.cpp server, Web UI, and localhost API
+echo  [ M ]  MODEL LAYER      hardware-fit advice and verified GGUF downloads
+echo  [ V ]  VS CODE LAYER    llama-vscode, Continue, and Cline guidance
+echo  [ A ]  API LAYER        local OpenAI-compatible endpoint
 echo.
-echo   [L] Local LLM engine       llama.cpp server + Web UI
-echo   [M] Model layer            verified GGUF models with hardware fit advice
-echo   [V] VS Code layer          official llama-vscode, Continue, and Cline
-echo   [A] API layer              local OpenAI-compatible endpoint
+echo  --------------------------------------------------------------------------------------------------------
+echo   [1]  FIRST-TIME SETUP       Scan hardware, install backend, and activate the recommended model
+echo   [2]  START LOCAL SERVER     Run the active model with its Web UI and local API
+echo   [3]  INSTALL VS CODE        Install the official llama-vscode extension
+echo   [4]  CONTINUE TEMPLATE      Create a safe local-provider YAML template
+echo   [5]  CLINE SETTINGS         Show OpenAI-compatible connection values
+echo   [6]  TEST LOCAL API         Check whether the server is ready
+echo   [7]  COMPLETE WALKTHROUGH   Read the full beginner-friendly setup guide
+echo   [8]  OFFICIAL LINKS         Open trusted upstream project information
+echo   [9]  VIEW LATEST LOG        Read the most recent persistent run log
+echo   [0]  EXIT                   Close the command center
+echo  ----------------------------------------------------------------------------------------------------------
 echo.
-echo   MENU
-echo   ---------------------------------------------------------------------
-echo   [1] Start first-time setup / hardware scan (recommended)
-echo   [2] Start the active local llama.cpp model server
-echo   [3] Install the official llama-vscode VS Code extension
-echo   [4] Create a safe Continue llama.cpp configuration template
-echo   [5] Show Cline / OpenAI-compatible connection settings
-echo   [6] Test the local llama.cpp OpenAI-compatible API
-echo   [7] Show the complete walkthrough and technical notes
-echo   [8] Show official links and author information
-echo   [9] View the latest run log
-echo   [0] Exit
-echo   ---------------------------------------------------------------------
+echo  TIP: Windows Terminal with Cascadia Mono or Consolas gives the cleanest display.
 echo.
 set "choice="
-set /p "choice=Select an option: "
+set /p "choice=Choose an option (0 to exit): "
 if defined choice set "choice=%choice:~0,1%"
 if not defined choice set "choice=0"
 
@@ -112,7 +114,7 @@ cls
 color 0A
 echo.
 echo  STARTING THE ACTIVE LOCAL MODEL
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  The active model is launched by:
 echo    "%SERVER_CMD%"
 echo.
@@ -140,7 +142,7 @@ cls
 color 0B
 echo.
 echo  OFFICIAL VS CODE EXTENSION
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Extension: llama-vscode
 echo  Publisher: ggml.org / ggml.ai
 echo  ID: %EXTENSION_ID%
@@ -178,7 +180,7 @@ cls
 color 0A
 echo.
 echo  CONTINUE CONFIGURATION TEMPLATE
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  This creates a separate template and does not overwrite your existing
 echo  Continue configuration.
 echo.
@@ -219,7 +221,7 @@ cls
 color 0B
 echo.
 echo  CLINE / OPENAI-COMPATIBLE SETTINGS
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Provider:       OpenAI Compatible
 echo  Base URL:       %API_URL%/v1
 echo  Model:          qwen3.8:latest
@@ -239,7 +241,7 @@ cls
 color 0B
 echo.
 echo  TESTING THE LOCAL LLAMA.CPP API
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Endpoint: %API_MODELS_URL%
 echo.
 powershell.exe -NoLogo -NoProfile -Command "$ErrorActionPreference='Stop'; $r=Invoke-RestMethod -Uri '%API_MODELS_URL%'; Write-Output 'API reachable. Server response:'; Write-Output $r"
@@ -262,12 +264,12 @@ goto :menu
 cls
 color 0E
 echo.
-echo  =============================================================================
+echo  ========================================================================================================
 echo   COMPLETE WALKTHROUGH: LLAMA.CPP TO VISUAL STUDIO CODE
-echo  =============================================================================
+echo  ========================================================================================================
 echo.
 echo  STEP 1 - DETECT HARDWARE
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  The PowerShell command center detects:
 echo    - AMD Ryzen / EPYC CPU cores and threads
 echo    - Radeon dGPU and Ryzen iGPU devices
@@ -275,7 +277,7 @@ echo    - True DXGI dedicated VRAM, avoiding the WMI 4 GiB reporting cap
 echo    - System RAM, Vulkan loader, and AMD driver state
 echo.
 echo  STEP 2 - SELECT THE BACKEND
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Auto mode selects:
 echo    - AMD ROCm 7.2.1 for supported Radeon dGPUs such as RX 9070 XT
 echo    - Vulkan for Ryzen iGPUs, older Radeon cards, and unsupported GPUs
@@ -284,13 +286,13 @@ echo  ROCm is AMD's validated Windows path for supported Radeon hardware.
 echo  Vulkan is the portable fallback and uses the AMD Vulkan driver.
 echo.
 echo  STEP 3 - INSTALL LLAMA.CPP
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  The command center downloads the official backend package, verifies the
 echo  available upstream SHA-256 digest, extracts llama-server.exe, validates
 echo  the runtime, and preserves models during updates.
 echo.
 echo  STEP 4 - INSTALL A GGUF MODEL
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  The recommended model for a Radeon RX 9070 XT with 16 GB VRAM and 32 GB
 echo  system RAM is Qwen3.8-27B Q4_K_M.
 echo.
@@ -304,7 +306,7 @@ echo  The script resolves Hugging Face metadata at download time and verifies
 echo  each Git LFS SHA-256 digest.
 echo.
 echo  STEP 5 - START THE LOCAL SERVER
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Use the generated launcher:
 echo    "%SERVER_CMD%"
 echo.
@@ -315,7 +317,7 @@ echo.
 echo  The server binds to 127.0.0.1 only. It is private to this PC.
 echo.
 echo  STEP 6 - CONNECT VS CODE
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Official llama-vscode extension:
 echo    code --install-extension %EXTENSION_ID%
 echo.
@@ -330,27 +332,27 @@ echo    Model:    qwen3.8:latest
 echo    API key:  any non-empty placeholder
 echo.
 echo  STEP 7 - TEST THE CONNECTION
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  From this menu choose [6], or run:
 echo    Invoke-RestMethod %API_MODELS_URL%
 echo.
 echo  If the response includes qwen3.8:latest, the server is ready for VS Code.
 echo.
 echo  IMPORTANT MODEL NOTE
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  Qwen3.8 is a strong general reasoning, chat, tool, and vision model.
 echo  The official llama-vscode extension may perform best for inline completion
 echo  with an FIM-capable coding model. The general model remains suitable for
 echo  chat, editing, and agent workflows.
 echo.
 echo  COPILOT AND LOCAL LLM
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  GitHub Copilot can stay installed and enabled. This project does not
 echo  remove or reconfigure Copilot. Use llama-vscode, Continue, or Cline
 echo  when you want a request handled by your local model instead.
 echo.
 echo  STEP 8 - IF SOMETHING GOES WRONG
-echo  ---------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------
 echo  API test fails: start the server with [2], wait for loading, test [6].
 echo  code not found: VS Code may still be installed. Open VS Code and select
 echo  Extensions, search llama-vscode, and install it there; or add VS Code to PATH.
@@ -365,7 +367,7 @@ cls
 color 0F
 echo.
 echo  OFFICIAL INFORMATION AND LINKS
-echo  =============================================================================
+echo  ========================================================================================================
 echo.
 echo  Official llama.cpp VS Code extension:
 echo    https://marketplace.visualstudio.com/items?itemName=ggml-org.llama-vscode
@@ -394,9 +396,9 @@ echo.
 echo  AMD Vulkan and UMA guidance:
 echo    https://www.amd.com/en/resources/support-articles/faqs/PA-280.html
 echo.
-echo  -----------------------------------------------------------------------------
+echo  --------------------------------------------------------------------------------------------------------------
 echo  Created by Matt Hurley - matthurley.dev
-echo  -----------------------------------------------------------------------------
+echo  ----------------------------------------------------------------------------------------------------------------
 echo.
 call :wait_for_key
 goto :menu
@@ -422,10 +424,10 @@ exit /b 0
 cls
 color 0A
 echo.
-echo  =============================================================================
+echo  ========================================================================================================
 echo   Thank you for using the llama.cpp for Windows command center.
 echo   Created by Matt Hurley - matthurley.dev
-echo  =============================================================================
+echo  ========================================================================================================
 echo.
 echo  Official project: https://github.com/ggml-org/llama.cpp
 echo  VS Code extension: https://marketplace.visualstudio.com/items?itemName=ggml-org.llama-vscode

@@ -43,6 +43,10 @@ These screenshots show the intended first-time experience: the hardware-aware da
 | **V — VS Code** | Official llama-vscode, Continue, and Cline instructions |
 | **A — API** | OpenAI-compatible local endpoint for compatible tools |
 
+## Console appearance
+
+The batch front end sets a 140-column console and uses high-contrast CMD colors. For the intended premium appearance, use Windows Terminal with Cascadia Mono or Consolas. CMD cannot reliably change the active font from inside a batch file, so the interface uses safe labels and separators instead of depending on emoji glyphs.
+
 ## Hardware-aware backend choice
 
 ### AMD ROCm
