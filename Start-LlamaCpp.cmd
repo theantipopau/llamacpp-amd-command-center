@@ -175,6 +175,11 @@ if not exist "%SERVER_CMD%" (
     call :wait_for_key
     goto :menu
 )
+if "%SERVER_STATE%"=="stopped" call :pick_model
+if "%PICK_ABORT%"=="1" (
+    call :wait_for_key
+    goto :menu
+)
 if "%SERVER_STATE%"=="stopped" (
     echo   Opening the server in its own window: %WHITE%"llama.cpp AI server"%R%
     echo   %DIM%Keep that window open while you use the model. Closing it stops the server.%R%
@@ -527,6 +532,56 @@ rem ============================================================================
 echo.
 echo  %CYAN%%B%  %~1%R%
 echo %LINE%
+echo.
+exit /b 0
+
+:pick_model
+rem Lists downloaded models and switches instantly (offline) before the server starts.
+rem Shown only when two or more models are downloaded; Enter keeps the current one.
+set "PICK_ABORT=0"
+set "PICK_COUNT=0"
+for /f "usebackq tokens=1-4 delims=|" %%A in (`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Action ListInstalled ^<nul 2^>nul`) do (
+    set "PICK_ID_%%A=%%B"
+    set "PICK_NAME_%%A=%%C"
+    set "PICK_STATE_%%A=%%D"
+    set "PICK_COUNT=%%A"
+)
+if %PICK_COUNT% lss 2 exit /b 0
+echo  %WHITE%%B%  WHICH MODEL?%R%  %DIM%%PICK_COUNT% models are downloaded.%R%
+echo.
+for /l %%i in (1,1,%PICK_COUNT%) do (
+    if "!PICK_STATE_%%i!"=="active" echo     %CYAN%[%%i]%R%  %WHITE%!PICK_NAME_%%i!%R%  %GREEN%current%R%
+    if "!PICK_STATE_%%i!"=="ready" echo     %CYAN%[%%i]%R%  %WHITE%!PICK_NAME_%%i!%R%
+    if "!PICK_STATE_%%i!"=="blocked" echo     %DIM%[%%i]  !PICK_NAME_%%i!  - cannot run on the installed llama.cpp build%R%
+)
+echo.
+set "pick="
+set /p "pick=  Choose a number, or press Enter to keep %ACTIVE_NAME%: "
+echo.
+if not defined pick exit /b 0
+for /f "delims=0123456789" %%x in ("!pick!") do goto :pick_invalid
+if %pick% lss 1 goto :pick_invalid
+if %pick% gtr %PICK_COUNT% goto :pick_invalid
+if "!PICK_STATE_%pick%!"=="active" exit /b 0
+if "!PICK_STATE_%pick%!"=="blocked" (
+    echo   %YELLOW%!PICK_NAME_%pick%! cannot run on the installed llama.cpp build.%R% Keeping %ACTIVE_NAME%.
+    echo   %DIM%The README Troubleshooting section explains why.%R%
+    echo.
+    exit /b 0
+)
+echo   Switching to %WHITE%!PICK_NAME_%pick%!%R% ...
+%PS_RUN% -Action Activate -ModelId !PICK_ID_%pick%! <nul
+if errorlevel 1 (
+    echo   %RED%The switch failed.%R% The previous model is still set up. Choose [9] to read the log.
+    set "PICK_ABORT=1"
+    exit /b 0
+)
+call :read_status
+echo.
+exit /b 0
+
+:pick_invalid
+echo   %YELLOW%That is not a number from the list.%R% Keeping %ACTIVE_NAME%.
 echo.
 exit /b 0
 

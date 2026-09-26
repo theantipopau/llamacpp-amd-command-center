@@ -23,6 +23,7 @@ $InstallRoot = Join-Path $work 'install'
 $Port = 8080
 $Force = $true
 $Thinking = 'Auto'
+$ContextSize = 0
 $script:ServerSlots = 2
 $script:CommandCenterVersion = '0.1.5'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
@@ -146,6 +147,32 @@ try {
     Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 32768 -SkipVerification
     $launcherText = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
     Assert-True ($launcherText -notmatch '--device') 'no device flag when no llama.cpp build is installed to ask'
+
+    Write-Host 'Model picker: downloaded models only, instant offline switch'
+    $modelsDir = Join-Path $InstallRoot 'models'
+    New-Item -ItemType Directory -Path $modelsDir -Force | Out-Null
+    foreach ($name in 'Qwen3.5-9B-Q4_K_M.gguf', 'mmproj-F16.gguf', 'Qwen3-4B-Q4_K_M.gguf', 'Ornith-1.5-9B-Q4_K_M.gguf', 'mmproj-Ornith-1.5-9B-BF16.gguf', 'gemma-3-12b-it-Q4_K_M.gguf') {
+        [IO.File]::WriteAllText((Join-Path $modelsDir $name), 'x')
+    }
+    New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'current') -Force | Out-Null
+    '{"backend":"ROCm","tag":"rocm-7.2.1-b8407"}' | Set-Content -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Encoding UTF8
+    Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 65536 -SkipVerification
+    $list = @(Get-InstalledModelList)
+    $ids = @($list | ForEach-Object { ($_ -split '\|')[1] })
+    Assert-True (($ids -contains 'qwen3.5-9b') -and ($ids -contains 'qwen3-4b') -and ($ids -contains 'ornith-1.5-9b')) 'lists every model whose files are downloaded'
+    Assert-True ($ids -notcontains 'gemma3-12b') 'a model missing its vision projector is not listed as downloaded'
+    Assert-True (@($list | Where-Object { $_ -match '\|qwen3\.5-9b\|.*\|active$' }).Count -eq 1) 'the active model is marked active'
+    Assert-True (@($list | Where-Object { $_ -match '\|ornith-1\.5-9b\|.*\|blocked$' }).Count -eq 1) 'Ornith is marked blocked on the ROCm package'
+    Switch-InstalledModel -Model (Get-ModelById 'qwen3-4b') -Hardware $hwBoth *> $null
+    Assert-True ((Get-ActiveModel).id -eq 'qwen3-4b') 'switching activates the chosen downloaded model'
+    $threwBlocked = $false
+    try { Switch-InstalledModel -Model $ornith -Hardware $hwBoth *> $null } catch { $threwBlocked = $true }
+    Assert-True ($threwBlocked -and (Get-ActiveModel).id -eq 'qwen3-4b') 'a blocked model is refused and the active model is unchanged'
+    $threwMissing = $false
+    try { Switch-InstalledModel -Model (Get-ModelById 'llama3.1-8b') -Hardware $hwBoth *> $null } catch { $threwMissing = $true }
+    Assert-True $threwMissing 'a model that is not downloaded is refused instead of downloading'
+    Remove-Item -LiteralPath $modelsDir -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Force
 
     Write-Host 'Command-center self-update version comparison'
     Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'

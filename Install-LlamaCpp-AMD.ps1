@@ -80,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -1440,6 +1440,48 @@ function Get-ModelRuntimeBlocker {
     return ''
 }
 
+function Get-InstalledModels {
+    # Catalog models whose files are already downloaded. Local only: no network, no hashing.
+    $modelsRoot = Join-Path $InstallRoot 'models'
+    return @(Get-ModelCatalog | Where-Object {
+        (Test-Path -LiteralPath (Join-Path $modelsRoot $_.File) -PathType Leaf) -and
+        ([string]::IsNullOrWhiteSpace([string]$_.Projector) -or (Test-Path -LiteralPath (Join-Path $modelsRoot $_.Projector) -PathType Leaf))
+    })
+}
+
+function Get-InstalledModelList {
+    # One line per downloaded model for the batch menu: number|id|name|state.
+    # state: active, blocked (cannot run on the installed llama.cpp build) or ready.
+    $active = Get-ActiveModel
+    $activeId = if ($null -ne $active) { [string]$active.id } else { '' }
+    $runtime = Get-InstalledRuntime
+    $lines = @()
+    $number = 0
+    foreach ($model in (Get-InstalledModels)) {
+        $number++
+        $state = 'ready'
+        if (Get-ModelRuntimeBlocker -Model $model -Runtime $runtime) { $state = 'blocked' }
+        elseif ($model.Id -eq $activeId) { $state = 'active' }
+        $lines += "$number|$($model.Id)|$($model.Name)|$state"
+    }
+    return $lines
+}
+
+function Switch-InstalledModel {
+    # Instant, offline switch between downloaded models. Files were verified against
+    # their published SHA-256 when downloaded, so this does not re-hash gigabytes.
+    param($Model, $Hardware)
+    $installed = @(Get-InstalledModels | Where-Object { $_.Id -eq $Model.Id })
+    if ($installed.Count -eq 0) { throw "$($Model.Name) is not downloaded yet. Use the model browser to download it." }
+    $blocker = Get-ModelRuntimeBlocker -Model $Model -Runtime (Get-InstalledRuntime)
+    if ($blocker) { throw $blocker }
+    $context = $ContextSize
+    if ($context -eq 0) { $context = Get-SuggestedContext -Model $Model -Hardware $Hardware }
+    Set-ActiveModel -Model $Model -EffectiveContext $context
+    Write-Success "$($Model.Name) is now the active model (context $context)."
+    Sync-VsCodeChatEndpoint
+}
+
 function Resolve-BackendChoice {
     param([string] $RequestedBackend, $Hardware, $Runtime)
     if ($RequestedBackend -ne 'Auto') { return $RequestedBackend }
@@ -2357,6 +2399,11 @@ try {
         exit 0
     }
 
+    if ($Action -eq 'ListInstalled') {
+        Get-InstalledModelList | ForEach-Object { Write-Output $_ }
+        exit 0
+    }
+
     if ($Action -eq 'SelfTest') {
         $passed = Test-LocalServer
         if ($passed) { exit 0 } else { exit 1 }
@@ -2428,6 +2475,10 @@ try {
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
         'Monitor' { Show-LiveMonitor }
+        'Activate' {
+            if ($ModelId -ieq 'auto') { throw 'Choose a model with -ModelId, for example -ModelId qwen3.5-9b.' }
+            Switch-InstalledModel -Model (Get-ModelById -Id $ModelId) -Hardware $hardware
+        }
         'Install' {
             $tag = Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend
             if ($null -eq $tag) {
