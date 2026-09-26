@@ -1414,6 +1414,19 @@ function Install-Model {
     if ($context -eq 0) { $context = Get-SuggestedContext -Model $Model -Hardware $Hardware }
     Set-ActiveModel -Model $Model -EffectiveContext $context
     Write-Success "$($Model.Name) is installed and active at context $context."
+    Sync-VsCodeChatEndpoint
+}
+
+function Sync-VsCodeChatEndpoint {
+    # Once you have connected VS Code, every model switch updates its entry to the model the
+    # server will actually load. It never adds the entry on its own: that stays opt-in via [6].
+    $configPath = Join-Path $env:APPDATA "Code\User\chatLanguageModels.json"
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
+    try {
+        $connected = @(Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $null -ne $_ -and @("llama.cpp local", "llama.cpp ROCm") -contains $_.name }).Count -gt 0
+    } catch { Write-WarnLine "VS Code Chat was not synced: its settings file is not valid JSON."; return }
+    if (-not $connected) { return }
+    if (Install-VsCodeChatEndpoint -NoPrompt) { Write-Info "VS Code Chat now lists the active model. Reload the VS Code window to see it." }
 }
 
 function Confirm-ModelDownload {
@@ -1691,6 +1704,7 @@ function Test-LocalServer {
 }
 
 function Install-VsCodeChatEndpoint {
+    param([switch] $NoPrompt)
     $active = Get-ActiveModel
     if ($null -eq $active) {
         throw 'No model is active. Choose the model browser and install a model before configuring VS Code.'
@@ -1748,7 +1762,7 @@ function Install-VsCodeChatEndpoint {
     }
 
     $existing = @($configs | Where-Object { $managedNames -contains $_.name })
-    if ($existing.Count -gt 0 -and -not $Force) {
+    if ($existing.Count -gt 0 -and -not ($Force -or $NoPrompt)) {
         Write-Host "`n  This will update the existing llama.cpp provider in:" -ForegroundColor Yellow
         Write-Host "    $configPath" -ForegroundColor White
         Write-Host '  Your Copilot and unrelated custom providers will be preserved.' -ForegroundColor Gray
@@ -1756,7 +1770,7 @@ function Install-VsCodeChatEndpoint {
             Write-WarnLine 'VS Code Chat configuration cancelled.'
             return $false
         }
-    } elseif (-not $Force) {
+    } elseif (-not ($Force -or $NoPrompt)) {
         Write-Host "`n  About to configure VS Code Chat with:" -ForegroundColor Yellow
         Write-Host "    Model:  $($active.alias)" -ForegroundColor White
         Write-Host "    API:    http://127.0.0.1:$Port/v1/chat/completions" -ForegroundColor White

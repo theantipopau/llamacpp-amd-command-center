@@ -213,6 +213,17 @@ try {
     Assert-True ($local.toolCalling -and $local.id -eq 'qwen3.5:9b') 'tool calling and alias are set'
     Assert-True (Test-Path -LiteralPath ($cfg + '.command-center.bak')) 'backup was written'
 
+    Set-ActiveModel -Model (Get-ModelById 'ornith-1.5-9b') -EffectiveContext 65536 -SkipVerification
+    Sync-VsCodeChatEndpoint *> $null
+    $synced = @([IO.File]::ReadAllText($cfg) | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.name -eq 'llama.cpp local' })[0].models[0]
+    Assert-True ($synced.id -eq 'ornith:1.5-9b') 'switching models re-syncs a connected VS Code entry to the new model'
+    $names = @([IO.File]::ReadAllText($cfg) | ConvertFrom-Json | ForEach-Object { $_.name })
+    Assert-True ($names -contains 'Copilot') 'auto-sync keeps the other providers'
+
+    [IO.File]::WriteAllText($cfg, '[{"name":"Copilot","vendor":"copilot"}]')
+    Sync-VsCodeChatEndpoint *> $null
+    Assert-True (([IO.File]::ReadAllText($cfg)) -notmatch 'llama\.cpp local') 'auto-sync never adds the entry when VS Code was not connected'
+
     [IO.File]::WriteAllText($cfg, '{ not json')
     $threw = $false
     try { Install-VsCodeChatEndpoint *> $null } catch { $threw = $true }
