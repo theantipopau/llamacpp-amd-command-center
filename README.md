@@ -59,8 +59,9 @@ The **NEXT STEP** line at the top of the menu always tells you what to do next.
 | **[7] Other editors** | The official llama-vscode extension, a Continue settings file, and settings for Cline or any OpenAI-compatible tool. |
 | **[8] Beginner guide** | Plain-English explanations of every term, plus official links. |
 | **[9] Logs and fixes** | The latest run log and answers to common problems. |
+| **[M] Live monitor** | Watches server status, active model, and prompt/generation speed, refreshing every 2 seconds. Press `Q` then Enter to leave it. |
 
-The status panel shows the active model, whether the AI server is running, and whether VS Code is connected.
+The status panel shows the active model, whether the AI server is running, and whether VS Code is connected. It also prints a one-line notice if a newer command-center release exists on GitHub — nothing downloads automatically.
 
 ## Using the model in VS Code
 
@@ -97,6 +98,7 @@ The setup recommends the **strongest tool-capable model that fits entirely in yo
 | Gemma 3 12B | 7.6 GB | | ✓ | Chat and image understanding; not for Agent mode. |
 | Gemma 3 4B | 3.1 GB | | ✓ | For 8 GB systems and Ryzen integrated graphics. |
 | Qwen3 4B | 2.3 GB | ✓ | | Smallest and fastest; good for CPU-only machines. |
+| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | Community coding/reasoning fine-tune of Qwen3.5 9B, MIT-licensed. Same VRAM and context profile as Qwen3.5 9B, so it is offered as a drop-in **A/B option**, never the automatic default. Publisher-reported improvements are not independently verified here — try both and judge for your own workloads. |
 
 The model browser in **[1]** shows each model's fit for *your* PC: `VRAM` means it fits in graphics memory, `VRAM+RAM` means it spills into system RAM and runs more slowly. Downloads come from Hugging Face; the current revision and SHA-256 are resolved at download time, and files are verified before they are activated.
 
@@ -177,10 +179,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `Diagnostics` | llama.cpp version, detected devices, and active model check. |
 | `ViewLog` | Show the latest run log. |
 | `Uninstall` | Remove llama.cpp, all downloaded models, and the launchers (asks first). |
+| `Monitor` | The live monitor from menu option [M]: server status, active model, and prompt/generation speed, refreshing every 2 seconds. |
+| `CheckUpdate` | Check GitHub for a newer command-center release. Prints a message; never downloads or installs anything. |
 
 | Option | Meaning |
 |---|---|
-| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b` |
+| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b`, `ornith-1.5-9b` |
 | `-ContextSize` | Tokens per conversation. `0` (default) sizes it from your hardware. |
 | `-Thinking` | `Auto` (default: off for tool-capable models), `On`, or `Off`. |
 | `-Backend` | `Auto` (default), `ROCm`, or `Vulkan`. |
@@ -196,6 +200,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `%LOCALAPPDATA%\Programs\llama.cpp\Start-LlamaCpp.cmd` | The generated server launcher that menu option [2] runs. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\active-model.json` | The active model and its settings. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\logs` | Run logs (`run-*.log`, `run-*.jsonl`, `run-*-summary.json`, `latest.log`). |
+| `%LOCALAPPDATA%\Programs\llama.cpp\server-args.user.json` | Optional. Your own `llama-server` flags as a JSON array of strings, e.g. `["--threads", "12", "--no-mmap"]`. Merged in **last**, after every program and hardware default, so your choices always win. This file is never created or overwritten by setup or updates — it is entirely yours. |
 
 To remove everything, choose **Uninstall** in **[1]**. It asks for confirmation and does not touch VS Code, Copilot, or this folder.
 

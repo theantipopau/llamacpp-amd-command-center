@@ -80,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -105,6 +105,8 @@ $ProgressPreference = 'SilentlyContinue'
 
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+$script:CommandCenterVersion = '0.1.4'
+$script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
     Accept = 'application/vnd.github+json'
@@ -366,6 +368,14 @@ function Get-ModelCatalog {
             Repo = 'unsloth/Qwen3.5-9B-GGUF'; File = 'Qwen3.5-9B-Q4_K_M.gguf'
             Projector = 'mmproj-F16.gguf'; ApproxGiB = 6.20; Rank = 96; KvGiBPer32k = 0.75
             Tag = 'FAST AGENT'; Description = 'Fast 9B reasoning and coding model with vision and tool support; designed for responsive local VS Code agents.'
+            Reasoning = $true; Vision = $true; Tools = $true
+        },
+        [pscustomobject]@{
+            Id = 'ornith-1.5-9b'; Name = 'Ornith 1.5 9B'; Alias = 'ornith:1.5-9b'
+            Repo = 'ornith-ai/Ornith-1.5-9B-GGUF'; File = 'Ornith-1.5-9B-Q4_K_M.gguf'
+            Projector = 'mmproj-Ornith-1.5-9B-BF16.gguf'; ApproxGiB = 6.20; Rank = 95; KvGiBPer32k = 0.75
+            Tag = 'COMMUNITY / EXPERIMENTAL'
+            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Benchmark locally with [8] before making it your default.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
@@ -783,6 +793,11 @@ function Show-HardwareAdvisor {
         }
     }
 
+    $ignoredIntel = @($Hardware.Gpus | Where-Object { -not $_.IsAmd -and $_.Name -match '(?i)Intel' })
+    if ($ignoredIntel.Count -gt 0) {
+        Write-Host "`n  Ignored graphics: Intel integrated graphics is outside this project's acceleration scope." -ForegroundColor DarkGray
+    }
+
     Write-Host "`n  MODEL FIT ANALYSIS" -ForegroundColor White
     foreach ($item in ($assessment | Select-Object -First 6)) {
         $badge = $item.Status.PadRight(17)
@@ -960,11 +975,14 @@ function Remove-UserPathEntry {
 
 function Assert-HardwareForLlama {
     param($Hardware)
+    # The Radeon GPU is what this project accelerates; the host CPU vendor never
+    # gates that. An Intel CPU paired with a Radeon dGPU is a normal, fully
+    # supported configuration and must not be treated as a warning condition.
     if ((-not $Hardware.HasAmdGpu) -and -not $Force) {
         throw 'No AMD Radeon Vulkan GPU was detected. Use -Force only if DXGI inventory is incorrect.'
     }
-    if ((-not $Hardware.HasAmdCpu) -and -not $Force) {
-        Write-WarnLine 'No AMD Ryzen/EPYC CPU was detected. The CPU backend remains available.'
+    if (-not $Hardware.HasAmdCpu) {
+        Write-Info 'Intel host CPU detected. Intel CPUs are fully supported; Intel GPU acceleration is not part of this project.'
     }
 }
 
@@ -1116,6 +1134,56 @@ function Get-ActiveModel {
     try { return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } catch { return $null }
 }
 
+function Get-UserArgsOverridePath {
+    Join-Path $InstallRoot 'server-args.user.json'
+}
+
+function Get-UserServerArgOverrides {
+    # A user-owned, update-safe override file: a JSON array of strings, each a flag
+    # or a flag's value (e.g. ["--threads", "12", "--no-mmap"]). Never written by this
+    # script; only read and merged last, so it is never overwritten by an update.
+    $path = Get-UserArgsOverridePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return ,@() }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) { return ,@() }
+        $parsed = $raw | ConvertFrom-Json
+    } catch {
+        Write-WarnLine "server-args.user.json is not valid JSON; ignoring it until it is fixed. ($($_.Exception.Message))"
+        return ,@()
+    }
+    $items = @($parsed)
+    foreach ($item in $items) {
+        if ($item -isnot [string]) {
+            Write-WarnLine 'server-args.user.json must be a JSON array of strings (flags and their values); ignoring it.'
+            return ,@()
+        }
+    }
+    return ,@($items)
+}
+
+function Merge-ServerArguments {
+    param([string[]] $Base, [string[]] $Overrides)
+    # User overrides win: drop any base flag (and its paired value) that an override
+    # also sets, then append the overrides so they apply last.
+    if ($null -eq $Overrides -or $Overrides.Count -eq 0) { return ,@($Base) }
+    $overrideFlags = @($Overrides | Where-Object { $_.StartsWith('--') })
+    $result = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $Base.Count) {
+        $flag = $Base[$i]
+        if ($flag.StartsWith('--') -and ($overrideFlags -contains $flag)) {
+            $i++
+            if ($i -lt $Base.Count -and -not $Base[$i].StartsWith('--')) { $i++ }
+            continue
+        }
+        $result.Add($flag)
+        $i++
+    }
+    $result.AddRange([string[]]$Overrides)
+    return ,@($result.ToArray())
+}
+
 function Get-ServerArguments {
     param($ActiveModel, [int] $EffectiveContext)
     # Single source of truth for both the generated launcher and Start-ActiveServer.
@@ -1148,7 +1216,7 @@ function Get-ServerArguments {
         $arguments += @('--reasoning', 'off')
     }
     $arguments += '--metrics'
-    return ,$arguments
+    return ,(Merge-ServerArguments -Base $arguments -Overrides (Get-UserServerArgOverrides))
 }
 
 function Test-ThinkingEnabled {
@@ -1677,6 +1745,119 @@ function Remove-Installation {
 }
 
 # ---------------------------------------------------------------------
+# Command-center self-update check (never auto-updates; informational only)
+# ---------------------------------------------------------------------
+
+function Compare-SemVer {
+    param([string] $A, [string] $B)
+    function Get-VersionParts([string] $Value) {
+        $clean = $Value.TrimStart('v', 'V')
+        $numeric = ($clean -split '-')[0]
+        return @($numeric -split '\.' | ForEach-Object { $n = 0; [void][int]::TryParse($_, [ref]$n); $n })
+    }
+    $partsA = @(Get-VersionParts $A)
+    $partsB = @(Get-VersionParts $B)
+    $length = [Math]::Max($partsA.Count, $partsB.Count)
+    for ($i = 0; $i -lt $length; $i++) {
+        $x = if ($i -lt $partsA.Count) { $partsA[$i] } else { 0 }
+        $y = if ($i -lt $partsB.Count) { $partsB[$i] } else { 0 }
+        if ($x -ne $y) { return [Math]::Sign($x - $y) }
+    }
+    return 0
+}
+
+function Test-CommandCenterUpdate {
+    # Best-effort only: any failure (offline, rate limit) is reported, never thrown.
+    try {
+        $latest = Invoke-RestMethod -Uri ("https://api.github.com/repos/$script:CommandCenterRepo/releases/latest") -Headers $script:GitHubHeaders -TimeoutSec 5
+        $tag = [string]$latest.tag_name
+        $cmp = Compare-SemVer -A $tag -B $script:CommandCenterVersion
+        return [pscustomobject]@{
+            Checked = $true; Current = $script:CommandCenterVersion; Latest = $tag
+            UpdateAvailable = ($cmp -gt 0); Url = [string]$latest.html_url; Error = ''
+        }
+    } catch {
+        return [pscustomobject]@{
+            Checked = $false; Current = $script:CommandCenterVersion; Latest = ''
+            UpdateAvailable = $false; Url = ''; Error = $_.Exception.Message
+        }
+    }
+}
+
+# ---------------------------------------------------------------------
+# Live monitor
+# ---------------------------------------------------------------------
+
+function Get-ServerMetricsSnapshot {
+    $base = "http://127.0.0.1:$Port"
+    $snapshot = [pscustomobject]@{ Health = $null; Props = $null; PromptTokPerSec = $null; GenerationTokPerSec = $null }
+    try { $snapshot.Health = Invoke-RestMethod -Uri "$base/health" -TimeoutSec 3 } catch { }
+    try { $snapshot.Props = Invoke-RestMethod -Uri "$base/props" -TimeoutSec 3 } catch { }
+    try {
+        $metricsText = Invoke-RestMethod -Uri "$base/metrics" -TimeoutSec 3
+        $text = [string]$metricsText
+        $pp = [regex]::Match($text, 'llamacpp:prompt_tokens_seconds\s+([0-9.eE+-]+)')
+        $tg = [regex]::Match($text, 'llamacpp:predicted_tokens_seconds\s+([0-9.eE+-]+)')
+        if ($pp.Success) { $snapshot.PromptTokPerSec = [double]$pp.Groups[1].Value }
+        if ($tg.Success) { $snapshot.GenerationTokPerSec = [double]$tg.Groups[1].Value }
+    } catch { }
+    return $snapshot
+}
+
+function Show-LiveMonitor {
+    Write-Host "`n  LIVE MONITOR — refreshes every 2 seconds. Type Q then Enter to return." -ForegroundColor White
+    while ($true) {
+        $active = Get-ActiveModel
+        $process = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
+        $snapshot = Get-ServerMetricsSnapshot
+
+        Clear-Screen
+        Show-Banner
+        Write-Host '  LIVE MONITOR' -ForegroundColor White
+
+        $statusLabel = if ($null -ne $snapshot.Health) { '[RUNNING]' } elseif ($null -ne $process) { '[STARTING]' } else { '[OFFLINE]' }
+        $statusColor = if ($null -ne $snapshot.Health) { 'Green' } elseif ($null -ne $process) { 'Yellow' } else { 'Red' }
+        Write-Host ('  Server status   {0}' -f $statusLabel) -ForegroundColor $statusColor
+        if ($null -ne $process) { Write-Host ('  Process ID      {0}  (started {1:g})' -f $process.Id, $process.StartTime) -ForegroundColor Gray }
+        # GPU acceleration is claimed only from runtime evidence (a reachable /props
+        # response), never merely because a Radeon adapter was detected earlier.
+        if ($null -ne $snapshot.Props) {
+            Write-Host '  Backend         GPU offload active (per /props; see launcher --gpu-layers auto)' -ForegroundColor Cyan
+        } elseif ($null -ne $snapshot.Health) {
+            Write-Host '  Backend         Unknown — /props did not respond' -ForegroundColor Yellow
+        }
+        if ($null -ne $active) {
+            Write-Host ('  Active model    {0}  (alias {1})' -f $active.name, $active.alias) -ForegroundColor White
+            Write-Host ('  Context         {0} tokens x {1} slots' -f $active.context_size, $script:ServerSlots) -ForegroundColor Gray
+        } else {
+            Write-Host '  Active model    none configured' -ForegroundColor Yellow
+        }
+        Write-Host ('  API / Web UI    http://127.0.0.1:{0}/' -f $Port) -ForegroundColor Gray
+        if ($null -ne $snapshot.Props -and ($snapshot.Props.PSObject.Properties.Name -contains 'total_slots')) {
+            Write-Host ('  Server slots    {0}' -f $snapshot.Props.total_slots) -ForegroundColor Gray
+        }
+        if ($null -ne $snapshot.PromptTokPerSec) { Write-Host ('  Prompt speed    {0:N1} tok/s' -f $snapshot.PromptTokPerSec) -ForegroundColor Cyan }
+        if ($null -ne $snapshot.GenerationTokPerSec) { Write-Host ('  Generation      {0:N1} tok/s' -f $snapshot.GenerationTokPerSec) -ForegroundColor Cyan }
+        if ($null -ne $snapshot.Health -and $null -eq $snapshot.PromptTokPerSec -and $null -eq $snapshot.GenerationTokPerSec) {
+            Write-Host '  Speed           no requests served yet in this run' -ForegroundColor DarkGray
+        }
+        if ($null -eq $snapshot.Health) {
+            Write-Host "`n  Start the server from the dashboard [3] to see live figures here." -ForegroundColor DarkGray
+        }
+        Write-Host "`n  Refreshing every 2s. Type Q then Enter to return to the menu." -ForegroundColor DarkGray
+
+        for ($tick = 0; $tick -lt 20; $tick++) {
+            Start-Sleep -Milliseconds 100
+            if ([Console]::IsInputRedirected) { continue }
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if ($key.KeyChar -ieq 'q') { return }
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------
 
@@ -1695,6 +1876,7 @@ function Select-BackendInteractively {
 }
 
 function Show-Dashboard {
+    $updateCheck = Test-CommandCenterUpdate
     while ($true) {
         $hardware = Get-HardwareProfile
         $recommended = Get-RecommendedModel -Hardware $hardware
@@ -1735,6 +1917,9 @@ function Show-Dashboard {
         if ($hardware.HasAmdIntegratedGpu -and $hardware.MaxAmdVramGiB -lt 2) {
             Write-Info 'APU detected: UMA memory is shared with system RAM; BIOS UMA size should normally stay Auto.'
         }
+        if ($updateCheck.UpdateAvailable) {
+            Write-Host "  [UPDATE] Command center $($updateCheck.Latest) is available (you have v$($updateCheck.Current)) — $($updateCheck.Url)" -ForegroundColor Yellow
+        }
 
         Write-Host "`n  ═══════════════════════════════════ COMMAND MENU ═══════════════════════════════════" -ForegroundColor DarkCyan
         Write-Host '   [1]  ✨ First-time setup — install llama.cpp + recommended model (asks first)' -ForegroundColor White
@@ -1746,6 +1931,7 @@ function Show-Dashboard {
         Write-Host '   [7]  ×  Uninstall command center' -ForegroundColor White
         Write-Host '   [8]  ⚡ Backend selector — ROCm / Vulkan' -ForegroundColor White
         Write-Host '   [9]  📄 View latest run log' -ForegroundColor White
+        Write-Host '   [10] 📡 Live monitor — health, speed, and context in real time' -ForegroundColor White
         Write-Host '   [0]  Exit' -ForegroundColor DarkGray
         Write-Host '  ═══════════════════════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
 
@@ -1794,6 +1980,7 @@ function Show-Dashboard {
                 }
                 '8' { Select-BackendInteractively }
                 '9' { Show-LatestRunLog; Pause-Screen }
+                '10' { Show-LiveMonitor; Pause-Screen }
                 '0' { return }
                 default { Write-WarnLine 'Choose a menu number.'; Start-Sleep -Milliseconds 400 }
             }
@@ -1825,6 +2012,17 @@ try {
 
     if ($Action -eq 'ViewLog') {
         Show-LatestRunLog
+        exit 0
+    }
+
+    if ($Action -eq 'CheckUpdate') {
+        $updateCheck = Test-CommandCenterUpdate
+        if (-not $updateCheck.Checked) { Write-WarnLine "Could not check for updates: $($updateCheck.Error)"; exit 1 }
+        if ($updateCheck.UpdateAvailable) {
+            Write-Host "Update available: $($updateCheck.Latest) (you have v$($updateCheck.Current)) — $($updateCheck.Url)"
+        } else {
+            Write-Host "Up to date: v$($updateCheck.Current)."
+        }
         exit 0
     }
 
@@ -1871,6 +2069,7 @@ try {
         }
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
+        'Monitor' { Show-LiveMonitor }
         'Install' {
             $tag = Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend
             if ($null -eq $tag) {

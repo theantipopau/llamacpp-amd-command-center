@@ -81,6 +81,42 @@ try {
     Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3-8b') -Hardware $hw) -eq 32768) 'suggests 32k for a dense 8B model'
     Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3.8-27b') -Hardware $hw) -eq 32768) 'keeps 32k for the RAM-spilling 27B model'
 
+    Write-Host 'server-args.user.json overrides (merged last, never overwritten)'
+    $base = @('--ctx-size', '65536', '--threads', '8', '--flash-attn', 'on')
+    $noOverride = Merge-ServerArguments -Base $base -Overrides @()
+    Assert-True (($noOverride -join ' ') -eq ($base -join ' ')) 'no override file leaves arguments unchanged'
+    $merged = Merge-ServerArguments -Base $base -Overrides @('--threads', '12', '--no-mmap')
+    Assert-True (($merged -join ' ') -eq '--ctx-size 65536 --flash-attn on --threads 12 --no-mmap') 'override replaces a duplicate flag and appends a new one, applied last'
+
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $overridePath = Get-UserArgsOverridePath
+    '["--threads","16"]' | Set-Content -LiteralPath $overridePath -Encoding UTF8
+    $model = Get-ModelById 'qwen3.5-9b'
+    Set-ActiveModel -Model $model -EffectiveContext 32768 -SkipVerification
+    $active = Get-ActiveModel
+    $withOverride = Get-ServerArguments -ActiveModel $active -EffectiveContext 32768
+    Assert-True ($withOverride -join ' ' -match '--threads 16') 'Get-ServerArguments merges server-args.user.json last'
+
+    '{ not json' | Set-Content -LiteralPath $overridePath -Encoding UTF8
+    $malformed = Get-UserServerArgOverrides
+    Assert-True ($malformed.Count -eq 0) 'malformed server-args.user.json is ignored, not thrown'
+
+    '[1,2,3]' | Set-Content -LiteralPath $overridePath -Encoding UTF8
+    $nonString = Get-UserServerArgOverrides
+    Assert-True ($nonString.Count -eq 0) 'a non-string-array server-args.user.json is ignored'
+    Remove-Item -LiteralPath $overridePath -Force
+
+    Write-Host 'Ornith is an opt-in alternative, never the silent default'
+    $ornith = Get-ModelById 'ornith-1.5-9b'
+    Assert-True ($ornith.Rank -lt (Get-ModelById 'qwen3.5-9b').Rank) 'Ornith ranks below Qwen3.5 9B so Qwen3.5 stays the default recommendation'
+    $hwBoth = [pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 15.8; RamGiB = 31.2; ModelBudgetGiB = 24.8 }
+    Assert-True ((Get-RecommendedModel -Hardware $hwBoth).Id -eq 'qwen3.5-9b') 'recommendation still prefers Qwen3.5 9B when Ornith also fits'
+
+    Write-Host 'Command-center self-update version comparison'
+    Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'
+    Assert-True ((Compare-SemVer -A '0.1.4' -B '0.1.4') -eq 0) 'an identical version compares equal'
+    Assert-True ((Compare-SemVer -A '0.1.3' -B '0.1.4') -lt 0) 'an older tag compares lesser'
+
     Write-Host 'VS Code chatLanguageModels.json writer'
     $env:APPDATA = Join-Path $work 'appdata'
     $vsDir = Join-Path $env:APPDATA 'Code\User'

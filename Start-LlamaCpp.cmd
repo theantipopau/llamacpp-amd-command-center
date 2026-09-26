@@ -91,6 +91,7 @@ echo     %CYAN%[2]%R%  %WHITE%Start AI server%R%         %DIM%Opens in its own w
 echo     %CYAN%[3]%R%  %WHITE%Stop AI server%R%          %DIM%Frees your GPU memory for games and other apps%R%
 echo     %CYAN%[4]%R%  %WHITE%Chat in your browser%R%    %DIM%Talk to the model in the built-in Web UI%R%
 echo     %CYAN%[5]%R%  %WHITE%Health check%R%            %DIM%Tests chat, tool calling, and memory in about 10 seconds%R%
+echo     %CYAN%[M]%R%  %WHITE%Live monitor%R%            %DIM%Watch server status and speed refresh every 2 seconds%R%
 echo.
 echo  %MAG%  CONNECT%R%
 echo     %CYAN%[6]%R%  %WHITE%Connect VS Code%R%         %DIM%Adds the model to GitHub Copilot Chat - asks before changing anything%R%
@@ -113,6 +114,7 @@ if "%choice%"=="2" goto :start_server
 if "%choice%"=="3" goto :stop_server
 if "%choice%"=="4" goto :open_webui
 if "%choice%"=="5" goto :health_check
+if /I "%choice%"=="M" goto :live_monitor
 if "%choice%"=="6" goto :vscode
 if "%choice%"=="7" goto :editors
 if "%choice%"=="8" goto :guide
@@ -279,6 +281,15 @@ call :header "HEALTH CHECK"
 %PS_RUN% -Action SelfTest <nul
 echo.
 call :wait_for_key
+goto :menu
+
+rem ============================================================================
+rem  [M] LIVE MONITOR
+rem ============================================================================
+:live_monitor
+cls
+call :header "LIVE MONITOR"
+%PS_RUN% -Action Monitor
 goto :menu
 
 rem ============================================================================

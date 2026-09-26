@@ -13,6 +13,8 @@ Thanks for helping improve the AMD Windows llama.cpp command center.
 - Batch screen text must not contain an exclamation mark: the menu uses delayed expansion.
 - Give any `powershell.exe` call inside a batch `for /f` loop `<nul`, or it can swallow the user's menu input.
 - Keep `.cmd` and `.ps1` files in CRLF (`.gitattributes` enforces this in git). Editing them with Git Bash `sed -i` can silently convert them to LF.
+- `return @()` (and `return @($possiblyEmptyCollection)`) silently returns `$null`, not an empty array, in Windows PowerShell — including at the top level of a function, not only inside a `catch`. Use `return ,@()` (comma operator) whenever a function must reliably return an empty array to its caller.
+- Never write to `server-args.user.json`, `%APPDATA%\Code\User\chatLanguageModels.json`, or any other user-owned config from an update path — read and merge them, but the user's copy is the one source of truth.
 
 ## Validation
 
