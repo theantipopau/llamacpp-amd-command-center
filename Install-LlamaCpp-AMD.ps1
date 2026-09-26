@@ -1045,10 +1045,7 @@ function Ensure-LlamaCppInstalled {
     $running = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
     if ($null -ne $running) { throw 'Close every running llama-server.exe process before installing or updating.' }
 
-    $backendChoice = $RequestedBackend
-    if ($backendChoice -eq 'Auto') {
-        $backendChoice = if ($Hardware.RocmRecommended) { 'ROCm' } else { 'Vulkan' }
-    }
+    $backendChoice = Resolve-BackendChoice -RequestedBackend $RequestedBackend -Hardware $Hardware -Runtime (Get-InstalledRuntime)
     Write-RunLogEvent -Event 'backend_selected' -Message "Selected backend: $backendChoice" -Data @{
         requested = $RequestedBackend
         selected = $backendChoice
@@ -1379,6 +1376,16 @@ function Get-ModelRuntimeBlocker {
         return "$($Model.Name) needs a newer llama.cpp than AMD's ROCm 7.2.1 package (b8407) provides. Switch to the Vulkan backend ([8], then [5] to update) to use it."
     }
     return ''
+}
+
+function Resolve-BackendChoice {
+    param([string] $RequestedBackend, $Hardware, $Runtime)
+    if ($RequestedBackend -ne 'Auto') { return $RequestedBackend }
+    # Auto keeps the backend already installed, so an update never silently swaps a
+    # working choice (for example Vulkan picked for Ornith) back to the recommendation.
+    if ($null -ne $Runtime -and @('ROCm', 'Vulkan') -contains [string]$Runtime.backend) { return [string]$Runtime.backend }
+    if ($Hardware.RocmRecommended) { return 'ROCm' }
+    return 'Vulkan'
 }
 
 function Install-Model {
@@ -2159,7 +2166,8 @@ function Show-Dashboard {
     while ($true) {
         $hardware = Get-HardwareProfile
         $recommended = Get-RecommendedModel -Hardware $hardware
-        $backendLabel = if ($Backend -eq 'Auto') { if ($hardware.RocmRecommended) { 'AMD ROCm 7.2.1' } else { 'Vulkan' } } else { $Backend }
+        $runtime = Get-InstalledRuntime
+        $backendLabel = if ($null -ne $runtime) { "$($runtime.backend) $($runtime.tag)" } elseif ($Backend -eq 'Auto') { if ($hardware.RocmRecommended) { 'AMD ROCm 7.2.1' } else { 'Vulkan' } } else { $Backend }
         $assessment = @(Get-ModelAssessment -Hardware $hardware | Where-Object { $_.Model.Id -eq $recommended.Id } | Select-Object -First 1)
         $active = Get-ActiveModel
         $installed = Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')

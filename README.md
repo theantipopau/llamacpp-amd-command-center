@@ -74,6 +74,8 @@ After **[6] Connect VS Code**:
 
 Switch back to a cloud model at any time from the same list. The AI server must be running (**[2]**) while you use the local model.
 
+**You only connect once.** After that, every time you switch or install a model in the model browser, the VS Code entry updates to that model on its own (with a backup). Reload the VS Code window, restart the AI server, and the picker shows the new model. The server runs one model at a time, so VS Code lists only the active one.
+
 <details>
 <summary>Manual setup, if you prefer not to use option [6]</summary>
 
@@ -155,7 +157,7 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | **ROCm** | Radeon cards in AMD's Windows ROCm list, such as the RX 9070 XT | AMD's validated Windows package (ROCm 7.2.1). Fastest on supported cards. |
 | **Vulkan** | Ryzen integrated graphics, older Radeon cards, everything else | Official llama.cpp Vulkan build using the standard AMD driver. |
 
-The setup chooses automatically; you can override it with the backend selector in **[1]**. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
+The setup chooses automatically on a fresh install; you can override it with the backend selector in **[1]**. After that, updates keep the backend you have installed, so choosing Vulkan (for example, to run Ornith) is never undone by an update. The dashboard's BACKEND line shows the build actually installed. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
 
 ## Command-line reference
 

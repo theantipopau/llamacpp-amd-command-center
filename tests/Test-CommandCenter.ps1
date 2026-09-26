@@ -127,6 +127,11 @@ try {
     Assert-True (-not (Confirm-ModelDownload -Model $ornith -Hardware $hwBoth)) 'the download prompt refuses a blocked model before anything downloads'
     Remove-Item -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Force
 
+    $rocmHw = [pscustomobject]@{ RocmRecommended = $true }
+    Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $vulkanNew) -eq 'Vulkan') 'Auto keeps an installed Vulkan backend instead of reverting to the ROCm recommendation'
+    Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $null) -eq 'ROCm') 'Auto uses the recommendation on a fresh install'
+    Assert-True ((Resolve-BackendChoice -RequestedBackend 'ROCm' -Hardware $rocmHw -Runtime $vulkanNew) -eq 'ROCm') 'an explicit backend choice always wins'
+
     Write-Host 'Command-center self-update version comparison'
     Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'
     Assert-True ((Compare-SemVer -A '0.1.4' -B '0.1.4') -eq 0) 'an identical version compares equal'
