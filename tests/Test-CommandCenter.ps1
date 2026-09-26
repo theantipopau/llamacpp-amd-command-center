@@ -19,6 +19,12 @@ foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.La
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("cc-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
+# Point every per-user config location at the temp folder before any test runs, so no
+# test (including auto-sync side effects) can ever write the real VS Code or Continue files.
+$realVsCodeConfig = Join-Path $env:APPDATA 'Code\User\chatLanguageModels.json'
+$realVsCodeStamp = if (Test-Path -LiteralPath $realVsCodeConfig) { (Get-Item -LiteralPath $realVsCodeConfig).LastWriteTimeUtc } else { $null }
+$env:APPDATA = Join-Path $work 'appdata'
+$env:USERPROFILE = Join-Path $work 'userprofile'
 $InstallRoot = Join-Path $work 'install'
 $Port = 8080
 $Force = $true
@@ -275,6 +281,10 @@ try {
     $threw = $false
     try { Install-VsCodeChatEndpoint *> $null } catch { $threw = $true }
     Assert-True ($threw -and ([IO.File]::ReadAllText($cfg) -eq '{ not json')) 'refuses to touch malformed JSON'
+
+    Write-Host 'The real user profile was never touched'
+    $realNow = if (Test-Path -LiteralPath $realVsCodeConfig) { (Get-Item -LiteralPath $realVsCodeConfig).LastWriteTimeUtc } else { $null }
+    Assert-True ($realNow -eq $realVsCodeStamp) "the real chatLanguageModels.json is unchanged ($realVsCodeConfig)"
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

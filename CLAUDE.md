@@ -56,7 +56,7 @@ Also: AST-parse the script with Windows PowerShell 5.1, run `Invoke-ScriptAnalyz
 
 - Never stop or restart the user's running llama-server without asking — they may be mid-task in Copilot.
 - Start the server via `Start-Process explorer.exe "<launcher>"` so it isn't tied to the agent's shell.
-- Don't run write actions (`ContinueConfig`, `LlamaVscodeConfig`, `VSCodeChat`, `Uninstall`) against the real profile to test them; the offline tests redirect `APPDATA`/`USERPROFILE` to temp folders.
+- Don't run write actions (`ContinueConfig`, `LlamaVscodeConfig`, `VSCodeChat`, `Uninstall`) against the real profile to test them. The test harness redirects `APPDATA`/`USERPROFILE` to temp folders at the very top and fails if the real `chatLanguageModels.json` changes. Keep new tests below that redirect: indirect side effects (such as auto-sync from `Switch-InstalledModel`) once overwrote the real file.
 - `notes/` and `dist/` are gitignored local scratch.
 
 ## Releases
