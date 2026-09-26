@@ -380,7 +380,7 @@ function Get-ModelCatalog {
             Repo = 'ornith-ai/Ornith-1.5-9B-GGUF'; File = 'Ornith-1.5-9B-Q4_K_M.gguf'
             Projector = 'mmproj-Ornith-1.5-9B-BF16.gguf'; ApproxGiB = 6.20; Rank = 95; KvGiBPer32k = 0.75
             Tag = 'COMMUNITY / EXPERIMENTAL'
-            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Benchmark locally with [8] before making it your default.'
+            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Try both on your own tasks before making it your default.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
@@ -2056,13 +2056,14 @@ function Show-LiveMonitor {
         $statusColor = if ($null -ne $snapshot.Health) { 'Green' } elseif ($null -ne $process) { 'Yellow' } else { 'Red' }
         Write-Host ('  Server status   {0}' -f $statusLabel) -ForegroundColor $statusColor
         if ($null -ne $process) { Write-Host ('  Process ID      {0}  (started {1:g})' -f $process.Id, $process.StartTime) -ForegroundColor Gray }
-        # GPU acceleration is claimed only from runtime evidence (a reachable /props
-        # response), never merely because a Radeon adapter was detected earlier.
-        if ($null -ne $snapshot.Props) {
-            Write-Host '  Backend         GPU offload active (per /props; see launcher --gpu-layers auto)' -ForegroundColor Cyan
-        } elseif ($null -ne $snapshot.Health) {
-            Write-Host '  Backend         Unknown — /props did not respond' -ForegroundColor Yellow
+        # Report the installed build only. Whether layers actually landed on the GPU is
+        # in the server window's load log; the HTTP API does not expose it.
+        $installInfo = Join-Path $InstallRoot 'current\installation.json'
+        $backendText = 'unknown'
+        if (Test-Path -LiteralPath $installInfo -PathType Leaf) {
+            try { $info = Get-Content -LiteralPath $installInfo -Raw | ConvertFrom-Json; $backendText = "$($info.backend) build $($info.tag)" } catch { }
         }
+        Write-Host ('  Installed build {0}  (GPU layer placement: see the server window log)' -f $backendText) -ForegroundColor Gray
         if ($null -ne $active) {
             Write-Host ('  Active model    {0}  (alias {1})' -f $active.name, $active.alias) -ForegroundColor White
             Write-Host ('  Context         {0} tokens x {1} slots' -f $active.context_size, $script:ServerSlots) -ForegroundColor Gray
@@ -2085,7 +2086,7 @@ function Show-LiveMonitor {
 
         for ($tick = 0; $tick -lt 20; $tick++) {
             Start-Sleep -Milliseconds 100
-            if ([Console]::IsInputRedirected) { continue }
+            if ([Console]::IsInputRedirected) { return }
             if ([Console]::KeyAvailable) {
                 $key = [Console]::ReadKey($true)
                 if ($key.KeyChar -ieq 'q') { return }
