@@ -139,6 +139,7 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | Replies are very slow | The model does not fit in VRAM. Pick one marked `VRAM` (not `VRAM+RAM`) in the model browser. |
 | Graphics card not detected | Update the AMD driver, restart Windows, then run **Diagnostics** from **[1]**. |
 | *Install-LlamaCpp-AMD.ps1 is missing* | Extract the whole ZIP and keep both files in the same folder. |
+| PC froze or blue-screened (`VIDEO_TDR_FAILURE`, 0x116) on the Vulkan backend | Fixed in v0.1.5: the Vulkan build also sees Ryzen integrated graphics, and older launchers let llama.cpp split the model onto it. The launcher now pins the dedicated Radeon (`--device Vulkan0`); re-activate your model once to rebuild it. Integrated graphics is never used automatically. |
 | VS Code says `code` is not recognized ([7] → llama-vscode) | Install the extension from inside VS Code: Extensions, search **llama-vscode**, Install. |
 
 **[9] Logs and fixes** shows the latest run log. Logs live in `%LOCALAPPDATA%\Programs\llama.cpp\logs`; common API keys and tokens are removed automatically, but look them over before sharing.

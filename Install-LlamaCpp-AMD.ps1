@@ -105,7 +105,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-$script:CommandCenterVersion = '0.1.4'
+$script:CommandCenterVersion = '0.1.5'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
@@ -600,7 +600,7 @@ function Get-HardwareProfile {
     try {
         $gpus = @(Get-DxgiGpuInventory | ForEach-Object {
             $isAmd = $_.VendorId -eq 0x1002
-            $isIntegrated = $_.Name -match '(?i)Radeon.*(Graphics|780M|680M|660M|610M|760M|8060S)' -and $_.Name -notmatch '(?i)\bRX\b|Radeon Pro'
+            $isIntegrated = Test-IntegratedGpuName $_.Name
             [pscustomobject]@{
                 Name = [string]$_.Name; IsAmd = $isAmd; IsIntegrated = $isIntegrated
                 VramGiB = [Math]::Round(([double]$_.DedicatedVideoMemory / 1GB), 1)
@@ -613,7 +613,7 @@ function Get-HardwareProfile {
         $gpus = @(Get-CimInstance -ClassName Win32_VideoController | ForEach-Object {
             $name = [string]$_.Name
             $isAmd = ($name + ' ' + [string]$_.PNPDeviceID) -match '(?i)AMD|Radeon'
-            $isIntegrated = $name -match '(?i)Radeon.*(Graphics|780M|680M|660M|610M|760M|8060S)' -and $name -notmatch '(?i)\bRX\b|Radeon Pro'
+            $isIntegrated = Test-IntegratedGpuName $name
             $vram = 0.0
             foreach ($entry in $registryMemory.GetEnumerator()) {
                 if ($name -like ('*' + $entry.Key + '*') -or $entry.Key -like ('*' + $name + '*')) {
@@ -1123,6 +1123,13 @@ function Ensure-LlamaCppInstalled {
 
     if (-not $NoPath) { Add-UserPathEntry -Directory $current }
     Write-Success "llama.cpp $tag is installed and the $backendChoice backend is ready."
+    # Device names differ between builds (ROCm0 vs Vulkan0), so rebuild the launcher
+    # for the new build instead of leaving one that names a device it cannot find.
+    $active = Get-ActiveModel
+    if ($null -ne $active) {
+        New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
+        Write-Info 'Server launcher rebuilt for the new llama.cpp build.'
+    }
     return $tag
 }
 
@@ -1186,8 +1193,58 @@ function Merge-ServerArguments {
     return ,@($result.ToArray())
 }
 
+function Test-IntegratedGpuName {
+    param([string] $Name)
+    return ($Name -match '(?i)Radeon.*(Graphics|780M|680M|660M|610M|760M|8060S)' -and $Name -notmatch '(?i)\bRX\b|Radeon Pro')
+}
+
+function ConvertFrom-LlamaDeviceList {
+    param([string[]] $Lines)
+    # llama-server --list-devices prints "  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)".
+    $devices = @()
+    foreach ($line in $Lines) {
+        $m = [regex]::Match([string]$line, '^\s+([A-Za-z]+[0-9]+):\s+(.+?)\s+\(([0-9]+) MiB')
+        if ($m.Success) {
+            $devices += [pscustomobject]@{
+                Id = $m.Groups[1].Value; Name = $m.Groups[2].Value
+                MiB = [int]$m.Groups[3].Value; Integrated = (Test-IntegratedGpuName $m.Groups[2].Value)
+            }
+        }
+    }
+    return ,@($devices)
+}
+
+function Select-PrimaryLlamaDevice {
+    param($Devices)
+    # Only the dedicated Radeon. A Ryzen iGPU also appears under Vulkan with a large
+    # shared-memory figure; letting llama.cpp split layers onto it is slow, and its long
+    # kernels can trip the Windows 2 s GPU timeout (bugcheck 0x116 on a test PC).
+    $all = @($Devices)
+    $dedicated = @($all | Where-Object { -not $_.Integrated } | Sort-Object MiB -Descending)
+    if ($all.Count -le 1 -or $dedicated.Count -eq 0) { return '' }
+    return [string]$dedicated[0].Id
+}
+
+function Get-PrimaryLlamaDevice {
+    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return '' }
+    $previous = $ErrorActionPreference
+    $lines = @()
+    Push-Location (Split-Path -Parent $exe)
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $exe --list-devices 2>&1 | ForEach-Object { [string]$_ })
+    } catch {
+        $lines = @()
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $previous
+    }
+    return Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $lines)
+}
+
 function Get-ServerArguments {
-    param($ActiveModel, [int] $EffectiveContext)
+    param($ActiveModel, [int] $EffectiveContext, [string] $Device = '')
     # Single source of truth for both the generated launcher and Start-ActiveServer.
     $arguments = @(
         '--model', [string]$ActiveModel.model_path
@@ -1209,6 +1266,7 @@ function Get-ServerArguments {
         '--cache-type-v', 'q8_0',
         '--jinja'
     )
+    if (-not [string]::IsNullOrWhiteSpace($Device)) { $arguments += @('--device', $Device) }
     if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
         $arguments += @('--reasoning', 'on', '--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
     } elseif ([bool]$ActiveModel.reasoning) {
@@ -1237,7 +1295,7 @@ function New-Launchers {
     # Pair each flag with its value on one line. Every line except the last ends
     # with a caret; a blank line inside a caret continuation would split the
     # command, so optional arguments must never leave an empty line behind.
-    $serverArgs = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext
+    $serverArgs = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device (Get-PrimaryLlamaDevice)
     $lines = @()
     for ($i = 0; $i -lt $serverArgs.Count; $i++) {
         $line = $serverArgs[$i]
@@ -1552,6 +1610,9 @@ function Show-Diagnostics {
         $deviceExit = Write-NativeCommandOutput -FilePath $server -Arguments @('--list-devices')
         if ($deviceExit -eq 0) {
             Write-Info 'ROCm/HIP device lines are informational when a device is listed and the exit code is 0.'
+            $primary = Get-PrimaryLlamaDevice
+            if ($primary) { Write-Success "The server is pinned to $primary (the dedicated Radeon). Integrated graphics is never used automatically." }
+            else { Write-Info 'Only one GPU is visible to this build, so no device pin is needed.' }
         } else {
             Write-WarnLine "llama-server --list-devices exited with code $deviceExit."
         }
@@ -1580,7 +1641,7 @@ function Start-ActiveServer {
     }
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
-    $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context
+    $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context -Device (Get-PrimaryLlamaDevice)
 
     Clear-Screen
     Show-Banner

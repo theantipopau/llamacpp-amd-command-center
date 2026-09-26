@@ -24,7 +24,7 @@ $Port = 8080
 $Force = $true
 $Thinking = 'Auto'
 $script:ServerSlots = 2
-$script:CommandCenterVersion = '0.1.4'
+$script:CommandCenterVersion = '0.1.5'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:AmdRocmPage = 'https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html'
 $script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 24)
@@ -131,6 +131,21 @@ try {
     Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $vulkanNew) -eq 'Vulkan') 'Auto keeps an installed Vulkan backend instead of reverting to the ROCm recommendation'
     Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $null) -eq 'ROCm') 'Auto uses the recommendation on a fresh install'
     Assert-True ((Resolve-BackendChoice -RequestedBackend 'ROCm' -Hardware $rocmHw -Runtime $vulkanNew) -eq 'ROCm') 'an explicit backend choice always wins'
+
+    Write-Host 'GPU selection never uses the Ryzen iGPU automatically'
+    $vkList = @('Available devices:', '  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)', '  Vulkan1: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)')
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $vkList)) -eq 'Vulkan0') 'Vulkan with dGPU + iGPU pins the dedicated Radeon'
+    $swapped = @('  Vulkan0: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)', '  Vulkan1: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)')
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $swapped)) -eq 'Vulkan1') 'selection follows the name, not the device order'
+    $rocmList = @('  ROCm0: AMD Radeon RX 9070 XT (16304 MiB, 16153 MiB free)')
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $rocmList)) -eq '') 'a single visible GPU needs no pin'
+    $apuOnly = @('  Vulkan0: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)', '  Vulkan1: AMD Radeon 780M Graphics (8000 MiB, 7000 MiB free)')
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $apuOnly)) -eq '') 'an iGPU-only machine is left to llama.cpp defaults'
+    $pinned = Get-ServerArguments -ActiveModel (Get-ActiveModel) -EffectiveContext 32768 -Device 'Vulkan0'
+    Assert-True (($pinned -join ' ') -match '--device Vulkan0') 'the chosen device reaches the server arguments'
+    Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 32768 -SkipVerification
+    $launcherText = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
+    Assert-True ($launcherText -notmatch '--device') 'no device flag when no llama.cpp build is installed to ask'
 
     Write-Host 'Command-center self-update version comparison'
     Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'
