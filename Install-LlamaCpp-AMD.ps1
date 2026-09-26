@@ -380,7 +380,7 @@ function Get-ModelCatalog {
             Repo = 'ornith-ai/Ornith-1.5-9B-GGUF'; File = 'Ornith-1.5-9B-Q4_K_M.gguf'
             Projector = 'mmproj-Ornith-1.5-9B-BF16.gguf'; ApproxGiB = 6.20; Rank = 95; KvGiBPer32k = 0.75
             Tag = 'COMMUNITY / EXPERIMENTAL'; NeedsMtpLoader = $true
-            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Needs the Vulkan backend; AMD''s ROCm 7.2.1 package cannot load it.'
+            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Needs the Vulkan backend (AMD''s ROCm 7.2.1 package cannot load it), and Vulkan lost the GPU in long sessions on an RX 9070 XT.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
@@ -1046,6 +1046,10 @@ function Ensure-LlamaCppInstalled {
     if ($null -ne $running) { throw 'Close every running llama-server.exe process before installing or updating.' }
 
     $backendChoice = Resolve-BackendChoice -RequestedBackend $RequestedBackend -Hardware $Hardware -Runtime (Get-InstalledRuntime)
+    if ($backendChoice -eq 'Vulkan' -and $Hardware.RocmRecommended) {
+        Write-WarnLine 'This Radeon supports ROCm, which is the stable choice. On an RX 9070 XT the Vulkan build lost the GPU'
+        Write-WarnLine 'during long Agent sessions and once crashed Windows. Use Vulkan here only for short tests.'
+    }
     Write-RunLogEvent -Event 'backend_selected' -Message "Selected backend: $backendChoice" -Data @{
         requested = $RequestedBackend
         selected = $backendChoice
