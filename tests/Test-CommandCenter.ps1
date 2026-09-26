@@ -177,6 +177,18 @@ try {
     $threwMissing = $false
     try { Switch-InstalledModel -Model (Get-ModelById 'llama3.1-8b') -Hardware $hwBoth *> $null } catch { $threwMissing = $true }
     Assert-True $threwMissing 'a model that is not downloaded is refused instead of downloading'
+    Write-Host 'Removing a downloaded model'
+    Assert-True ((Get-ProjectorLocalName (Get-ModelById 'gemma3-12b')) -ne (Get-ProjectorLocalName (Get-ModelById 'gemma3-4b'))) 'the two Gemma models no longer share one projector file on disk'
+    $threwActive = $false
+    try { [void](Remove-DownloadedModel -Model (Get-ModelById 'qwen3-4b') *> $null) } catch { $threwActive = $true }
+    Assert-True ($threwActive -and (Test-Path -LiteralPath (Join-Path $modelsDir 'Qwen3-4B-Q4_K_M.gguf'))) 'the active model cannot be removed'
+    [void](Remove-DownloadedModel -Model $ornith *> $null)
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $modelsDir 'Ornith-1.5-9B-Q4_K_M.gguf')) -and -not (Test-Path -LiteralPath (Join-Path $modelsDir 'mmproj-Ornith-1.5-9B-BF16.gguf'))) 'removing a model deletes its file and its own projector'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $modelsDir 'Qwen3.5-9B-Q4_K_M.gguf')) -and (Test-Path -LiteralPath (Join-Path $modelsDir 'mmproj-F16.gguf'))) "other models' files are left alone"
+    $threwMissingRemove = $false
+    try { [void](Remove-DownloadedModel -Model $ornith *> $null) } catch { $threwMissingRemove = $true }
+    Assert-True $threwMissingRemove 'removing a model that is not downloaded reports it instead of doing nothing silently'
+
     Remove-Item -LiteralPath $modelsDir -Recurse -Force
     Remove-Item -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Force
 

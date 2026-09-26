@@ -80,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -386,7 +386,7 @@ function Get-ModelCatalog {
         [pscustomobject]@{
             Id = 'gemma3-12b'; Name = 'Gemma 3 12B Vision'; Alias = 'gemma3:12b'
             Repo = 'ggml-org/gemma-3-12b-it-GGUF'; File = 'gemma-3-12b-it-Q4_K_M.gguf'
-            Projector = 'mmproj-model-f16.gguf'; ApproxGiB = 7.60; Rank = 92
+            Projector = 'mmproj-model-f16.gguf'; LocalProjector = 'mmproj-gemma-3-12b-it-f16.gguf'; ApproxGiB = 7.60; Rank = 92
             Tag = 'VISION'; Description = 'Strong general assistant and image understanding with a balanced memory footprint.'
             Reasoning = $false; Vision = $true; Tools = $false
         },
@@ -407,7 +407,7 @@ function Get-ModelCatalog {
         [pscustomobject]@{
             Id = 'gemma3-4b'; Name = 'Gemma 3 4B Vision'; Alias = 'gemma3:4b'
             Repo = 'ggml-org/gemma-3-4b-it-GGUF'; File = 'gemma-3-4b-it-Q4_K_M.gguf'
-            Projector = 'mmproj-model-f16.gguf'; ApproxGiB = 3.11; Rank = 70
+            Projector = 'mmproj-model-f16.gguf'; LocalProjector = 'mmproj-gemma-3-4b-it-f16.gguf'; ApproxGiB = 3.11; Rank = 70
             Tag = 'VISION'; Description = 'Compact multimodal model for 8 GB systems; fast on Ryzen integrated graphics.'
             Reasoning = $false; Vision = $true; Tools = $false
         },
@@ -1391,7 +1391,7 @@ function Set-ActiveModel {
     }
     $mmprojPath = ''
     if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
-        $mmprojPath = Join-Path $modelsRoot $Model.Projector
+        $mmprojPath = Join-Path $modelsRoot (Get-ProjectorLocalName $Model)
         if (-not $SkipVerification -and -not (Test-Path -LiteralPath $mmprojPath -PathType Leaf)) {
             throw "Vision projector is not installed: $mmprojPath"
         }
@@ -1440,12 +1440,74 @@ function Get-ModelRuntimeBlocker {
     return ''
 }
 
+function Get-ProjectorLocalName {
+    # Local file name for a model's vision projector. Some repos share a generic name
+    # (both Gemma 3 repos publish mmproj-model-f16.gguf), so those models set
+    # LocalProjector to keep one from overwriting the other in the models folder.
+    param($Model)
+    if ($Model.PSObject.Properties.Name -contains 'LocalProjector') { return [string]$Model.LocalProjector }
+    return [string]$Model.Projector
+}
+
+function Remove-DownloadedModel {
+    # Deletes one downloaded model's files. Refuses the active model, and keeps a vision
+    # projector that another downloaded model still uses.
+    param($Model)
+    $active = Get-ActiveModel
+    if ($null -ne $active -and [string]$active.id -eq $Model.Id) {
+        throw "$($Model.Name) is the active model. Switch to another model first, then remove it."
+    }
+    $modelsRoot = Join-Path $InstallRoot 'models'
+    $paths = @(Join-Path $modelsRoot $Model.File)
+    if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
+        $projectorName = Get-ProjectorLocalName $Model
+        $sharedBy = @(Get-InstalledModels | Where-Object { $_.Id -ne $Model.Id -and -not [string]::IsNullOrWhiteSpace([string]$_.Projector) -and (Get-ProjectorLocalName $_) -eq $projectorName })
+        if ($sharedBy.Count -eq 0) { $paths += Join-Path $modelsRoot $projectorName }
+    }
+    $existing = @($paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($existing.Count -eq 0) { throw "$($Model.Name) is not downloaded." }
+    $bytes = 0L
+    foreach ($path in $existing) { $bytes += (Get-Item -LiteralPath $path).Length }
+    if (-not $Force) {
+        Write-Host "`n  About to delete $($Model.Name) ($(Format-Bytes $bytes)):" -ForegroundColor Yellow
+        foreach ($path in $existing) { Write-Host "    $path" -ForegroundColor White }
+        Write-Host '  You can download it again later from the model browser.' -ForegroundColor DarkGray
+        if ((Read-ConsoleLine -Prompt "  Type YES to delete $($Model.Name)") -ine 'YES') {
+            Write-WarnLine 'Nothing was deleted.'
+            return $false
+        }
+    }
+    foreach ($path in $existing) { Remove-Item -LiteralPath $path -Force }
+    Write-Success "Removed $($Model.Name) and freed $(Format-Bytes $bytes)."
+    return $true
+}
+
+function Select-ModelToRemove {
+    $candidates = @(Get-InstalledModels)
+    $active = Get-ActiveModel
+    $activeId = if ($null -ne $active) { [string]$active.id } else { '' }
+    Clear-Screen
+    Show-Banner
+    Write-Host '  REMOVE A DOWNLOADED MODEL' -ForegroundColor White
+    if ($candidates.Count -eq 0) { Write-WarnLine 'No models are downloaded.'; return $null }
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $model = $candidates[$i]
+        $size = (Get-Item -LiteralPath (Join-Path (Join-Path $InstallRoot 'models') $model.File)).Length
+        $note = if ($model.Id -eq $activeId) { '  (active - switch away first)' } else { '' }
+        Write-Host ('  [{0}] {1,-25} {2,10}{3}' -f ($i + 1), $model.Name, (Format-Bytes $size), $note) -ForegroundColor $(if ($note) { 'DarkGray' } else { 'White' })
+    }
+    $answer = Read-ConsoleLine -Prompt "`n  Choose 1-$($candidates.Count), or 0 to return"
+    $number = 0
+    if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $candidates.Count) { return $null }
+    return $candidates[$number - 1]
+}
+
 function Get-InstalledModels {
     # Catalog models whose files are already downloaded. Local only: no network, no hashing.
     $modelsRoot = Join-Path $InstallRoot 'models'
     return @(Get-ModelCatalog | Where-Object {
         (Test-Path -LiteralPath (Join-Path $modelsRoot $_.File) -PathType Leaf) -and
-        ([string]::IsNullOrWhiteSpace([string]$_.Projector) -or (Test-Path -LiteralPath (Join-Path $modelsRoot $_.Projector) -PathType Leaf))
+        ([string]::IsNullOrWhiteSpace([string]$_.Projector) -or (Test-Path -LiteralPath (Join-Path $modelsRoot (Get-ProjectorLocalName $_)) -PathType Leaf))
     })
 }
 
@@ -1518,7 +1580,7 @@ function Install-Model {
 
     if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
         $projector = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.Projector
-        Get-VerifiedDownload -Url $projector.Url -Destination (Join-Path $modelsRoot $Model.Projector) -ExpectedSize $projector.Size -ExpectedSha256 $projector.Sha256
+        Get-VerifiedDownload -Url $projector.Url -Destination (Join-Path $modelsRoot (Get-ProjectorLocalName $Model)) -ExpectedSize $projector.Size -ExpectedSha256 $projector.Sha256
     }
 
     $context = $ContextSize
@@ -1549,7 +1611,7 @@ function Confirm-ModelDownload {
     $status = if ($null -eq $assessment) { 'UNKNOWN' } else { $assessment.Status }
     $modelsRoot = Join-Path $InstallRoot 'models'
     $modelPath = Join-Path $modelsRoot $Model.File
-    $projectorPath = if ([string]::IsNullOrWhiteSpace([string]$Model.Projector)) { '' } else { Join-Path $modelsRoot $Model.Projector }
+    $projectorPath = if ([string]::IsNullOrWhiteSpace([string]$Model.Projector)) { '' } else { Join-Path $modelsRoot (Get-ProjectorLocalName $Model) }
     $filesPresent = (Test-Path -LiteralPath $modelPath -PathType Leaf) -and ([string]::IsNullOrWhiteSpace($projectorPath) -or (Test-Path -LiteralPath $projectorPath -PathType Leaf))
     if ($filesPresent) {
         Write-Host "`n  $($Model.Name) is already downloaded. The next step will verify the existing files and activate them." -ForegroundColor Green
@@ -2326,6 +2388,7 @@ function Show-Dashboard {
         Write-Host '   [8]  ⚡ Backend selector — ROCm / Vulkan' -ForegroundColor White
         Write-Host '   [9]  📄 View latest run log' -ForegroundColor White
         Write-Host '   [10] 📡 Live monitor — health, speed, and context in real time' -ForegroundColor White
+        Write-Host '   [11] 🗑  Remove a downloaded model — frees disk space (asks first)' -ForegroundColor White
         Write-Host '   [0]  Exit' -ForegroundColor DarkGray
         Write-Host '  ═══════════════════════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
 
@@ -2375,6 +2438,11 @@ function Show-Dashboard {
                 '8' { Select-BackendInteractively }
                 '9' { Show-LatestRunLog; Pause-Screen }
                 '10' { Show-LiveMonitor; Pause-Screen }
+                '11' {
+                    $toRemove = Select-ModelToRemove
+                    if ($null -ne $toRemove) { [void](Remove-DownloadedModel -Model $toRemove) }
+                    Pause-Screen
+                }
                 '0' { return }
                 default { Write-WarnLine 'Choose a menu number.'; Start-Sleep -Milliseconds 400 }
             }
@@ -2475,6 +2543,10 @@ try {
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
         'Monitor' { Show-LiveMonitor }
+        'RemoveModel' {
+            $toRemove = if ($ModelId -ieq 'auto') { Select-ModelToRemove } else { Get-ModelById -Id $ModelId }
+            if ($null -eq $toRemove -or -not (Remove-DownloadedModel -Model $toRemove)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
+        }
         'Activate' {
             if ($ModelId -ieq 'auto') { throw 'Choose a model with -ModelId, for example -ModelId qwen3.5-9b.' }
             Switch-InstalledModel -Model (Get-ModelById -Id $ModelId) -Hardware $hardware

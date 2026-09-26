@@ -80,7 +80,7 @@ The **NEXT STEP** line at the top of the menu always tells you what to do next.
 
 | Option | What it does |
 |---|---|
-| **[1] Setup and models** | Scans your PC and opens the setup screen: first-time install, model browser, llama.cpp updates, diagnostics, uninstall. |
+| **[1] Setup and models** | Scans your PC and opens the setup screen: first-time install, model browser, llama.cpp updates, diagnostics, removing a model you no longer need ([11], frees disk space), and uninstall. |
 | **[2] Start AI server** | Starts the model in its own window and waits until it is ready. Keep that window open while you work. If you have more than one model downloaded, it first asks which one to run (Enter keeps the current one). Switching is instant and offline, and VS Code follows automatically. |
 | **[3] Stop AI server** | Stops the server and frees GPU memory, for example before gaming. Asks first. |
 | **[4] Chat in your browser** | Opens the built-in llama.cpp chat page at `http://127.0.0.1:8080/`. |
@@ -216,6 +216,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `Uninstall` | Remove llama.cpp, all downloaded models, and the launchers (asks first). |
 | `ListInstalled` | One line per downloaded model: number, id, name, and `active`, `ready` or `blocked`. |
 | `Activate` | Switch to an already-downloaded model instantly (`-ModelId qwen3.5-9b`). Never downloads. |
+| `RemoveModel` | Delete one downloaded model to free disk space (asks first; refuses the active model). Without `-ModelId` it shows a list. |
 | `Monitor` | The live monitor from menu option [M]: server status, active model, and prompt/generation speed, refreshing every 2 seconds. |
 | `CheckUpdate` | Check GitHub for a newer command-center release. Prints a message; never downloads or installs anything. |
 | `ContinueConfig` | Write or update the managed block in Continue's `config.yaml` (menu [7] → [2]). |
