@@ -80,7 +80,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
@@ -123,6 +123,11 @@ $script:AmdRocmPackageUrl = 'https://repo.radeon.com/rocm/llama.cpp/windows/rocm
 $script:AmdRocmPackageName = 'llama-b8407-windows-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip'
 $script:AmdRocmPackageSize = 565651083L
 $script:AmdRocmPage = 'https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html'
+# Recorded the day this ROCm package/version was last hand-checked against AMD's page
+# (see the research date in this script's .NOTES). Freshness is time-based only: no
+# scraping of AMD's page, so it never depends on a page layout that can change.
+$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 24)
+$script:AmdRocmPackageFreshnessDays = 120
 
 # ---------------------------------------------------------------------
 # Visual terminal helpers
@@ -1461,6 +1466,18 @@ function Test-LlamaCppRuntime {
     } finally { Pop-Location }
 }
 
+function Get-RocmPackageFreshness {
+    # Warn-only, time-based staleness reminder. It never fetches AMD's page: it
+    # just flags when the hardcoded ROCm package hasn't been hand-checked in a
+    # while, so a stale package is a visible reminder rather than a silent risk.
+    $ageDays = [Math]::Floor(([DateTime]::UtcNow - $script:AmdRocmPackageCheckedOn).TotalDays)
+    return [pscustomobject]@{
+        AgeDays = $ageDays
+        Stale = ($ageDays -gt $script:AmdRocmPackageFreshnessDays)
+        CheckedOn = $script:AmdRocmPackageCheckedOn
+    }
+}
+
 function Show-Diagnostics {
     param($Hardware)
     Clear-Screen
@@ -1470,6 +1487,10 @@ function Show-Diagnostics {
     Write-Host "  PowerShell: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
     Write-Host "  Vulkan loader (for Vulkan backend): $($Hardware.VulkanLoader)" -ForegroundColor $(if ($Hardware.VulkanLoader) { 'Green' } else { 'Yellow' })
     Write-Host "  Install root: $InstallRoot" -ForegroundColor Gray
+    $freshness = Get-RocmPackageFreshness
+    if ($freshness.Stale) {
+        Write-WarnLine "The pinned ROCm package was last hand-checked $($freshness.AgeDays) days ago ($($freshness.CheckedOn.ToString('yyyy-MM-dd'))). Check $script:AmdRocmPage for a newer validated Windows package."
+    }
     $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
         Write-WarnLine 'llama.cpp is not installed yet. Choose Install/update from the dashboard.'
@@ -1736,12 +1757,228 @@ function Install-VsCodeChatEndpoint {
     return $true
 }
 
+function Remove-VsCodeChatEndpoint {
+    # Uninstall counterpart to Install-VsCodeChatEndpoint: removes only the entry
+    # this project manages, backs up first, and never throws (best-effort cleanup).
+    try {
+        $configPath = Join-Path $env:APPDATA 'Code\User\chatLanguageModels.json'
+        if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
+        $raw = Get-Content -LiteralPath $configPath -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) { return }
+        $parsed = $raw | ConvertFrom-Json
+        $configs = @($parsed | Where-Object { $null -ne $_ })
+        $managedNames = @('llama.cpp local', 'llama.cpp ROCm')
+        $kept = @($configs | Where-Object { $managedNames -notcontains $_.name })
+        if ($kept.Count -eq $configs.Count) { return }
+        Copy-Item -LiteralPath $configPath -Destination ($configPath + '.command-center.bak') -Force
+        $json = ConvertTo-Json -InputObject $kept -Depth 20
+        [System.IO.File]::WriteAllText($configPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Info 'Removed the llama.cpp entry from VS Code Chat (backup kept next to the file).'
+    } catch {
+        Write-WarnLine "Could not clean up VS Code Chat settings; leaving them as they are. ($($_.Exception.Message))"
+    }
+}
+
 function Remove-Installation {
     $running = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
     if (($null -ne $running) -and -not $Force) { throw 'Stop llama-server.exe before uninstalling.' }
+    Remove-VsCodeChatEndpoint
+    Remove-ContinueConfig
+    Remove-LlamaVscodeSettings
     Remove-UserPathEntry -Directory (Join-Path $InstallRoot 'current')
     if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force }
     Write-Success 'llama.cpp, downloaded models, launchers, and the user PATH entry were removed.'
+}
+
+# ---------------------------------------------------------------------
+# Other-editor integrations: llama-vscode and Continue.
+# Each: detect, back up, merge only the keys this project owns, and
+# never touch a file it cannot safely parse (falls back to instructions).
+# ---------------------------------------------------------------------
+
+function Get-ContinueConfigPath {
+    Join-Path $env:USERPROFILE '.continue\config.yaml'
+}
+
+function Get-ContinueManagedBlock {
+    param($ActiveModel)
+    @"
+# >>> llama.cpp command center managed block (safe to delete) >>>
+models:
+  - name: $($ActiveModel.name) - llama.cpp local
+    provider: llama.cpp
+    model: $($ActiveModel.alias)
+    apiBase: http://127.0.0.1:$Port
+# <<< llama.cpp command center managed block <<<
+"@
+}
+
+function Install-ContinueConfig {
+    # Continue's config.yaml has one top-level `models:` list. If the user already
+    # has one (their own cloud models, for example), inserting a second top-level
+    # `models:` key would be invalid YAML and could silently hide their models, so
+    # that case is instructions-only rather than a risky automatic merge.
+    $active = Get-ActiveModel
+    if ($null -eq $active) { throw 'No model is active. Install and activate a model first.' }
+    $path = Get-ContinueConfigPath
+    $block = Get-ContinueManagedBlock -ActiveModel $active
+
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (-not $Force) {
+            Write-Host "`n  About to create Continue's config file:" -ForegroundColor Yellow
+            Write-Host "    $path" -ForegroundColor White
+            if ((Read-ConsoleLine -Prompt '  Type YES to create it') -ine 'YES') {
+                Write-WarnLine 'Continue configuration cancelled.'
+                return $false
+            }
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+        $content = "name: Local llama.cpp`r`nversion: 0.0.1`r`nschema: v1`r`n$block"
+        [System.IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Success "Created Continue's config file for $($active.alias)."
+        Write-Info "$path"
+        return $true
+    }
+
+    $existing = Get-Content -LiteralPath $path -Raw
+    $hasManagedBlock = $existing -match '(?m)^# >>> llama\.cpp command center managed block'
+    $hasOwnModelsKey = (-not $hasManagedBlock) -and ($existing -match '(?m)^models:\s*$')
+    if ($hasOwnModelsKey) {
+        Write-WarnLine "Continue's config.yaml already has its own models: list; leaving it unchanged so your other models are not hidden."
+        Write-Host "`n  Add this under your existing models: list instead:" -ForegroundColor Yellow
+        Write-Host "    - name: $($active.name) - llama.cpp local" -ForegroundColor White
+        Write-Host '      provider: llama.cpp' -ForegroundColor White
+        Write-Host "      model: $($active.alias)" -ForegroundColor White
+        Write-Host "      apiBase: http://127.0.0.1:$Port" -ForegroundColor White
+        return $false
+    }
+
+    if (-not $Force) {
+        Write-Host "`n  About to update the managed llama.cpp block in:" -ForegroundColor Yellow
+        Write-Host "    $path" -ForegroundColor White
+        Write-Host '  Everything else in the file is left untouched.' -ForegroundColor Gray
+        if ((Read-ConsoleLine -Prompt '  Type YES to continue') -ine 'YES') {
+            Write-WarnLine 'Continue configuration cancelled.'
+            return $false
+        }
+    }
+    Copy-Item -LiteralPath $path -Destination ($path + '.command-center.bak') -Force
+    if ($hasManagedBlock) {
+        $updated = [regex]::Replace($existing, '(?s)# >>> llama\.cpp command center managed block.*?# <<< llama\.cpp command center managed block <<<\r?\n?', ($block + "`r`n"))
+    } else {
+        $separator = if ($existing.TrimEnd().Length -gt 0) { "`r`n`r`n" } else { '' }
+        $updated = $existing.TrimEnd() + $separator + $block
+    }
+    [System.IO.File]::WriteAllText($path, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Success "Updated Continue's managed block for $($active.alias)."
+    Write-Info "Backup: $path.command-center.bak"
+    return $true
+}
+
+function Remove-ContinueConfig {
+    try {
+        $path = Get-ContinueConfigPath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+        $existing = Get-Content -LiteralPath $path -Raw
+        if ($existing -notmatch '(?m)^# >>> llama\.cpp command center managed block') { return }
+        Copy-Item -LiteralPath $path -Destination ($path + '.command-center.bak') -Force
+        $updated = [regex]::Replace($existing, '(?s)\r?\n?# >>> llama\.cpp command center managed block.*?# <<< llama\.cpp command center managed block <<<\r?\n?', '')
+        [System.IO.File]::WriteAllText($path, $updated, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Info 'Removed the llama.cpp managed block from Continue''s config.yaml (backup kept).'
+    } catch {
+        Write-WarnLine "Could not clean up Continue's config.yaml; leaving it as it is. ($($_.Exception.Message))"
+    }
+}
+
+function Test-JsonHasComments {
+    param([string] $Text)
+    # A quick, conservative heuristic: VS Code's settings.json commonly allows
+    # // and /* */ comments (JSONC), which ConvertFrom-Json cannot parse and
+    # ConvertTo-Json cannot reproduce. Detect them outside of string literals
+    # well enough to be safe, erring toward "has comments" when unsure.
+    $stripped = [regex]::Replace($Text, '"(?:[^"\\]|\\.)*"', '""')
+    return ($stripped -match '//' -or $stripped -match '/\*')
+}
+
+function Get-LlamaVscodeSettingsPath {
+    Join-Path $env:APPDATA 'Code\User\settings.json'
+}
+
+function Install-LlamaVscodeSettings {
+    # llama-vscode.endpoint / endpoint_chat / endpoint_tools are documented
+    # extension settings (ggml-org.llama-vscode) that point it at an
+    # already-running llama.cpp server; this never sets launch_* commands,
+    # so the extension never starts its own server.
+    $active = Get-ActiveModel
+    if ($null -eq $active) { throw 'No model is active. Install and activate a model first.' }
+    $path = Get-LlamaVscodeSettingsPath
+    $base = "http://127.0.0.1:$Port"
+    $desired = [ordered]@{
+        'llama-vscode.endpoint' = $base
+        'llama-vscode.endpoint_chat' = $base
+    }
+    if ([bool]$active.tool_calling) { $desired['llama-vscode.endpoint_tools'] = $base }
+
+    $raw = ''
+    if (Test-Path -LiteralPath $path -PathType Leaf) { $raw = Get-Content -LiteralPath $path -Raw }
+    if ((-not [string]::IsNullOrWhiteSpace($raw)) -and (Test-JsonHasComments -Text $raw)) {
+        Write-WarnLine 'settings.json contains comments, which this project will not silently strip. Add these lines yourself instead:'
+        foreach ($key in $desired.Keys) { Write-Host ('    "{0}": "{1}"' -f $key, $desired[$key]) -ForegroundColor White }
+        return $false
+    }
+
+    $settings = [ordered]@{}
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        try {
+            $parsedRaw = $raw | ConvertFrom-Json
+        } catch {
+            throw "VS Code's settings.json is not valid JSON. Fix or remove it, then try again. Existing file was not changed: $path"
+        }
+        foreach ($property in $parsedRaw.PSObject.Properties) { $settings[$property.Name] = $property.Value }
+    }
+
+    if (-not $Force) {
+        Write-Host "`n  About to set llama-vscode endpoints in:" -ForegroundColor Yellow
+        Write-Host "    $path" -ForegroundColor White
+        Write-Host '  Every other setting is preserved.' -ForegroundColor Gray
+        if ((Read-ConsoleLine -Prompt '  Type YES to continue') -ine 'YES') {
+            Write-WarnLine 'llama-vscode configuration cancelled.'
+            return $false
+        }
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination ($path + '.command-center.bak') -Force }
+    foreach ($key in $desired.Keys) { $settings[$key] = $desired[$key] }
+    $json = ConvertTo-Json -InputObject $settings -Depth 20
+    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Success "Configured llama-vscode to use $($active.alias) at $base."
+    Write-Info 'Install the llama-vscode extension (ggml-org.llama-vscode) if you have not already, then reload VS Code.'
+    return $true
+}
+
+function Remove-LlamaVscodeSettings {
+    try {
+        $path = Get-LlamaVscodeSettingsPath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+        $raw = Get-Content -LiteralPath $path -Raw
+        if ([string]::IsNullOrWhiteSpace($raw) -or (Test-JsonHasComments -Text $raw)) { return }
+        $parsedRaw = $raw | ConvertFrom-Json
+        $managedKeys = @('llama-vscode.endpoint', 'llama-vscode.endpoint_chat', 'llama-vscode.endpoint_tools')
+        $hasAny = @($parsedRaw.PSObject.Properties | Where-Object { $managedKeys -contains $_.Name }).Count -gt 0
+        if (-not $hasAny) { return }
+        $settings = [ordered]@{}
+        foreach ($property in $parsedRaw.PSObject.Properties) {
+            if ($managedKeys -contains $property.Name) { continue }
+            $settings[$property.Name] = $property.Value
+        }
+        Copy-Item -LiteralPath $path -Destination ($path + '.command-center.bak') -Force
+        $json = ConvertTo-Json -InputObject $settings -Depth 20
+        [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Info 'Removed llama-vscode endpoint settings (backup kept).'
+    } catch {
+        Write-WarnLine "Could not clean up llama-vscode settings; leaving them as they are. ($($_.Exception.Message))"
+    }
 }
 
 # ---------------------------------------------------------------------
@@ -2066,6 +2303,12 @@ try {
         'VSCodeChat' {
             # Exit code 2 tells the batch menu the user cancelled and nothing changed.
             if (-not (Install-VsCodeChatEndpoint)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
+        }
+        'ContinueConfig' {
+            if (-not (Install-ContinueConfig)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
+        }
+        'LlamaVscodeConfig' {
+            if (-not (Install-LlamaVscodeSettings)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
         }
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }

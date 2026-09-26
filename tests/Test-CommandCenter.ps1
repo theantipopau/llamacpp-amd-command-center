@@ -24,6 +24,11 @@ $Port = 8080
 $Force = $true
 $Thinking = 'Auto'
 $script:ServerSlots = 2
+$script:CommandCenterVersion = '0.1.4'
+$script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
+$script:AmdRocmPage = 'https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html'
+$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 24)
+$script:AmdRocmPackageFreshnessDays = 120
 # Run logging is not started here; the helpers skip logging when these are empty.
 $script:RunJsonlPath = $null; $script:RunLogPath = $null; $script:RunSummaryPath = $null
 $script:RunLogDirectory = $null; $script:RunStarted = $null; $script:RunTranscriptStarted = $false
@@ -116,6 +121,61 @@ try {
     Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'
     Assert-True ((Compare-SemVer -A '0.1.4' -B '0.1.4') -eq 0) 'an identical version compares equal'
     Assert-True ((Compare-SemVer -A '0.1.3' -B '0.1.4') -lt 0) 'an older tag compares lesser'
+
+    Write-Host 'ROCm package freshness is time-based only (no network)'
+    $script:AmdRocmPackageCheckedOn = (Get-Date).AddDays(-10)
+    Assert-True (-not (Get-RocmPackageFreshness).Stale) 'a recently checked-on date is not flagged stale'
+    $script:AmdRocmPackageCheckedOn = (Get-Date).AddDays(-400)
+    Assert-True ((Get-RocmPackageFreshness).Stale) 'an old checked-on date is flagged stale'
+
+    Write-Host 'Continue config.yaml: fresh file, existing models: key, and the managed block'
+    $env:USERPROFILE = Join-Path $work 'userprofile'
+    Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 65536 -SkipVerification
+    $continuePath = Get-ContinueConfigPath
+    Assert-True (Install-ContinueConfig) 'creates a fresh config.yaml when none exists'
+    $freshText = Get-Content -LiteralPath $continuePath -Raw
+    Assert-True ($freshText -match 'provider: llama\.cpp' -and $freshText -match 'model: qwen3\.5:9b') 'fresh file contains the active model'
+
+    Assert-True (Install-ContinueConfig) 'updates its own managed block without asking again'
+    $updatedText = Get-Content -LiteralPath $continuePath -Raw
+    Assert-True (([regex]::Matches($updatedText, 'managed block \(safe to delete\)')).Count -eq 1) 'repeated activation replaces the block instead of duplicating it'
+    Assert-True (Test-Path -LiteralPath ($continuePath + '.command-center.bak')) 'a backup was written before updating the managed block'
+
+    Remove-ContinueConfig
+    Assert-True ((Get-Content -LiteralPath $continuePath -Raw) -notmatch 'managed block') 'Remove-ContinueConfig strips the managed block back out'
+
+    $ownConfig = "name: My config`r`nversion: 0.0.1`r`nschema: v1`r`nmodels:`r`n  - name: Claude`r`n    provider: anthropic`r`n    model: claude`r`n"
+    [IO.File]::WriteAllText($continuePath, $ownConfig)
+    $refused = Install-ContinueConfig
+    Assert-True (-not $refused) 'refuses to auto-merge when the user already has their own models: list'
+    Assert-True ((Get-Content -LiteralPath $continuePath -Raw) -eq $ownConfig) "the user's own config.yaml is left completely untouched"
+
+    Write-Host 'llama-vscode settings.json: merge, comment guard, and removal'
+    $env:APPDATA = Join-Path $work 'appdata'
+    $settingsPath = Get-LlamaVscodeSettingsPath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $settingsPath) -Force | Out-Null
+    '{"editor.fontSize": 14, "workbench.colorTheme": "Dark+"}' | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+    Assert-True (Install-LlamaVscodeSettings) 'merges llama-vscode endpoints into an existing settings.json'
+    $mergedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    Assert-True ($mergedSettings.'editor.fontSize' -eq 14 -and $mergedSettings.'workbench.colorTheme' -eq 'Dark+') 'unrelated settings are preserved'
+    Assert-True ($mergedSettings.'llama-vscode.endpoint' -eq 'http://127.0.0.1:8080' -and $mergedSettings.'llama-vscode.endpoint_tools' -eq 'http://127.0.0.1:8080') 'endpoint and endpoint_tools are set for a tool-capable model'
+
+    Remove-LlamaVscodeSettings
+    $afterRemoval = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    Assert-True (($afterRemoval.PSObject.Properties.Name -notcontains 'llama-vscode.endpoint') -and $afterRemoval.'editor.fontSize' -eq 14) 'Remove-LlamaVscodeSettings drops only the keys it manages'
+
+    '{ "editor.fontSize": 14, // a user comment' | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+    $commentResult = Install-LlamaVscodeSettings
+    Assert-True (-not $commentResult) 'refuses to touch settings.json that contains comments'
+    Assert-True ((Get-Content -LiteralPath $settingsPath -Raw) -match 'a user comment') 'a commented settings.json is left completely untouched'
+
+    Write-Host 'Uninstall cleans up only what this project manages'
+    $chatConfigPath = Join-Path $env:APPDATA 'Code\User\chatLanguageModels.json'
+    $seedForRemoval = '[{"name":"Copilot","vendor":"copilot"},{"name":"llama.cpp local","vendor":"customendpoint","models":[]}]'
+    [IO.File]::WriteAllText($chatConfigPath, $seedForRemoval)
+    Remove-VsCodeChatEndpoint
+    $afterUninstall = @(Get-Content -LiteralPath $chatConfigPath -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+    Assert-True ((@($afterUninstall | ForEach-Object { $_.name }) -notcontains 'llama.cpp local') -and (@($afterUninstall | ForEach-Object { $_.name }) -contains 'Copilot')) 'Remove-VsCodeChatEndpoint removes only the managed provider'
 
     Write-Host 'VS Code chatLanguageModels.json writer'
     $env:APPDATA = Join-Path $work 'appdata'

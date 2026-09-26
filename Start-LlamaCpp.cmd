@@ -22,7 +22,6 @@ set "PS_RUN=powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS
 set "INSTALL_ROOT=%LOCALAPPDATA%\Programs\llama.cpp"
 set "SERVER_CMD=%INSTALL_ROOT%\Start-LlamaCpp.cmd"
 set "API_URL=http://127.0.0.1:8080"
-set "CONTINUE_TEMPLATE=%SCRIPT_DIR%Continue-llamacpp-config.yaml"
 set "EXTENSION_ID=ggml-org.llama-vscode"
 
 rem ANSI colours (Windows 10 and 11 consoles and Windows Terminal).
@@ -341,7 +340,7 @@ rem ============================================================================
 cls
 call :header "OTHER EDITORS AND TOOLS"
 echo     %CYAN%[1]%R%  %WHITE%llama-vscode%R%       %DIM%Official llama.cpp extension for VS Code: completion, chat, agents%R%
-echo     %CYAN%[2]%R%  %WHITE%Continue%R%           %DIM%Create a Continue settings file for the active model%R%
+echo     %CYAN%[2]%R%  %WHITE%Continue%R%           %DIM%Point Continue's config.yaml at your local server%R%
 echo     %CYAN%[3]%R%  %WHITE%Cline and others%R%   %DIM%Settings for any tool that accepts an OpenAI-compatible server%R%
 echo     %CYAN%[0]%R%  %WHITE%Back%R%
 echo.
@@ -377,10 +376,24 @@ call "%CODE_CMD%" --install-extension %EXTENSION_ID%
 if errorlevel 1 (
     echo.
     echo   %RED%The extension could not be installed.%R% Try installing it from inside VS Code as above.
-) else (
     echo.
-    echo   %GREEN%llama-vscode is installed.%R%
+    call :wait_for_key
+    goto :menu
 )
+echo.
+echo   %GREEN%llama-vscode is installed.%R%
+if not defined ACTIVE_ALIAS (
+    echo   %DIM%Set up a model with [1] on the main menu, then come back here to point it at your server.%R%
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo.
+echo   This sets llama-vscode's endpoint settings to your local server. Everything else in
+echo   VS Code's settings.json is left untouched, and a backup is made first.
+%PS_RUN% -Action LlamaVscodeConfig
+echo.
+echo   %DIM%Reload VS Code (Ctrl+Shift+P, "Developer: Reload Window") to pick up the change.%R%
 echo.
 call :wait_for_key
 goto :menu
@@ -394,29 +407,16 @@ if not defined ACTIVE_ALIAS (
     call :wait_for_key
     goto :menu
 )
-if exist "%CONTINUE_TEMPLATE%" (
-    echo   %YELLOW%A settings file already exists and was left unchanged:%R%
-    echo     "%CONTINUE_TEMPLATE%"
-    goto :show_continue
-)
-(
-    echo name: Local llama.cpp
-    echo version: 0.0.1
-    echo schema: v1
-    echo.
-    echo models:
-    echo   - name: %ACTIVE_NAME%
-    echo     provider: llama.cpp
-    echo     model: %ACTIVE_ALIAS%
-    echo     apiBase: %API_URL%
-) > "%CONTINUE_TEMPLATE%"
-echo   %GREEN%Created:%R% "%CONTINUE_TEMPLATE%"
-:show_continue
+echo   This writes (or updates) a managed block in Continue's own config file:
+echo     %WHITE%%USERPROFILE%%R%\.continue\config.yaml
+echo   A backup is made first, and if you already have your own models: list there,
+echo   nothing is changed automatically - you get the exact lines to paste instead.
 echo.
-echo     1. Install the %WHITE%Continue%R% extension in VS Code.
+%PS_RUN% -Action ContinueConfig
+echo.
+echo     1. Install the %WHITE%Continue%R% extension in VS Code if you have not already.
 echo     2. Start the AI server with [2].
-echo     3. Copy the contents of the file above into your Continue config.
-echo     4. Choose %WHITE%%ACTIVE_NAME%%R% in Continue.
+echo     3. Choose %WHITE%%ACTIVE_NAME%%R% - llama.cpp local in Continue's model picker.
 echo.
 call :wait_for_key
 goto :menu

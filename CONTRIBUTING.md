@@ -22,7 +22,7 @@ Before opening a pull request:
 
 1. Parse `Install-LlamaCpp-AMD.ps1` with the PowerShell AST parser.
 2. Run the batch menu with a clean exit and with invalid input recovery. To script several choices, redirect a file (`Start-LlamaCpp.cmd < choices.txt`); piped input only delivers the first line to `set /p`.
-3. Exercise the guide, links, health check, and Continue-template screens.
+3. Exercise the guide, links, health check, and other-editors (llama-vscode / Continue) screens.
 4. Confirm that no model, extension, or server installation occurs during documentation tests.
 5. Check that the README and documentation match the actual menu and configuration values.
 6. Validate the release workflow package contains `Start-LlamaCpp.cmd`, `Install-LlamaCpp-AMD.ps1`, `README.md`, `LICENSE`, and `logo.png`.

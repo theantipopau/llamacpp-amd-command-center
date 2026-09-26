@@ -143,8 +143,8 @@ Start with **[5] Health check**. It names the failing step and what to do.
 
 ## Other editors and tools
 
-- **llama-vscode**: the official llama.cpp VS Code extension (`ggml-org.llama-vscode`) for completion, chat, and agents. Option **[7]** can install it.
-- **Continue**: option **[7]** writes `Continue-llamacpp-config.yaml` for the active model without overwriting an existing file.
+- **llama-vscode**: the official llama.cpp VS Code extension (`ggml-org.llama-vscode`) for completion, chat, and agents. Option **[7] → [1]** installs it, then points its `llama-vscode.endpoint*` settings at your server. Every other line in `settings.json` is preserved and a backup is made first. If `settings.json` contains `//` comments, nothing is auto-written — you get the exact lines to paste instead, so comments are never silently lost.
+- **Continue**: option **[7] → [2]** writes (or updates) a clearly marked block in Continue's own `%USERPROFILE%\.continue\config.yaml`, backed up first. If that file already has its own `models:` list, nothing is changed automatically — you get the exact YAML to add under your existing list, so your other models are never hidden by a second `models:` key.
 - **Cline and other OpenAI-compatible tools**: base URL `http://127.0.0.1:8080/v1`, model `qwen3.5:9b`, API key `local`.
 - **Claude Code** uses an Anthropic-compatible gateway (`ANTHROPIC_BASE_URL`), not an OpenAI-compatible endpoint. This project does not install or claim support for a gateway.
 
@@ -181,6 +181,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `Uninstall` | Remove llama.cpp, all downloaded models, and the launchers (asks first). |
 | `Monitor` | The live monitor from menu option [M]: server status, active model, and prompt/generation speed, refreshing every 2 seconds. |
 | `CheckUpdate` | Check GitHub for a newer command-center release. Prints a message; never downloads or installs anything. |
+| `ContinueConfig` | Write or update the managed block in Continue's `config.yaml` (menu [7] → [2]). |
+| `LlamaVscodeConfig` | Point the llama-vscode extension's settings at your server (menu [7] → [1]). |
 
 | Option | Meaning |
 |---|---|
@@ -202,7 +204,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `%LOCALAPPDATA%\Programs\llama.cpp\logs` | Run logs (`run-*.log`, `run-*.jsonl`, `run-*-summary.json`, `latest.log`). |
 | `%LOCALAPPDATA%\Programs\llama.cpp\server-args.user.json` | Optional. Your own `llama-server` flags as a JSON array of strings, e.g. `["--threads", "12", "--no-mmap"]`. Merged in **last**, after every program and hardware default, so your choices always win. This file is never created or overwritten by setup or updates — it is entirely yours. |
 
-To remove everything, choose **Uninstall** in **[1]**. It asks for confirmation and does not touch VS Code, Copilot, or this folder.
+To remove everything, choose **Uninstall** in **[1]**. It asks for confirmation, then removes only the settings this project manages — the `llama.cpp local` entry in VS Code Chat, the llama-vscode endpoint settings, and the managed block in Continue's config.yaml (each backed up first) — and leaves Copilot, your account, and every unrelated setting exactly as they were.
 
 ## Safety and privacy
 
