@@ -30,6 +30,30 @@
 - **GitHub Copilot Chat integration.** One menu option adds the model to Copilot Chat, including **Agent mode**, which reads and edits files. Your Copilot account and cloud models stay exactly as they were.
 - **A health check** that tests chat, tool calling, and memory in about 10 seconds and explains any failure in plain English.
 
+## Before you start
+
+You need:
+
+- **Windows 10 or 11** (64-bit).
+- **An AMD Radeon graphics card.** A card with 12–16 GB of memory, such as an RX 7700 XT, 7900, 9060 XT or 9070 XT, gives the best experience. Older and smaller Radeon cards and Ryzen processors with built-in Radeon graphics also work, just more slowly.
+- **Any modern processor.** AMD Ryzen and Intel CPUs are both fine. Intel CPUs are supported as the main processor; Intel graphics are not used to run models.
+- **About 20 GB of free disk space** for llama.cpp and one model.
+- **An internet connection** for the one-time downloads. After that, everything runs offline.
+- **Optional: VS Code with the GitHub Copilot Chat extension**, if you want the model inside your code editor. You can also skip VS Code and chat in your web browser.
+
+No programming or AI knowledge is needed. The menu explains each step and always asks before downloading anything.
+
+## Words you will see
+
+| Word | What it means |
+|---|---|
+| **Model** | The AI itself: one large file (about 6 GB) that does the thinking. You can download several and switch between them. |
+| **AI server** | A program that loads the model onto your graphics card so apps can talk to it. It runs in its own window; close the window and the AI stops. |
+| **VRAM** | Your graphics card's own memory. A model that fits entirely in VRAM replies quickly. |
+| **Context** | How much of the conversation (and your code) the model can keep in mind at once, measured in **tokens**. A token is roughly three-quarters of a word. |
+| **Agent mode** | A Copilot mode where the AI can read and edit files in your project, not just answer questions. |
+| **Backend (ROCm / Vulkan)** | The engine that runs the model on your graphics card. The setup picks the right one for you. |
+
 ## Quick start
 
 Allow about 15 minutes, most of it the one-time 6 GB model download.
@@ -43,6 +67,12 @@ Allow about 15 minutes, most of it the one-time 6 GB model download.
 7. Choose **[6] Connect VS Code** and type `YES`. Then follow the four steps it prints (reload VS Code and pick the model).
 
 The **NEXT STEP** line at the top of the menu always tells you what to do next.
+
+### Every day after that
+
+1. Double-click `Start-LlamaCpp.cmd` and choose **[2] Start AI server**. If you have more than one model, pick one by number, or press Enter to keep the last one.
+2. Use the model in VS Code, or choose **[4]** to chat in your browser.
+3. When you're done, or before gaming, choose **[3] Stop AI server** to free your graphics card.
 
 ![Health check: all five checks pass](docs/healthcheck.png)
 
@@ -100,13 +130,13 @@ The setup recommends the **strongest tool-capable model that fits entirely in yo
 | Gemma 3 12B | 7.6 GB | | ✓ | Chat and image understanding; not for Agent mode. |
 | Gemma 3 4B | 3.1 GB | | ✓ | For 8 GB systems and Ryzen integrated graphics. |
 | Qwen3 4B | 2.3 GB | ✓ | | Smallest and fastest; good for CPU-only machines. |
-| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | Community coding/reasoning fine-tune of Qwen3.5 9B, MIT-licensed. Same VRAM and context profile as Qwen3.5 9B, so it is offered as a drop-in **A/B option**, never the automatic default. Publisher-reported improvements are not independently verified here — try both and judge for your own workloads. **Needs the Vulkan backend:** its GGUF includes a speculative-decoding (MTP) block that AMD's ROCm 7.2.1 package (llama.cpp b8407) cannot load, so the menu blocks it on ROCm before downloading. **Not recommended on RX 9000-series cards for now:** on an RX 9070 XT the Vulkan build lost the GPU during long Agent sessions (see Troubleshooting). It should become practical when AMD ships a newer ROCm package. |
+| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | A community-tuned version of Qwen3.5 9B aimed at coding. Its makers report better results; that hasn't been checked here. **Not usable on most Radeon cards yet:** it needs the Vulkan backend (the ROCm backend can't load it, and the menu stops you before downloading), and on an RX 9070 XT Vulkan crashed during long sessions. Expect this to change when AMD updates its ROCm package. |
 
 The model browser in **[1]** shows each model's fit for *your* PC: `VRAM` means it fits in graphics memory, `VRAM+RAM` means it spills into system RAM and runs more slowly. Downloads come from Hugging Face; the current revision and SHA-256 are resolved at download time, and files are verified before they are activated.
 
 ![Hardware advisor: detected hardware, model fit, and the recommendation](docs/advisor.png)
 
-## How it is tuned for Copilot, and why
+## How it is tuned for Copilot, and why (optional reading)
 
 These settings came from diagnosing real Copilot failures on an RX 9070 XT. They are applied automatically when you activate a model.
 
@@ -139,6 +169,8 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | Replies are very slow | The model does not fit in VRAM. Pick one marked `VRAM` (not `VRAM+RAM`) in the model browser. |
 | Graphics card not detected | Update the AMD driver, restart Windows, then run **Diagnostics** from **[1]**. |
 | *Install-LlamaCpp-AMD.ps1 is missing* | Extract the whole ZIP and keep both files in the same folder. |
+| The model list says a model *cannot run on the installed llama.cpp build* | That model needs a different backend. Pick another model; the Which model? table explains the exceptions. |
+| The server window closed by itself | Choose **[9] Logs and fixes**, then start it again with **[2]**. If it keeps happening on the Vulkan backend, see the next row. |
 | PC froze, blue-screened (`VIDEO_TDR_FAILURE`, 0x116), or the server log says `device lost on Vulkan0` | On a Radeon that supports ROCm (such as the RX 9070 XT), use the **ROCm backend**. In testing on an RX 9070 XT, the Vulkan build lost the GPU during long Agent sessions (about 58k tokens of context), once taking Windows down with it; ROCm ran for days without a fault. From v0.1.5 the launcher also pins the dedicated Radeon, so Ryzen integrated graphics is never used automatically. |
 | VS Code says `code` is not recognized ([7] → llama-vscode) | Install the extension from inside VS Code: Extensions, search **llama-vscode**, Install. |
 
@@ -156,13 +188,13 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | Backend | Used for | Notes |
 |---|---|---|
 | **ROCm** | Radeon cards in AMD's Windows ROCm list, such as the RX 9070 XT | AMD's validated Windows package (ROCm 7.2.1). Fastest on supported cards. |
-| **Vulkan** | Ryzen integrated graphics, older Radeon cards, everything else | Official llama.cpp Vulkan build using the standard AMD driver. |
+| **Vulkan** | Ryzen integrated graphics, older Radeon cards, everything else | Official llama.cpp Vulkan build using the standard AMD driver. On cards that support ROCm, stay on ROCm: on an RX 9070 XT, Vulkan crashed during long sessions. |
 
 The setup chooses automatically on a fresh install; you can override it with the backend selector in **[1]**. After that, updates keep the backend you have installed, so choosing Vulkan (for example, to run Ornith) is never undone by an update. The dashboard's BACKEND line shows the build actually installed. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
 
-## Command-line reference
+## Command-line reference (advanced)
 
-Everything in the menu is also available directly:
+You never need this; the menu does everything. For scripting, every menu action is also available directly:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action <Action> [options]
@@ -217,14 +249,16 @@ To remove everything, choose **Uninstall** in **[1]**. It asks for confirmation,
 - Downloads use official HTTPS sources. Model files are checked against their published Git LFS SHA-256 values before activation.
 - AMD does not publish a SHA-256 file for its ROCm package, so its downloaded hash is recorded locally instead of claimed as verified.
 - The server listens on `127.0.0.1` only and needs no API key.
-- VS Code settings are backed up before any change, and only the `llama.cpp local` entry is edited.
+- Editor settings (VS Code Chat, llama-vscode, Continue) are changed only when you choose to connect that editor. Each file is backed up first, and only this project's own entries are edited. GitHub Copilot itself is never changed.
+- The setup only uses your dedicated Radeon card. Ryzen built-in graphics is never used automatically.
 
 ## Development
 
 ```text
 Start-LlamaCpp.cmd              Windows menu (what users double-click)
 Install-LlamaCpp-AMD.ps1        Hardware detection, install, models, launcher, VS Code setup, health check
-tests/Test-CommandCenter.ps1    Offline checks: launchers for every model, recommendations, VS Code JSON writer
+tests/Test-CommandCenter.ps1    Offline checks: launchers, recommendations, GPU selection, model switching, editor settings writers
+CLAUDE.md                       Conventions and hardware findings for AI coding assistants working on this repo
 docs/                           GitHub Pages site
 .github/workflows/ci.yml        Windows checks on every push: CRLF, PowerShell 5.1 parse, analyzer, tests, menu smoke test
 .github/workflows/release.yml   Builds the release ZIP and SHA-256 for v* tags
