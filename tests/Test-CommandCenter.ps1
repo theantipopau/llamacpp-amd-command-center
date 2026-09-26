@@ -117,6 +117,16 @@ try {
     $hwBoth = [pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 15.8; RamGiB = 31.2; ModelBudgetGiB = 24.8 }
     Assert-True ((Get-RecommendedModel -Hardware $hwBoth).Id -eq 'qwen3.5-9b') 'recommendation still prefers Qwen3.5 9B when Ornith also fits'
 
+    $rocmPkg = [pscustomobject]@{ backend = 'ROCm'; tag = 'rocm-7.2.1-b8407' }
+    $vulkanNew = [pscustomobject]@{ backend = 'Vulkan'; tag = 'b11192' }
+    Assert-True ([bool](Get-ModelRuntimeBlocker -Model $ornith -Runtime $rocmPkg)) 'Ornith is blocked on the AMD ROCm b8407 package (MTP block fails to load)'
+    Assert-True (-not (Get-ModelRuntimeBlocker -Model $ornith -Runtime $vulkanNew)) 'Ornith is allowed on a current Vulkan build'
+    Assert-True (-not (Get-ModelRuntimeBlocker -Model (Get-ModelById 'qwen3.5-9b') -Runtime $rocmPkg)) 'Qwen3.5 9B is not blocked on the ROCm package'
+    New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'current') -Force | Out-Null
+    '{"backend":"ROCm","tag":"rocm-7.2.1-b8407"}' | Set-Content -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Encoding UTF8
+    Assert-True (-not (Confirm-ModelDownload -Model $ornith -Hardware $hwBoth)) 'the download prompt refuses a blocked model before anything downloads'
+    Remove-Item -LiteralPath (Join-Path $InstallRoot 'current\installation.json') -Force
+
     Write-Host 'Command-center self-update version comparison'
     Assert-True ((Compare-SemVer -A 'v0.2.0' -B '0.1.4') -gt 0) 'a newer tag compares greater'
     Assert-True ((Compare-SemVer -A '0.1.4' -B '0.1.4') -eq 0) 'an identical version compares equal'

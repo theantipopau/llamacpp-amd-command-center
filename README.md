@@ -98,7 +98,7 @@ The setup recommends the **strongest tool-capable model that fits entirely in yo
 | Gemma 3 12B | 7.6 GB | | ✓ | Chat and image understanding; not for Agent mode. |
 | Gemma 3 4B | 3.1 GB | | ✓ | For 8 GB systems and Ryzen integrated graphics. |
 | Qwen3 4B | 2.3 GB | ✓ | | Smallest and fastest; good for CPU-only machines. |
-| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | Community coding/reasoning fine-tune of Qwen3.5 9B, MIT-licensed. Same VRAM and context profile as Qwen3.5 9B, so it is offered as a drop-in **A/B option**, never the automatic default. Publisher-reported improvements are not independently verified here — try both and judge for your own workloads. |
+| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | Community coding/reasoning fine-tune of Qwen3.5 9B, MIT-licensed. Same VRAM and context profile as Qwen3.5 9B, so it is offered as a drop-in **A/B option**, never the automatic default. Publisher-reported improvements are not independently verified here — try both and judge for your own workloads. **Needs the Vulkan backend:** its GGUF includes a speculative-decoding (MTP) block that AMD's ROCm 7.2.1 package (llama.cpp b8407) cannot load, so the menu blocks it on ROCm before downloading. Tested loading and answering on official llama.cpp b11192 (Vulkan). |
 
 The model browser in **[1]** shows each model's fit for *your* PC: `VRAM` means it fits in graphics memory, `VRAM+RAM` means it spills into system RAM and runs more slowly. Downloads come from Hugging Face; the current revision and SHA-256 are resolved at download time, and files are verified before they are activated.
 

@@ -379,8 +379,8 @@ function Get-ModelCatalog {
             Id = 'ornith-1.5-9b'; Name = 'Ornith 1.5 9B'; Alias = 'ornith:1.5-9b'
             Repo = 'ornith-ai/Ornith-1.5-9B-GGUF'; File = 'Ornith-1.5-9B-Q4_K_M.gguf'
             Projector = 'mmproj-Ornith-1.5-9B-BF16.gguf'; ApproxGiB = 6.20; Rank = 95; KvGiBPer32k = 0.75
-            Tag = 'COMMUNITY / EXPERIMENTAL'
-            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Try both on your own tasks before making it your default.'
+            Tag = 'COMMUNITY / EXPERIMENTAL'; NeedsMtpLoader = $true
+            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Needs the Vulkan backend; AMD''s ROCm 7.2.1 package cannot load it.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
@@ -1362,8 +1362,29 @@ function Set-ActiveModel {
     New-Launchers -ActiveModel $state -EffectiveContext $EffectiveContext
 }
 
+function Get-InstalledRuntime {
+    $path = Join-Path $InstallRoot 'current\installation.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+}
+
+function Get-ModelRuntimeBlocker {
+    param($Model, $Runtime)
+    # Ornith's GGUF carries a trailing MTP (nextn) block. Current llama.cpp skips it;
+    # AMD's ROCm 7.2.1 package (b8407) predates that and fails with
+    # "missing tensor 'blk.32.ssm_conv1d.weight'" (verified on an RX 9070 XT).
+    $needsMtp = ($Model.PSObject.Properties.Name -contains 'NeedsMtpLoader') -and [bool]$Model.NeedsMtpLoader
+    if (-not $needsMtp -or $null -eq $Runtime) { return '' }
+    if ([string]$Runtime.backend -eq 'ROCm' -and [string]$Runtime.tag -match 'b8407') {
+        return "$($Model.Name) needs a newer llama.cpp than AMD's ROCm 7.2.1 package (b8407) provides. Switch to the Vulkan backend ([8], then [5] to update) to use it."
+    }
+    return ''
+}
+
 function Install-Model {
     param($Model, $Hardware)
+    $blocker = Get-ModelRuntimeBlocker -Model $Model -Runtime (Get-InstalledRuntime)
+    if ($blocker) { throw $blocker }
     $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Model.Id -eq $Model.Id }) | Select-Object -First 1
     if ($null -ne $assessment) { Write-Info "Fit: $($assessment.Status), headroom $($assessment.HeadroomGiB) GiB" }
     Assert-ModelDiskSpace -RequiredGiB ([double]$Model.ApproxGiB)
@@ -1397,6 +1418,8 @@ function Install-Model {
 
 function Confirm-ModelDownload {
     param($Model, $Hardware)
+    $blocker = Get-ModelRuntimeBlocker -Model $Model -Runtime (Get-InstalledRuntime)
+    if ($blocker) { Write-WarnLine $blocker; return $false }
     if ($Force) { return $true }
     $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Model.Id -eq $Model.Id }) | Select-Object -First 1
     $status = if ($null -eq $assessment) { 'UNKNOWN' } else { $assessment.Status }
@@ -1417,6 +1440,7 @@ function Confirm-ModelDownload {
 function Select-ModelInteractively {
     param($Hardware)
     $assessment = @(Get-ModelAssessment -Hardware $Hardware)
+    $runtime = Get-InstalledRuntime
     Clear-Screen
     Show-Banner
     Write-Host '  MODEL BROWSER — sizes include the vision projector where applicable' -ForegroundColor White
@@ -1429,6 +1453,9 @@ function Select-ModelInteractively {
         $placement = if ($item.GpuResident) { 'VRAM' } else { 'VRAM+RAM' }
         Write-Host ('{0,6:N1} GiB  {1,-10} {2,-9} {3}' -f $item.Model.ApproxGiB, $item.Status, $placement, $item.Model.Tag) -ForegroundColor DarkGray
         Write-Host "      $(Limit-Text $item.Model.Description 92)" -ForegroundColor DarkGray
+        if (Get-ModelRuntimeBlocker -Model $item.Model -Runtime $runtime) {
+            Write-Host '      [BLOCKED] Needs a newer llama.cpp than the ROCm package; use the Vulkan backend.' -ForegroundColor Yellow
+        }
     }
     $answer = Read-ConsoleLine -Prompt "`n  Choose 1-$($assessment.Count), or 0 to return"
     $number = 0
