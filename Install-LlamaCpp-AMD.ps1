@@ -110,7 +110,7 @@ $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
     Accept = 'application/vnd.github+json'
-    'User-Agent' = 'Freebuff-llama.cpp-command-center'
+    'User-Agent' = 'llamacpp-amd-command-center'
     'X-GitHub-Api-Version' = '2022-11-28'
 }
 $script:HfApi = 'https://huggingface.co/api/models'
@@ -913,9 +913,9 @@ function Get-HfRepository {
     param([string] $Repo)
     $cacheKey = $Repo.ToLowerInvariant()
     if ($script:HfRepositoryCache.ContainsKey($cacheKey)) { return $script:HfRepositoryCache[$cacheKey] }
-    $modelInfo = Invoke-RestMethod -Uri ($script:HfApi + '/' + $Repo) -Headers @{ 'User-Agent' = 'Freebuff-llama.cpp-command-center' }
+    $modelInfo = Invoke-RestMethod -Uri ($script:HfApi + '/' + $Repo) -Headers @{ 'User-Agent' = 'llamacpp-amd-command-center' }
     $revision = [string]$modelInfo.sha
-    $tree = Invoke-RestMethod -Uri ($script:HfApi + '/' + $Repo + '/tree/' + $revision + '?recursive=true&expand=true') -Headers @{ 'User-Agent' = 'Freebuff-llama.cpp-command-center' }
+    $tree = Invoke-RestMethod -Uri ($script:HfApi + '/' + $Repo + '/tree/' + $revision + '?recursive=true&expand=true') -Headers @{ 'User-Agent' = 'llamacpp-amd-command-center' }
     $result = [pscustomobject]@{ Repo = $Repo; Revision = $revision; Tree = @($tree) }
     $script:HfRepositoryCache[$cacheKey] = $result
     return $result
