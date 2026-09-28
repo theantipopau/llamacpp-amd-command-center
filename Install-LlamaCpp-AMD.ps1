@@ -22,6 +22,9 @@
         it exposes HIP kernels directly. The package targets gfx110X/gfx115X/gfx120X.
       * Vulkan is the portable fallback for Ryzen iGPUs, older Radeon cards, and
         systems not present in AMD's Windows support matrix.
+      * ROCmLatest (opt-in only) installs llama.cpp's own Windows ROCm build. It needs
+        AMD's ROCm runtime libraries installed separately, so setup keeps it only if
+        llama-server --list-devices shows a dedicated ROCm GPU, and rolls back otherwise.
       * AMD's linked llama.cpp 26.02 installation page is a Linux ROCm guide. The
         Windows-specific validated package is documented on AMD's Radeon Windows
         llama.cpp page, which this script uses.
@@ -65,7 +68,7 @@
     powershell -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Uninstall
 
 .NOTES
-    Research sources checked 2026-09-24:
+    Research sources checked 2026-09-28:
       https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md
       https://github.com/ggml-org/llama.cpp/releases/latest
       https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
@@ -76,6 +79,8 @@
       https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html
       https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html
       https://www.amd.com/en/resources/support-articles/faqs/PA-280.html
+      https://repo.radeon.com/rocm/llama.cpp/windows/ (rocm-rel-7.2.1 is still the newest)
+      https://github.com/ggml-org/llama.cpp/blob/master/.github/workflows/release.yml (windows-rocm job)
 #>
 
 [CmdletBinding()]
@@ -84,7 +89,7 @@ param(
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $ModelId = 'auto',
-    [ValidateSet('Auto', 'Vulkan', 'ROCm')]
+    [ValidateSet('Auto', 'Vulkan', 'ROCm', 'ROCmLatest')]
     [string] $Backend = 'Auto',
     [ValidateRange(0, 262144)]
     [int] $ContextSize = 0,
@@ -105,7 +110,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-$script:CommandCenterVersion = '0.1.5'
+$script:CommandCenterVersion = '0.1.6'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
@@ -126,7 +131,7 @@ $script:AmdRocmPage = 'https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest
 # Recorded the day this ROCm package/version was last hand-checked against AMD's page
 # (see the research date in this script's .NOTES). Freshness is time-based only: no
 # scraping of AMD's page, so it never depends on a page layout that can change.
-$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 24)
+$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 28)
 $script:AmdRocmPackageFreshnessDays = 120
 
 # ---------------------------------------------------------------------
@@ -380,7 +385,15 @@ function Get-ModelCatalog {
             Repo = 'ornith-ai/Ornith-1.5-9B-GGUF'; File = 'Ornith-1.5-9B-Q4_K_M.gguf'
             Projector = 'mmproj-Ornith-1.5-9B-BF16.gguf'; ApproxGiB = 6.20; Rank = 95; KvGiBPer32k = 0.75
             Tag = 'COMMUNITY / EXPERIMENTAL'; NeedsMtpLoader = $true
-            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Needs the Vulkan backend (AMD''s ROCm 7.2.1 package cannot load it), and Vulkan lost the GPU in long sessions on an RX 9070 XT.'
+            Description = 'Community coding/reasoning fine-tune of Qwen3.5 9B (MIT). Publisher-reported improvements over base Qwen3.5 9B are not independently verified here; same VRAM and context profile, so it drops in as an A/B option. Needs the Vulkan or llama.cpp ROCm (latest) backend (AMD''s ROCm 7.2.1 package cannot load it); Vulkan lost the GPU in long sessions on an RX 9070 XT.'
+            Reasoning = $true; Vision = $true; Tools = $true
+        },
+        [pscustomobject]@{
+            Id = 'gemma4-12b'; Name = 'Gemma 4 12B'; Alias = 'gemma4:12b'
+            Repo = 'ggml-org/gemma-4-12B-it-GGUF'; File = 'gemma-4-12B-it-Q4_K_M.gguf'
+            Projector = 'mmproj-gemma-4-12B-it-Q8_0.gguf'; ApproxGiB = 7.02; Rank = 93
+            Tag = 'NEW / NEEDS NEWER LLAMA.CPP'; NeedsCurrentLlamaCpp = $true
+            Description = 'Google''s April 2026 model with vision and tool calling. Not yet tested with Copilot Agent mode by this project. Needs the Vulkan or llama.cpp ROCm (latest) backend; AMD''s ROCm 7.2.1 package cannot load it.'
             Reasoning = $true; Vision = $true; Tools = $true
         },
         [pscustomobject]@{
@@ -1009,11 +1022,31 @@ function Get-AmdRocmAsset {
     }
 }
 
+function Get-RocmLatestRequirementText {
+    return @(
+        'ADVANCED: this is llama.cpp''s own ROCm build, newer than AMD''s validated package.',
+        'It needs AMD''s ROCm runtime (hipBLAS/rocBLAS) installed separately and a recent Adrenalin driver.',
+        'It has not been tested by this project on every Radeon. After install, setup checks that it can',
+        'see your GPU; if not, it removes the new build and keeps your current llama.cpp.'
+    )
+}
+
 function Get-LatestLlamaCppVulkanAsset {
-    Write-Step 'Resolving the latest official llama.cpp Windows Vulkan release'
+    return Get-LatestLlamaCppAsset -Label 'Vulkan' -Pattern '^llama-.*-bin-win-vulkan-x64\.zip$'
+}
+
+function Get-LatestLlamaCppRocmAsset {
+    # ggml-org's own Windows ROCm build (llama-bXXXX-bin-win-rocm-<ver>-x64.zip). The ROCm
+    # version in the name changes between releases, so match any version.
+    return Get-LatestLlamaCppAsset -Label 'ROCm' -Pattern '^llama-.*-bin-win-rocm-[0-9.]+-x64\.zip$'
+}
+
+function Get-LatestLlamaCppAsset {
+    param([string] $Label, [string] $Pattern)
+    Write-Step "Resolving the latest official llama.cpp Windows $Label release"
     $stable = Invoke-RestMethod -Uri ($script:GitHubApi + '/latest') -Headers $script:GitHubHeaders
     $asset = @($stable.assets | Where-Object {
-        $_.name -match '^llama-.*-bin-win-vulkan-x64\.zip$' -and $_.name -notmatch '^cudart-'
+        $_.name -match $Pattern -and $_.name -notmatch '^cudart-'
     }) | Select-Object -First 1
 
     if ($null -ne $asset) {
@@ -1022,7 +1055,7 @@ function Get-LatestLlamaCppVulkanAsset {
     }
 
     $tagAsset = @($stable.assets | Where-Object { $_.name -eq 'nightly-tag.txt' }) | Select-Object -First 1
-    if ($null -eq $tagAsset) { throw 'The latest llama.cpp release exposes no Windows Vulkan build or nightly tag.' }
+    if ($null -eq $tagAsset) { throw "The latest llama.cpp release exposes no Windows $Label build or nightly tag." }
     $tagResponse = Invoke-WebRequest -Uri $tagAsset.browser_download_url -UseBasicParsing
     if ($tagResponse.Content -is [byte[]]) {
         $tag = [Text.Encoding]::UTF8.GetString($tagResponse.Content).Trim()
@@ -1032,15 +1065,15 @@ function Get-LatestLlamaCppVulkanAsset {
     if ($tag -notmatch '^b[0-9]+$') { throw "Malformed llama.cpp nightly tag: '$tag'." }
     $build = Invoke-RestMethod -Uri ($script:GitHubApi + '/tags/' + $tag) -Headers $script:GitHubHeaders
     $asset = @($build.assets | Where-Object {
-        $_.name -match '^llama-.*-bin-win-vulkan-x64\.zip$' -and $_.name -notmatch '^cudart-'
+        $_.name -match $Pattern -and $_.name -notmatch '^cudart-'
     }) | Select-Object -First 1
-    if ($null -eq $asset) { throw "llama.cpp build $tag has no Windows x64 Vulkan ZIP." }
+    if ($null -eq $asset) { throw "llama.cpp build $tag has no Windows x64 $Label ZIP." }
     Write-Info "Selected $tag / $($asset.name)"
     return [pscustomobject]@{ Release = $build; Asset = $asset }
 }
 
 function Ensure-LlamaCppInstalled {
-    param($Hardware, [ValidateSet('Auto', 'Vulkan', 'ROCm')] [string] $RequestedBackend = 'Auto')
+    param($Hardware, [ValidateSet('Auto', 'Vulkan', 'ROCm', 'ROCmLatest')] [string] $RequestedBackend = 'Auto')
     Assert-HardwareForLlama -Hardware $Hardware
     $running = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
     if ($null -ne $running) { throw 'Close every running llama-server.exe process before installing or updating.' }
@@ -1061,6 +1094,8 @@ function Ensure-LlamaCppInstalled {
     }
     if ($backendChoice -eq 'ROCm') {
         $selected = Get-AmdRocmAsset
+    } elseif ($backendChoice -eq 'ROCmLatest') {
+        $selected = Get-LatestLlamaCppRocmAsset
     } else {
         $selected = Get-LatestLlamaCppVulkanAsset
     }
@@ -1089,6 +1124,9 @@ function Ensure-LlamaCppInstalled {
         $sourceHost = ([Uri][string]$asset.browser_download_url).Host
         Write-Host "`n  About to download llama.cpp ($backendChoice build $tag, ~$sizeGiB GiB) from $sourceHost." -ForegroundColor Yellow
         Write-Host "  It is installed to $current. Downloaded models are kept." -ForegroundColor DarkGray
+        if ($backendChoice -eq 'ROCmLatest') {
+            foreach ($line in (Get-RocmLatestRequirementText)) { Write-Host "  $line" -ForegroundColor Yellow }
+        }
         if ((Read-ConsoleLine -Prompt '  Type YES to continue') -ine 'YES') {
             Write-WarnLine 'llama.cpp download cancelled. Nothing was downloaded.'
             return $null
@@ -1118,6 +1156,21 @@ function Ensure-LlamaCppInstalled {
                 Move-Item -LiteralPath $backup -Destination $current
             }
             throw
+        }
+        if ($backendChoice -eq 'ROCmLatest') {
+            # This build loads AMD's ROCm libraries from the PC; without them llama.cpp
+            # quietly runs on the CPU. Keep it only if it actually lists a ROCm GPU.
+            $foundDevices = Get-LlamaDeviceList -Directory $current
+            $rocmDevices = @($foundDevices | Where-Object { $_.Id -match '^ROCm' -and -not $_.Integrated })
+            Write-RunLogEvent -Event 'rocm_latest_check' -Message "ROCm devices found: $($rocmDevices.Count)" -Data @{ tag = $tag; devices = @($rocmDevices | ForEach-Object { $_.Name }) }
+            if ($rocmDevices.Count -eq 0) {
+                Remove-Item -LiteralPath $current -Recurse -Force
+                if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $current }
+                Write-WarnLine "llama.cpp $tag (ROCm) could not see your Radeon, so it was not kept. Your previous llama.cpp is unchanged."
+                Write-WarnLine 'This build needs AMD''s ROCm runtime libraries installed separately. Use the AMD ROCm 7.2.1 or Vulkan backend instead.'
+                return $null
+            }
+            Write-Success "ROCm GPU found: $($rocmDevices[0].Name)"
         }
         if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
     } finally {
@@ -1230,8 +1283,13 @@ function Select-PrimaryLlamaDevice {
 }
 
 function Get-PrimaryLlamaDevice {
-    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
-    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return '' }
+    return Select-PrimaryLlamaDevice -Devices (Get-LlamaDeviceList -Directory (Join-Path $InstallRoot 'current'))
+}
+
+function Get-LlamaDeviceList {
+    param([string] $Directory)
+    $exe = Join-Path $Directory 'llama-server.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return ,@() }
     $previous = $ErrorActionPreference
     $lines = @()
     Push-Location (Split-Path -Parent $exe)
@@ -1244,7 +1302,7 @@ function Get-PrimaryLlamaDevice {
         Pop-Location
         $ErrorActionPreference = $previous
     }
-    return Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $lines)
+    return ,(ConvertFrom-LlamaDeviceList -Lines $lines)
 }
 
 function Get-ServerArguments {
@@ -1432,10 +1490,13 @@ function Get-ModelRuntimeBlocker {
     # Ornith's GGUF carries a trailing MTP (nextn) block. Current llama.cpp skips it;
     # AMD's ROCm 7.2.1 package (b8407) predates that and fails with
     # "missing tensor 'blk.32.ssm_conv1d.weight'" (verified on an RX 9070 XT).
-    $needsMtp = ($Model.PSObject.Properties.Name -contains 'NeedsMtpLoader') -and [bool]$Model.NeedsMtpLoader
-    if (-not $needsMtp -or $null -eq $Runtime) { return '' }
+    # Gemma 4 (April 2026) is newer than b8407 (March 2026), which cannot load it at all.
+    $names = $Model.PSObject.Properties.Name
+    $needsMtp = ($names -contains 'NeedsMtpLoader') -and [bool]$Model.NeedsMtpLoader
+    $needsCurrent = ($names -contains 'NeedsCurrentLlamaCpp') -and [bool]$Model.NeedsCurrentLlamaCpp
+    if (-not ($needsMtp -or $needsCurrent) -or $null -eq $Runtime) { return '' }
     if ([string]$Runtime.backend -eq 'ROCm' -and [string]$Runtime.tag -match 'b8407') {
-        return "$($Model.Name) needs a newer llama.cpp than AMD's ROCm 7.2.1 package (b8407) provides. Switch to the Vulkan backend ([8], then [5] to update) to use it."
+        return "$($Model.Name) needs a newer llama.cpp than AMD's ROCm 7.2.1 package (b8407) provides. Open the backend selector ([8]), pick llama.cpp ROCm (latest) or Vulkan, then [5] to update."
     }
     return ''
 }
@@ -1549,7 +1610,7 @@ function Resolve-BackendChoice {
     if ($RequestedBackend -ne 'Auto') { return $RequestedBackend }
     # Auto keeps the backend already installed, so an update never silently swaps a
     # working choice (for example Vulkan picked for Ornith) back to the recommendation.
-    if ($null -ne $Runtime -and @('ROCm', 'Vulkan') -contains [string]$Runtime.backend) { return [string]$Runtime.backend }
+    if ($null -ne $Runtime -and @('ROCm', 'ROCmLatest', 'Vulkan') -contains [string]$Runtime.backend) { return [string]$Runtime.backend }
     if ($Hardware.RocmRecommended) { return 'ROCm' }
     return 'Vulkan'
 }
@@ -2323,11 +2384,17 @@ function Select-BackendInteractively {
     Write-Host '  [1] Auto — AMD ROCm for supported Radeon dGPUs; Vulkan otherwise (Recommended)' -ForegroundColor Green
     Write-Host '  [2] Vulkan — widest AMD compatibility, including Ryzen iGPUs and older Radeon cards' -ForegroundColor Cyan
     Write-Host '  [3] AMD ROCm 7.2.1 — validated Windows package for supported Radeon dGPUs' -ForegroundColor Magenta
+    Write-Host '  [4] llama.cpp ROCm (latest, advanced) — newest llama.cpp; runs Gemma 4 and Ornith on ROCm' -ForegroundColor Yellow
     Write-Host '  [0] Return' -ForegroundColor DarkGray
     $choice = Read-ConsoleLine -Prompt '  Select backend'
     if ($choice -eq '1') { $script:Backend = 'Auto'; Write-Success 'Backend set to Auto.' }
     elseif ($choice -eq '2') { $script:Backend = 'Vulkan'; Write-Success 'Backend set to Vulkan.' }
     elseif ($choice -eq '3') { $script:Backend = 'ROCm'; Write-WarnLine 'ROCm selected. Installation will stop if the Radeon is not in AMD Windows matrix.' }
+    elseif ($choice -eq '4') {
+        $script:Backend = 'ROCmLatest'
+        foreach ($line in (Get-RocmLatestRequirementText)) { Write-WarnLine $line }
+        Write-Info 'Now choose [5] Update llama.cpp to install it.'
+    }
 }
 
 function Show-Dashboard {
@@ -2336,7 +2403,7 @@ function Show-Dashboard {
         $hardware = Get-HardwareProfile
         $recommended = Get-RecommendedModel -Hardware $hardware
         $runtime = Get-InstalledRuntime
-        $backendLabel = if ($null -ne $runtime) { "$($runtime.backend) $($runtime.tag)" } elseif ($Backend -eq 'Auto') { if ($hardware.RocmRecommended) { 'AMD ROCm 7.2.1' } else { 'Vulkan' } } else { $Backend }
+        $backendLabel = if ($null -ne $runtime) { "$(if ([string]$runtime.backend -eq 'ROCmLatest') { 'llama.cpp ROCm' } else { $runtime.backend }) $($runtime.tag)" } elseif ($Backend -eq 'Auto') { if ($hardware.RocmRecommended) { 'AMD ROCm 7.2.1' } else { 'Vulkan' } } else { $Backend }
         $assessment = @(Get-ModelAssessment -Hardware $hardware | Where-Object { $_.Model.Id -eq $recommended.Id } | Select-Object -First 1)
         $active = Get-ActiveModel
         $installed = Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')
@@ -2385,7 +2452,7 @@ function Show-Dashboard {
         Write-Host '   [5]  ↑  Update llama.cpp — preserves every model' -ForegroundColor White
         Write-Host '   [6]  ⚙  Full diagnostics' -ForegroundColor White
         Write-Host '   [7]  ×  Uninstall command center' -ForegroundColor White
-        Write-Host '   [8]  ⚡ Backend selector — ROCm / Vulkan' -ForegroundColor White
+        Write-Host '   [8]  ⚡ Backend selector — ROCm / Vulkan / llama.cpp ROCm' -ForegroundColor White
         Write-Host '   [9]  📄 View latest run log' -ForegroundColor White
         Write-Host '   [10] 📡 Live monitor — health, speed, and context in real time' -ForegroundColor White
         Write-Host '   [11] 🗑  Remove a downloaded model — frees disk space (asks first)' -ForegroundColor White

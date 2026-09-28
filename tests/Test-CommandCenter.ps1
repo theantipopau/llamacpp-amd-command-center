@@ -31,10 +31,12 @@ $Force = $true
 $Thinking = 'Auto'
 $ContextSize = 0
 $script:ServerSlots = 2
-$script:CommandCenterVersion = '0.1.5'
+$script:CommandCenterVersion = '0.1.6'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
+$script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
+$script:GitHubHeaders = @{}
 $script:AmdRocmPage = 'https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html'
-$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 24)
+$script:AmdRocmPackageCheckedOn = [DateTime]::new(2026, 9, 28)
 $script:AmdRocmPackageFreshnessDays = 120
 # Run logging is not started here; the helpers skip logging when these are empty.
 $script:RunJsonlPath = $null; $script:RunLogPath = $null; $script:RunSummaryPath = $null
@@ -139,6 +141,29 @@ try {
     Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $null) -eq 'ROCm') 'Auto uses the recommendation on a fresh install'
     Assert-True ((Resolve-BackendChoice -RequestedBackend 'ROCm' -Hardware $rocmHw -Runtime $vulkanNew) -eq 'ROCm') 'an explicit backend choice always wins'
 
+    Write-Host 'Newer models and the llama.cpp ROCm (latest) backend'
+    $gemma4 = Get-ModelById 'gemma4-12b'
+    $rocmLatest = [pscustomobject]@{ backend = 'ROCmLatest'; tag = 'b11239' }
+    Assert-True ([bool](Get-ModelRuntimeBlocker -Model $gemma4 -Runtime $rocmPkg)) 'Gemma 4 is blocked on the AMD ROCm b8407 package (predates Gemma 4)'
+    Assert-True (-not (Get-ModelRuntimeBlocker -Model $gemma4 -Runtime $vulkanNew)) 'Gemma 4 is allowed on a current Vulkan build'
+    Assert-True (-not (Get-ModelRuntimeBlocker -Model $gemma4 -Runtime $rocmLatest)) 'Gemma 4 is allowed on the llama.cpp ROCm (latest) build'
+    Assert-True (-not (Get-ModelRuntimeBlocker -Model $ornith -Runtime $rocmLatest)) 'Ornith is allowed on the llama.cpp ROCm (latest) build'
+    Assert-True ((Get-RecommendedModel -Hardware $hwBoth).Id -eq 'qwen3.5-9b') 'Gemma 4 never replaces Qwen3.5 9B as the default recommendation'
+    Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $rocmLatest) -eq 'ROCmLatest') 'Auto keeps an installed llama.cpp ROCm (latest) backend on update'
+    Assert-True ((Resolve-BackendChoice -RequestedBackend 'Auto' -Hardware $rocmHw -Runtime $null) -ne 'ROCmLatest') 'Auto never picks llama.cpp ROCm (latest) on a fresh install'
+    function Invoke-RestMethod {
+        param($Uri, $Headers)
+        [pscustomobject]@{ tag_name = 'b11239'; html_url = 'https://example.invalid'; assets = @(
+            [pscustomobject]@{ name = 'llama-b11239-bin-win-vulkan-x64.zip' },
+            [pscustomobject]@{ name = 'llama-b11239-bin-win-rocm-10.0-x64.zip' },
+            [pscustomobject]@{ name = 'llama-b11239-bin-ubuntu-rocm-10.0-x64.tar.gz' }) }
+    }
+    Assert-True ((Get-LatestLlamaCppRocmAsset).Asset.name -eq 'llama-b11239-bin-win-rocm-10.0-x64.zip') 'the ROCm resolver picks the Windows ROCm ZIP whatever its ROCm version'
+    Assert-True ((Get-LatestLlamaCppVulkanAsset).Asset.name -eq 'llama-b11239-bin-win-vulkan-x64.zip') 'the Vulkan resolver still picks the Vulkan ZIP'
+    Remove-Item -LiteralPath Function:\Invoke-RestMethod
+    $noDevices = Get-LlamaDeviceList -Directory (Join-Path $work 'no-such-build')
+    Assert-True (@($noDevices).Count -eq 0) 'no llama.cpp build means no devices (so ROCm (latest) is rolled back, not kept)'
+
     Write-Host 'GPU selection never uses the Ryzen iGPU automatically'
     $vkList = @('Available devices:', '  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)', '  Vulkan1: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)')
     Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $vkList)) -eq 'Vulkan0') 'Vulkan with dGPU + iGPU pins the dedicated Radeon'
@@ -148,6 +173,12 @@ try {
     Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $rocmList)) -eq '') 'a single visible GPU needs no pin'
     $apuOnly = @('  Vulkan0: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)', '  Vulkan1: AMD Radeon 780M Graphics (8000 MiB, 7000 MiB free)')
     Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $apuOnly)) -eq '') 'an iGPU-only machine is left to llama.cpp defaults'
+    $mixed = ConvertFrom-LlamaDeviceList -Lines @('  ROCm0: AMD Radeon RX 9070 XT (16304 MiB, 16153 MiB free)', '  ROCm1: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)')
+    $rocmFound = @($mixed | Where-Object { $_.Id -match '^ROCm' -and -not $_.Integrated })
+    Assert-True (($rocmFound.Count -eq 1) -and ($rocmFound[0].Id -eq 'ROCm0')) 'the ROCm (latest) GPU check counts only the dedicated Radeon'
+    $noGpu = ConvertFrom-LlamaDeviceList -Lines @('Available devices:', '  (none)')
+    $cpuOnly = @($noGpu | Where-Object { $_.Id -match '^ROCm' })
+    Assert-True ($cpuOnly.Count -eq 0) 'a build that lists no GPU fails the ROCm (latest) check'
     $pinned = Get-ServerArguments -ActiveModel (Get-ActiveModel) -EffectiveContext 32768 -Device 'Vulkan0'
     Assert-True (($pinned -join ' ') -match '--device Vulkan0') 'the chosen device reaches the server arguments'
     Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 32768 -SkipVerification

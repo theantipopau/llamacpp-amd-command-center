@@ -127,10 +127,11 @@ The setup recommends the **strongest tool-capable model that fits entirely in yo
 | Qwen3.8 27B | 18.3 GB | ✓ | ✓ | Strongest answers, but on a 16 GB card about 5 GB runs from system RAM: roughly 4–7 tokens/s. |
 | Qwen3 8B | 8.1 GB | ✓ | | High-quality 8-bit weights. |
 | Llama 3.1 8B | 5.6 GB | ✓ | | Proven general-purpose model. |
+| Gemma 4 12B *(new)* | 7.5 GB | ✓ | ✓ | Google's April 2026 model. Tool calling is supported by current llama.cpp but hasn't been tested with Copilot Agent mode here. Needs the Vulkan or *llama.cpp ROCm (latest)* backend: AMD's ROCm 7.2.1 package is older than Gemma 4 and can't load it. |
 | Gemma 3 12B | 7.6 GB | | ✓ | Chat and image understanding; not for Agent mode. |
 | Gemma 3 4B | 3.1 GB | | ✓ | For 8 GB systems and Ryzen integrated graphics. |
 | Qwen3 4B | 2.3 GB | ✓ | | Smallest and fastest; good for CPU-only machines. |
-| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | A community-tuned version of Qwen3.5 9B aimed at coding. Its makers report better results; that hasn't been checked here. **Not usable on most Radeon cards yet:** it needs the Vulkan backend (the ROCm backend can't load it, and the menu stops you before downloading), and on an RX 9070 XT Vulkan crashed during long sessions. Expect this to change when AMD updates its ROCm package. |
+| Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | A community-tuned version of Qwen3.5 9B aimed at coding. Its makers report better results; that hasn't been checked here. AMD's ROCm 7.2.1 package can't load it (the menu stops you before downloading). It needs the Vulkan backend, which crashed during long sessions on an RX 9070 XT, or the advanced *llama.cpp ROCm (latest)* backend, which should load it but hasn't been tested with it here. |
 
 The model browser in **[1]** shows each model's fit for *your* PC: `VRAM` means it fits in graphics memory, `VRAM+RAM` means it spills into system RAM and runs more slowly. Downloads come from Hugging Face; the current revision and SHA-256 are resolved at download time, and files are verified before they are activated.
 
@@ -169,7 +170,7 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | Replies are very slow | The model does not fit in VRAM. Pick one marked `VRAM` (not `VRAM+RAM`) in the model browser. |
 | Graphics card not detected | Update the AMD driver, restart Windows, then run **Diagnostics** from **[1]**. |
 | *Install-LlamaCpp-AMD.ps1 is missing* | Extract the whole ZIP and keep both files in the same folder. |
-| The model list says a model *cannot run on the installed llama.cpp build* | That model needs a different backend. Pick another model; the Which model? table explains the exceptions. |
+| The model list says a model *cannot run on the installed llama.cpp build* | That model needs a newer llama.cpp than AMD's ROCm 7.2.1 package. Pick another model, or switch backend (the Which model? and AMD backends tables explain the options). |
 | The server window closed by itself | Choose **[9] Logs and fixes**, then start it again with **[2]**. If it keeps happening on the Vulkan backend, see the next row. |
 | PC froze, blue-screened (`VIDEO_TDR_FAILURE`, 0x116), or the server log says `device lost on Vulkan0` | On a Radeon that supports ROCm (such as the RX 9070 XT), use the **ROCm backend**. In testing on an RX 9070 XT, the Vulkan build lost the GPU during long Agent sessions (about 58k tokens of context), once taking Windows down with it; ROCm ran for days without a fault. From v0.1.5 the launcher also pins the dedicated Radeon, so Ryzen integrated graphics is never used automatically. |
 | VS Code says `code` is not recognized ([7] → llama-vscode) | Install the extension from inside VS Code: Extensions, search **llama-vscode**, Install. |
@@ -189,8 +190,9 @@ Start with **[5] Health check**. It names the failing step and what to do.
 |---|---|---|
 | **ROCm** | Radeon cards in AMD's Windows ROCm list, such as the RX 9070 XT | AMD's validated Windows package (ROCm 7.2.1). Fastest on supported cards. |
 | **Vulkan** | Ryzen integrated graphics, older Radeon cards, everything else | Official llama.cpp Vulkan build using the standard AMD driver. On cards that support ROCm, stay on ROCm: on an RX 9070 XT, Vulkan crashed during long sessions. |
+| **llama.cpp ROCm (latest)** *(advanced, opt-in)* | Anyone who wants the newest llama.cpp on ROCm, for example to run Gemma 4 or Ornith | llama.cpp's own Windows ROCm build, updated with every llama.cpp release. It needs AMD's ROCm runtime libraries installed separately, so it is never chosen automatically. After installing, setup checks that the build can see your Radeon; if not, it removes the new build and keeps your previous llama.cpp. Not yet tested by this project on every card. |
 
-The setup chooses automatically on a fresh install; you can override it with the backend selector in **[1]**. After that, updates keep the backend you have installed, so choosing Vulkan (for example, to run Ornith) is never undone by an update. The dashboard's BACKEND line shows the build actually installed. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
+The setup chooses ROCm or Vulkan automatically on a fresh install; you can override it with the backend selector in **[1]** (option [8], then [5] to install). After that, updates keep the backend you have installed, so choosing Vulkan (for example, to run Ornith) is never undone by an update. The dashboard's BACKEND line shows the build actually installed. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
 
 ## Command-line reference (advanced)
 
@@ -224,10 +226,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 
 | Option | Meaning |
 |---|---|
-| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b`, `ornith-1.5-9b` |
+| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma4-12b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b`, `ornith-1.5-9b` |
 | `-ContextSize` | Tokens per conversation. `0` (default) sizes it from your hardware. |
 | `-Thinking` | `Auto` (default: off for tool-capable models), `On`, or `Off`. |
-| `-Backend` | `Auto` (default), `ROCm`, or `Vulkan`. |
+| `-Backend` | `Auto` (default), `ROCm` (AMD's validated package), `ROCmLatest` (llama.cpp's own ROCm build; advanced), or `Vulkan`. |
 | `-Port` | Server port, default `8080`. |
 | `-Force` | Skip confirmation prompts. |
 
