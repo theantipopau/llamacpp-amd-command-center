@@ -90,6 +90,7 @@ The **NEXT STEP** line at the top of the menu always tells you what to do next.
 | **[8] Beginner guide** | Plain-English explanations of every term, plus official links. |
 | **[9] Logs and fixes** | The latest run log and answers to common problems. |
 | **[M] Live monitor** | Watches server status, active model, and prompt/generation speed, refreshing every 2 seconds. Press `Q` then Enter to leave it. |
+| **[B] Benchmark** | Measures prompt-reading and generation speed with a fixed prompt, saves the result to your logs, and shows your earlier runs so you can compare models or settings. The server must be running. |
 
 The status panel shows the active model, whether the AI server is running, and whether VS Code is connected. It also prints a one-line notice if a newer command-center release exists on GitHub — nothing downloads automatically.
 
@@ -148,8 +149,9 @@ These settings came from diagnosing real Copilot failures on an RX 9070 XT. They
 | Thinking | Off (`--reasoning off`) for tool-capable models | With thinking on, Qwen often hides its tool call inside the thinking text, and VS Code shows *Sorry, no response was returned*. |
 | VS Code token budget | 57,344 input / 8,192 output | Matches one conversation's context. |
 | Network | `127.0.0.1` only | Other devices on your network cannot reach the server. |
+| Speculative drafting | `--spec-type ngram-mod` | llama.cpp drafts extra tokens from patterns already in the conversation and verifies them, so replies are unchanged. Newer llama.cpp builds gain speed on repeated output; AMD's ROCm 7.2.1 package skips it for hybrid models such as Qwen3.5 (it logs *speculative decoding not supported by this context*). Opt out with `server-args.user.json`. |
 
-Context is sized from the VRAM left after the model loads, and from each model's measured memory cost per token. Dense 8B models get 32k; hybrid models such as Qwen3.5 need much less memory and get 64k. You can override it:
+Context is sized from the VRAM left after the model loads, and from each model's measured memory cost per token. Dense 8B models get 32k; hybrid models such as Qwen3.5 and Qwen3.8 keep a much smaller key/value cache (measured from the model files: 1.1 GiB per 32k tokens for Qwen3.8, versus 2.5 GiB for a dense model) and get 64k. You can override it:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.ps1 -Action Models -ModelId qwen3.5-9b -ContextSize 49152
@@ -172,6 +174,7 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | *Install-LlamaCpp-AMD.ps1 is missing* | Extract the whole ZIP and keep both files in the same folder. |
 | The model list says a model *cannot run on the installed llama.cpp build* | That model needs a newer llama.cpp than AMD's ROCm 7.2.1 package. Pick another model, or switch backend (the Which model? and AMD backends tables explain the options). |
 | The server window closed by itself | Choose **[9] Logs and fixes**, then start it again with **[2]**. If it keeps happening on the Vulkan backend, see the next row. |
+| Server log says *speculative decoding not supported by this context* | Informational: AMD's ROCm package cannot combine n-gram drafting with hybrid models such as Qwen3.5, so llama.cpp skips it. Chat, tools, and Agent mode are unaffected. |
 | PC froze, blue-screened (`VIDEO_TDR_FAILURE`, 0x116), or the server log says `device lost on Vulkan0` | On a Radeon that supports ROCm (such as the RX 9070 XT), use the **ROCm backend**. In testing on an RX 9070 XT, the Vulkan build lost the GPU during long Agent sessions (about 58k tokens of context), once taking Windows down with it; ROCm ran for days without a fault. From v0.1.5 the launcher also pins the dedicated Radeon, so Ryzen integrated graphics is never used automatically. |
 | VS Code says `code` is not recognized ([7] → llama-vscode) | Install the extension from inside VS Code: Extensions, search **llama-vscode**, Install. |
 
@@ -193,6 +196,23 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | **llama.cpp ROCm (latest)** *(advanced, opt-in)* | Anyone who wants the newest llama.cpp on ROCm, for example to run Gemma 4 or Ornith | llama.cpp's own Windows ROCm build, updated with every llama.cpp release. It needs AMD's ROCm runtime libraries installed separately, so it is never chosen automatically. After installing, setup checks that the build can see your Radeon; if not, it removes the new build and keeps your previous llama.cpp. Not yet tested by this project on every card. |
 
 The setup chooses ROCm or Vulkan automatically on a fresh install; you can override it with the backend selector in **[1]** (option [8], then [5] to install). After that, updates keep the backend you have installed, so choosing Vulkan (for example, to run Ornith) is never undone by an update. The dashboard's BACKEND line shows the build actually installed. VRAM is read through DXGI, which avoids the Windows WMI bug that reports modern cards as 4 GB.
+
+## Running on both GPUs (dGPU + iGPU) — advanced experiment
+
+llama.cpp can split one model across two GPUs (`--device GPU1,GPU2`; layers are distributed by default). On a PC with a Radeon dGPU and a Radeon iGPU — for example an RX 9070 XT plus the graphics built into a Ryzen 7 9800X3D — both devices are visible to the **Vulkan** build. AMD's ROCm package only supports the discrete card on this machine, so this experiment requires the Vulkan backend.
+
+Know what to expect before you try it:
+
+- **It is usually slower, not faster.** Layers are processed in sequence, and the 2-CU iGPU is far slower than the dGPU, so the slow stage sets the pace for the whole model. The real benefit is **extra capacity** — a model too large for the dGPU alone can spread across both.
+- **The iGPU shares your system RAM**, so it competes with everything else running on the PC.
+- **Stability risk.** Long-running iGPU workloads can trip Windows' GPU timeout (`VIDEO_TDR_FAILURE`, bugcheck `0x116`), which was observed during Vulkan testing on an RX 9070 XT machine. The command center therefore never selects the iGPU automatically — the launcher pins the dedicated card.
+
+To try it:
+
+1. Open the backend selector (**[1]**, then **[8]**), choose **Vulkan**, and install it (**[5]**). Switch back to ROCm the same way afterwards.
+2. Run `Start-Devices.cmd` in the install folder (`%LOCALAPPDATA%\Programs\llama.cpp`) to list device names, for example `Vulkan0` = dGPU and `Vulkan1` = iGPU.
+3. In that same folder, create `server-args.user.json` containing (one line): `["--device","Vulkan0,Vulkan1"]` — this replaces the launcher's pinned single device. Your file is merged last on every start and is never overwritten by updates; delete it to return to normal.
+4. Start the server with **[2]**, run **[5] Health check**, and use **[B] Benchmark** to compare against the dGPU-only numbers you saved earlier.
 
 ## Command-line reference (advanced)
 
@@ -220,6 +240,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `Activate` | Switch to an already-downloaded model instantly (`-ModelId qwen3.5-9b`). Never downloads. |
 | `RemoveModel` | Delete one downloaded model to free disk space (asks first; refuses the active model). Without `-ModelId` it shows a list. |
 | `Monitor` | The live monitor from menu option [M]: server status, active model, and prompt/generation speed, refreshing every 2 seconds. |
+| `Benchmark` | Measure prompt and generation speed with a fixed prompt against the running server, save the result, and print saved runs (menu option [B]). Exit code 2 means the server is not running. |
 | `CheckUpdate` | Check GitHub for a newer command-center release. Prints a message; never downloads or installs anything. |
 | `ContinueConfig` | Write or update the managed block in Continue's `config.yaml` (menu [7] → [2]). |
 | `LlamaVscodeConfig` | Point the llama-vscode extension's settings at your server (menu [7] → [1]). |

@@ -9,6 +9,9 @@ Continue-llamacpp-config.yaml
 *.tmp
 *.bak
 
+# Batch smoke-test input (CI recipe: (echo x& echo 5& echo 8& echo 0) > choices.txt)
+choices.txt
+
 # Local release package output
 dist/
 
