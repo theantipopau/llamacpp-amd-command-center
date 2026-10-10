@@ -3154,6 +3154,8 @@ function Get-VsCodeChatState {
 function Get-DesktopShortcutState {
     # 'yes' when at least one of this install's shortcuts is on the desktop.
     $desktop = Get-DesktopFolder
+    # Some sessions (CI runners, redirected profiles) have no desktop folder: that means no shortcuts.
+    if ([string]::IsNullOrWhiteSpace($desktop)) { return 'no' }
     foreach ($spec in (Get-ShortcutSpecs)) {
         if (Test-Path -LiteralPath (Join-Path $desktop $spec.Name) -PathType Leaf) { return 'yes' }
     }
