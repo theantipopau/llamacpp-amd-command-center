@@ -1366,3 +1366,6 @@ try {
 
 if ($failures -gt 0) { Write-Host "$failures check(s) failed." -ForegroundColor Red; exit 1 }
 Write-Host 'All checks passed.' -ForegroundColor Green
+# Explicit exit: the CI step runs this file through `powershell -command`, where the exit code
+# follows the last command's status. A suppressed cleanup error must not turn a pass into a failure.
+exit 0
