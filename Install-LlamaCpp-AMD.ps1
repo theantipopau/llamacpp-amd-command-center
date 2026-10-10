@@ -94,7 +94,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui', 'GameWatch')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui', 'GameWatch', 'Benchmark')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $SettingsPatch = '',
@@ -2110,7 +2110,15 @@ function Get-ServerArguments {
         '--flash-attn', 'on',
         '--cache-type-k', 'q8_0',
         '--cache-type-v', 'q8_0',
-        '--jinja'
+        '--jinja',
+        # N-gram speculative drafting: llama.cpp guesses the next few tokens from
+        # patterns already in this conversation and verifies them, so replies are
+        # unchanged. Newer llama.cpp builds gain speed on repeated output (code,
+        # lists). AMD's ROCm 7.2.1 package (b8407) cannot combine it with
+        # hybrid-attention models such as Qwen3.5: it logs "speculative decoding not
+        # supported by this context" and does nothing (measured: no effect either
+        # way). Opt out with server-args.user.json: ["--spec-type", "none"].
+        '--spec-type', 'ngram-mod'
     )
     if (-not [string]::IsNullOrWhiteSpace($Device)) { $arguments += @('--device', $Device) }
     if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
@@ -4086,6 +4094,151 @@ function Get-ServerMetricsSnapshot {
     return $snapshot
 }
 
+# ---------------------------------------------------------------------
+# Benchmark
+# ---------------------------------------------------------------------
+
+function Get-BenchmarkHistoryPath {
+    return Join-Path (Get-RunLogDirectory) 'benchmark-history.jsonl'
+}
+
+function Add-BenchmarkRecord {
+    # Appends one JSON line per run (UTF-8 without BOM) so speeds can be compared
+    # across models, quants and settings over time.
+    param($Record, [string] $Path = '')
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Get-BenchmarkHistoryPath }
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $line = ($Record | ConvertTo-Json -Compress -Depth 6)
+    [IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-BenchmarkHistory {
+    # Saved runs, oldest first, capped at $Max. A missing file or a malformed line
+    # is never fatal: history is a convenience, not a requirement.
+    param([string] $Path = '', [int] $Max = 10)
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Get-BenchmarkHistoryPath }
+    $records = @()
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        foreach ($entry in @(Get-Content -LiteralPath $Path)) {
+            if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+            try { $records += @($entry | ConvertFrom-Json) } catch { }
+        }
+    }
+    if ($records.Count -gt $Max) { $records = @($records | Select-Object -Last $Max) }
+    return ,@($records)
+}
+
+function Invoke-BenchmarkRequest {
+    # One measured request against a running server; returns its timings payload.
+    param([string] $ServedModel)
+    $base = "http://127.0.0.1:$Port"
+    function Send-Chat($Body, [int] $TimeoutSec) {
+        $json = $Body | ConvertTo-Json -Depth 12
+        return Invoke-RestMethod -Method Post -Uri "$base/v1/chat/completions" -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec $TimeoutSec
+    }
+    # Warm-up: the first request after start-up pays one-time costs (KV allocation,
+    # sampler setup) that would otherwise skew the measurement.
+    [void](Send-Chat @{ model = $ServedModel; max_tokens = 16; messages = @(@{ role = 'user'; content = 'Reply with one word: ready' }) } 120)
+    $prompt = 'Explain in two short paragraphs why the sky is blue, then list three fun facts about rainbows.'
+    $response = Send-Chat @{
+        model = $ServedModel
+        messages = @(@{ role = 'user'; content = $prompt })
+        max_tokens = 256
+        temperature = 0
+        stream = $false
+    } 300
+    if ($response.PSObject.Properties.Name -notcontains 'timings') { throw 'The server did not report timings for the benchmark request.' }
+    return $response.timings
+}
+
+function Invoke-ModelBenchmark {
+    # Runs the fixed benchmark against the running server, saves it, shows history.
+    $active = Get-ActiveModel
+    if ($null -eq $active) {
+        Write-WarnLine 'No active model yet. Choose [1] Setup and models first.'
+        return $false
+    }
+    $base = "http://127.0.0.1:$Port"
+    $healthy = $false
+    try { $healthy = ((Invoke-RestMethod -Uri "$base/health" -TimeoutSec 5).status -eq 'ok') } catch { }
+    if (-not $healthy) {
+        Write-WarnLine 'The AI server is not running. Choose [2] Start AI server and wait for READY, then try again.'
+        return $false
+    }
+    $served = ''
+    try { $served = [string]((Invoke-RestMethod -Uri "$base/v1/models" -TimeoutSec 10).data[0].id) } catch { }
+    if ([string]::IsNullOrWhiteSpace($served)) { $served = [string]$active.alias }
+    if ($served -ne [string]$active.alias) {
+        Write-WarnLine "The server is running '$served' but the active model is '$($active.alias)'. The result applies to what is running."
+    }
+
+    Write-Host "`n  Running the benchmark: a warm-up, then a fixed prompt with 256 new tokens..." -ForegroundColor White
+    $timings = Invoke-BenchmarkRequest -ServedModel $served
+    $runtime = Get-InstalledRuntime
+    $record = [pscustomobject][ordered]@{
+        at = (Get-Date).ToUniversalTime().ToString('o')
+        model_id = [string]$active.id
+        alias = [string]$active.alias
+        context = [int]$active.context_size
+        backend = if ($null -ne $runtime) { [string]$runtime.backend } else { 'unknown' }
+        build = if ($null -ne $runtime) { [string]$runtime.tag } else { '' }
+        prompt_tokens = [int]$timings.prompt_n
+        prompt_tps = [Math]::Round([double]$timings.prompt_per_second, 1)
+        gen_tokens = [int]$timings.predicted_n
+        gen_tps = [Math]::Round([double]$timings.predicted_per_second, 1)
+    }
+    Add-BenchmarkRecord -Record $record
+    Write-RunLogEvent -Event 'benchmark' -Message "Benchmark $($record.alias): $($record.gen_tps) generation tokens/s" -Data @{
+        model_id = $record.model_id
+        prompt_tps = $record.prompt_tps
+        prompt_tokens = $record.prompt_tokens
+        gen_tps = $record.gen_tps
+        gen_tokens = $record.gen_tokens
+    }
+    Show-BenchmarkHistory -Current $record
+    return $true
+}
+
+function Show-BenchmarkHistory {
+    # Current run first, then saved runs newest first, with a plain-English reading.
+    param($Current)
+    Write-Host ''
+    Write-Host ('  BENCHMARK RESULT  {0}  (context {1} tokens)' -f $Current.alias, $Current.context) -ForegroundColor White
+    Write-Host ('    Prompt processing  {0,7:N1} tokens/s   ({1} tokens read)' -f $Current.prompt_tps, $Current.prompt_tokens) -ForegroundColor Cyan
+    Write-Host ('    Generation         {0,7:N1} tokens/s   ({1} tokens written)' -f $Current.gen_tps, $Current.gen_tokens) -ForegroundColor Cyan
+    Write-Host ('    About {0} words per second of text.' -f [int][Math]::Round([double]$Current.gen_tps * 0.75)) -ForegroundColor DarkGray
+
+    $history = Get-BenchmarkHistory
+    $earlier = @($history | Where-Object { [string]$_.at -ne [string]$Current.at })
+    if ($earlier.Count -eq 0) {
+        Write-Host ''
+        Write-Host '  First result saved. Run the benchmark again after changing model or settings to compare.' -ForegroundColor DarkGray
+        return
+    }
+    Write-Host ''
+    Write-Host '  SAVED RUNS (newest first)' -ForegroundColor White
+    $shown = @($history | Select-Object -Last 8)
+    [array]::Reverse($shown)
+    foreach ($row in $shown) {
+        $when = '?'
+        try { $when = ([DateTime]::Parse([string]$row.at)).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } catch { }
+        $isCurrent = ([string]$row.at -eq [string]$Current.at)
+        $marker = if ($isCurrent) { '>' } else { ' ' }
+        $color = if ($isCurrent) { 'Cyan' } else { 'Gray' }
+        Write-Host ('  {0} {1}  {2,-16} {3,8:N1} prompt  {4,8:N1} generation' -f $marker, $when, [string]$row.alias, [double]$row.prompt_tps, [double]$row.gen_tps) -ForegroundColor $color
+    }
+    $sameModel = @($earlier | Where-Object { [string]$_.model_id -eq [string]$Current.model_id })
+    if ($sameModel.Count -gt 0) {
+        $best = @($sameModel | Sort-Object -Property gen_tps | Select-Object -Last 1)[0]
+        if ([double]$best.gen_tps -gt [double]$Current.gen_tps) {
+            Write-Host ('  Best earlier run for this model: {0:N1} tokens/s.' -f [double]$best.gen_tps) -ForegroundColor DarkGray
+        }
+    }
+}
+
 function Show-LiveMonitor {
     Write-Host "`n  LIVE MONITOR — refreshes every 2 seconds. Type Q then Enter to return." -ForegroundColor White
     while ($true) {
@@ -4918,6 +5071,7 @@ function Show-Dashboard {
         Write-Host '   [9]  📄 View latest run log' -ForegroundColor White
         Write-Host '   [10] 📡 Live monitor — health, speed, and context in real time' -ForegroundColor White
         Write-Host '   [11] 🗑  Remove a downloaded model — frees disk space (asks first)' -ForegroundColor White
+        Write-Host '   [12] 📊  Benchmark — measure prompt and generation speed (server running)' -ForegroundColor White
         Write-Host '   [0]  Exit' -ForegroundColor DarkGray
         Write-Host '  ═══════════════════════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
 
@@ -4967,6 +5121,7 @@ function Show-Dashboard {
                 '8' { Select-BackendInteractively }
                 '9' { Show-LatestRunLog; Pause-Screen }
                 '10' { Show-LiveMonitor; Pause-Screen }
+                '12' { [void](Invoke-ModelBenchmark); Pause-Screen }
                 '11' {
                     $toRemove = Select-ModelToRemove
                     if ($null -ne $toRemove) { [void](Remove-DownloadedModel -Model $toRemove) }
@@ -5440,6 +5595,7 @@ try {
         'Update' { [void](Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend) }
         'Launch' { Start-ActiveServer -Hardware $hardware }
         'Monitor' { Show-LiveMonitor }
+        'Benchmark' { [void](Invoke-ModelBenchmark) }
         'Easy' {
             if (-not (Invoke-EasyStart -Hardware $hardware)) { Complete-RunLogging -Status 'cancelled'; exit 2 }
         }

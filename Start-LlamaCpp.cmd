@@ -106,6 +106,7 @@ echo     %CYAN%[G]%R%  %WHITE%Gaming mode%R%             %DIM%Free the GPU for a
 echo     %CYAN%[4]%R%  %WHITE%Open the chat window%R%    %DIM%Talk to the model in the built-in chat%R%
 echo     %CYAN%[5]%R%  %WHITE%Health check%R%            %DIM%Tests chat, tool calling, and memory in about 10 seconds%R%
 echo     %CYAN%[M]%R%  %WHITE%Live monitor%R%            %DIM%Watch server status and speed refresh every 2 seconds%R%
+echo     %CYAN%[B]%R%  %WHITE%Benchmark%R%               %DIM%Measure prompt and generation speed - saved for comparison%R%
 echo.
 echo  %MAG%  CONNECT%R%
 echo     %CYAN%[6]%R%  %WHITE%Connect VS Code%R%         %DIM%Adds the model to GitHub Copilot Chat - asks before changing anything%R%
@@ -132,6 +133,7 @@ if "%choice%"=="3" goto :stop_server
 if "%choice%"=="4" goto :open_webui
 if "%choice%"=="5" goto :health_check
 if /I "%choice%"=="M" goto :live_monitor
+if /I "%choice%"=="B" goto :benchmark
 if "%choice%"=="6" goto :vscode
 if "%choice%"=="7" goto :editors
 if "%choice%"=="8" goto :guide
@@ -430,6 +432,26 @@ rem ============================================================================
 cls
 call :header "LIVE MONITOR"
 %PS_RUN% -Action Monitor
+goto :menu
+
+rem ============================================================================
+rem  [B] BENCHMARK
+:benchmark
+cls
+call :header "BENCHMARK"
+call :server_ready
+if not "%READY%"=="1" (
+    echo   %YELLOW%The AI server is not running yet.%R% Choose [2] to start it, then try again.
+    echo.
+    call :wait_for_key
+    goto :menu
+)
+echo   Measures how fast the model reads your prompt and writes its reply.
+echo   %DIM%Uses a fixed prompt so results stay comparable. Saved to your logs folder.%R%
+echo.
+%PS_RUN% -Action Benchmark <nul
+echo.
+call :wait_for_key
 goto :menu
 
 rem ============================================================================

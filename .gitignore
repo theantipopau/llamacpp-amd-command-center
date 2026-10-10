@@ -32,3 +32,6 @@ Desktop.ini
 
 # Private working notes (kept out of the public repo and Pages site)
 notes/
+
+# Batch smoke-test input (CI recipe: (echo x& echo 5& echo 8& echo 0) > choices.txt)
+choices.txt

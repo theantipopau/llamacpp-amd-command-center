@@ -130,6 +130,7 @@ A game and the AI model both want your graphics memory (VRAM). Easy start and **
 | **[7] Other editors** | The official llama-vscode extension, a Continue settings file, and settings for Cline or any OpenAI-compatible tool. |
 | **[8] Beginner guide** | Plain-English explanations of every term, plus official links. |
 | **[9] Logs and fixes** | The latest run log and answers to common problems. |
+| **[B] Benchmark** | Measures prompt and generation speed with a fixed prompt (the server must be running). Each result is saved to `logs\benchmark-history.jsonl`, and the menu lists earlier runs so models, quants and settings can be compared. |
 | **[M] Live monitor** | Watches server status, active model, and prompt/generation speed, refreshing every 2 seconds. Press `Q` then Enter to leave it. |
 
 The status panel shows the active model, whether the AI server is running, and whether VS Code is connected. It also prints a one-line notice if a newer command-center release exists on GitHub — nothing downloads automatically.
@@ -202,6 +203,7 @@ These settings came from diagnosing real Copilot failures on an RX 9070 XT. They
 | Conversations at once | 2 (`--parallel 2`, 131,072-token pool) | VS Code sometimes sends a second large request (such as a summary) while an Agent turn is running. With room for only one, both fail with *Server error: 500*. |
 | Thinking | Off (`--reasoning off`) for tool-capable models | With thinking on, Qwen often hides its tool call inside the thinking text, and VS Code shows *Sorry, no response was returned*. |
 | VS Code token budget | 57,344 input / 8,192 output | Matches one conversation's context. |
+| Speculative drafting | n-gram (`--spec-type ngram-mod`) | Guesses repeated text from the conversation and verifies it, so replies are unchanged. Newer llama.cpp builds gain speed on code and lists. AMD's ROCm 7.2.1 package logs that it is not supported for Qwen3.5 and ignores it. Opt out with `["--spec-type", "none"]` in `server-args.user.json`. |
 | Network | `127.0.0.1` only | Other devices on your network cannot reach the server. |
 
 Context is sized from the VRAM left after the model loads, and from each model's measured memory cost per token. Dense 8B models get 32k; hybrid models such as Qwen3.5 need much less memory and get 64k. You can override it:
@@ -233,6 +235,7 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | The model list says a model *cannot run on the installed llama.cpp build* | That model needs a newer llama.cpp than AMD's ROCm 7.2.1 package. Pick another model, or switch backend (the Which model? and AMD backends tables explain the options). |
 | The server window closed by itself | Choose **[9] Logs and fixes**, then start it again with **[2]**. If it keeps happening on the Vulkan backend, see the next row. |
 | PC froze, blue-screened (`VIDEO_TDR_FAILURE`, 0x116), or the server log says `device lost on Vulkan0` | On a Radeon that supports ROCm (such as the RX 9070 XT), use the **ROCm backend**. In testing on an RX 9070 XT, the Vulkan build lost the GPU during long Agent sessions (about 58k tokens of context), once taking Windows down with it; ROCm ran for days without a fault. From v0.1.5 the launcher also pins the dedicated Radeon, so Ryzen integrated graphics is never used automatically. |
+| The server log says `speculative decoding not supported by this context` | Harmless. AMD's ROCm 7.2.1 build cannot combine n-gram drafting with the Qwen3.5 hybrid model, so the server ignores it and replies are unchanged. To silence the message, add `["--spec-type", "none"]` to `server-args.user.json`. |
 | VS Code says `code` is not recognized ([7] → llama-vscode) | Install the extension from inside VS Code: Extensions, search **llama-vscode**, Install. |
 
 **[9] Logs and fixes** shows the latest run log. Logs live in `%LOCALAPPDATA%\Programs\llama.cpp\logs`; common API keys and tokens are removed automatically, but look them over before sharing.
@@ -290,6 +293,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `ListInstalled` | One line per downloaded model: number, id, name, and `active`, `ready` or `blocked`. |
 | `Activate` | Switch to an already-downloaded model instantly (`-ModelId qwen3.5-9b`). Never downloads. |
 | `RemoveModel` | Delete one downloaded model to free disk space (asks first; refuses the active model). Without `-ModelId` it shows a list. |
+| `Benchmark` | Menu option [B] (and dashboard [12]): one measured request after a warm-up, printed and appended to the benchmark history. Needs the server running. |
 | `Monitor` | The live monitor from menu option [M]: server status, active model, and prompt/generation speed, refreshing every 2 seconds. |
 | `CheckUpdate` | Check GitHub for a newer command-center release. Prints a message; never downloads or installs anything. |
 | `ContinueConfig` | Write or update the managed block in Continue's `config.yaml` (menu [7] → [2]). |

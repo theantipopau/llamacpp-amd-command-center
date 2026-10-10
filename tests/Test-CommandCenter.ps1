@@ -737,6 +737,28 @@ try {
     New-Launchers -ActiveModel $routerActive -EffectiveContext 65536
     Assert-True (-not ((Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw) -match 'GameWatch')) 'with game pause off, the launcher has no watcher line'
 
+    Write-Host 'Speculative drafting: on by default, user override wins'
+    Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 32768 -SkipVerification
+    $specArgs = Get-ServerArguments -ActiveModel (Get-ActiveModel) -EffectiveContext 32768
+    Assert-True (($specArgs -join ' ') -match '--spec-type ngram-mod') 'n-gram speculative drafting is in the default server arguments'
+    $specOff = Merge-ServerArguments -Base $specArgs -Overrides @('--spec-type', 'none')
+    Assert-True (($specOff -join ' ') -match '--spec-type none') 'server-args.user.json can turn speculative decoding off'
+    Assert-True (@($specOff | Where-Object { $_ -eq '--spec-type' }).Count -eq 1) 'the override replaces the default flag instead of duplicating it'
+    Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3.8-27b') -Hardware ([pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 32; RamGiB = 64; ModelBudgetGiB = 30 })) -eq 65536) 'hybrid Qwen3.8 gets 64k on a card with room (measured 1.1 GiB KV per 32k, not the dense 2.5 GiB default)'
+
+    Write-Host 'Benchmark history (append, read back, tolerate junk)'
+    $benchPath = Join-Path $work 'bench-history.jsonl'
+    Add-BenchmarkRecord -Path $benchPath -Record ([pscustomobject]@{ at = '2026-10-01T00:00:00.0000000Z'; model_id = 'qwen3.5-9b'; alias = 'qwen3.5:9b'; prompt_tps = 900.0; gen_tps = 82.4 })
+    Add-BenchmarkRecord -Path $benchPath -Record ([pscustomobject]@{ at = '2026-10-02T00:00:00.0000000Z'; model_id = 'qwen3-4b'; alias = 'qwen3:4b'; prompt_tps = 1500.0; gen_tps = 140.0 })
+    [IO.File]::AppendAllText($benchPath, "{ not json" + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    $benchHistory = Get-BenchmarkHistory -Path $benchPath
+    Assert-True ($benchHistory.Count -eq 2) 'history keeps valid runs and skips a malformed line'
+    Assert-True ($benchHistory[1].model_id -eq 'qwen3-4b') 'runs are returned oldest first'
+    Assert-True ((Get-BenchmarkHistory -Path (Join-Path $work 'missing-history.jsonl')).Count -eq 0) 'a missing history file is an empty list, not an error'
+    Assert-True ((Get-BenchmarkHistory -Path $benchPath -Max 1).Count -eq 1) 'history display is capped to the newest runs'
+    $benchBytes = [IO.File]::ReadAllBytes($benchPath)
+    Assert-True (-not ($benchBytes[0] -eq 0xEF -and $benchBytes[1] -eq 0xBB)) 'history file is UTF-8 without a byte-order mark'
+
     Write-Host 'Runtime adapters: one interface, honest stubs (ADR-005)'
     $adapterList = @(Get-RuntimeAdapters)
     Assert-True ((@($adapterList | ForEach-Object { $_.id }) -join ',') -eq 'llamacpp,lemonade,strata') 'the catalogue declares three adapters'

@@ -12,6 +12,7 @@
       "File": "Qwen3.8-27B-Q4_K_M.gguf",
       "Projector": "mmproj-Qwen3.8-27B-Q8_0.gguf",
       "ApproxGiB": 18.25,
+      "KvGiBPer32k": 1.1,
       "Rank": 100,
       "Tag": "BEST QUALITY",
       "Description": "Flagship reasoning, coding, tools, vision and video. Ollama qwen3.8:latest equivalent.",
