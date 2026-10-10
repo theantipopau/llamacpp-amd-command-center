@@ -68,6 +68,8 @@ fn script_candidates() -> Vec<PathBuf> {
         for _ in 0..SEARCH_DEPTH {
             let Some(current) = directory else { break };
             candidates.push(current.join(SCRIPT_NAME));
+            // The installer bundles the backend (and its catalogue) in a backend folder next to the app.
+            candidates.push(current.join("backend").join(SCRIPT_NAME));
             directory = current.parent().map(Path::to_path_buf);
         }
     }
@@ -422,6 +424,56 @@ fn library_change(action: String, model_id: String) -> BackendResult {
 /// that carries the refreshed library), and open the real transfer in its own console
 /// window through the proven `-Action Models -ModelId <id>` path, detached from this
 /// process so the window is never tied to the download.
+/// Open the chat window through the install's own `Chat.cmd`, which starts the AI when it is
+/// off, waits for it and opens the app window. The window does not duplicate that logic.
+#[tauri::command]
+fn open_chat() -> BackendResult {
+    let root = install_root();
+    let root_text = root.display().to_string();
+    let chat = root.join("Chat.cmd");
+    let failure = |error: String| BackendResult {
+        ok: false,
+        action: "chat:open".to_string(),
+        document: None,
+        error: Some(error),
+        command: String::new(),
+        exit_code: None,
+        stderr: String::new(),
+        install_root: root_text.clone(),
+        script: None,
+        candidates: Vec::new(),
+    };
+    if !chat.is_file() {
+        return failure(format!(
+            "Chat.cmd is missing from {root_text}. Run Start-LlamaCpp.cmd and choose [E] Easy start once to recreate it."
+        ));
+    }
+    let spawned = Command::new("cmd.exe")
+        .args(["/C", "start", "llama.cpp chat", "/D"])
+        .arg(&root)
+        .args(["cmd.exe", "/C", "Chat.cmd"])
+        .status();
+    match spawned {
+        Ok(status_ok) if status_ok.success() => BackendResult {
+            ok: true,
+            action: "chat:open".to_string(),
+            document: None,
+            error: None,
+            command: format!("{} /C Chat.cmd", chat.display()),
+            exit_code: status_ok.code(),
+            stderr: String::new(),
+            install_root: root_text,
+            script: Some(chat.display().to_string()),
+            candidates: Vec::new(),
+        },
+        Ok(status_failed) => failure(format!(
+            "The chat window did not open (cmd.exe exit code {}).",
+            status_failed.code().unwrap_or(-1)
+        )),
+        Err(spawn_error) => failure(format!("Could not open the chat window: {spawn_error}")),
+    }
+}
+
 #[tauri::command]
 fn download_model(model_id: String) -> BackendResult {
     let root = install_root();
@@ -759,7 +811,8 @@ fn main() {
             save_settings,
             get_library,
             library_change,
-            download_model
+            download_model,
+            open_chat
         ])
         .run(tauri::generate_context!())
         .expect("the command center window failed to start");

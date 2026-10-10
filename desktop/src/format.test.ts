@@ -17,6 +17,11 @@ import {
   describeSettingsSave,
   describeSupport,
   describeTier,
+  describeStatusBadge,
+  nextTabIndex,
+  describeModelState,
+  describeGamePause,
+  isGamePauseValid,
   describeUseCase,
   formatElapsed,
   formatStartProgress,
@@ -104,7 +109,57 @@ describe("recommendation wording", () => {
   it("states status, confidence and residency", () => {
     const text = describeTier(tier);
     expect(text).toContain("Recommended");
-    expect(text).toContain("stays in VRAM");
+    expect(text).toContain("Stays entirely in VRAM.");
+  });
+
+  it("does not repeat residency words the backend reason already states", () => {
+    const text = describeTier(tier);
+    expect(text.match(/VRAM/g)?.length).toBe(1);
+  });
+
+  it("moves the tab selection with arrows, wrapping at the ends, and Home/End", () => {
+    expect(nextTabIndex("ArrowRight", 0, 4)).toBe(1);
+    expect(nextTabIndex("ArrowRight", 3, 4)).toBe(0);
+    expect(nextTabIndex("ArrowLeft", 0, 4)).toBe(3);
+    expect(nextTabIndex("Home", 2, 4)).toBe(0);
+    expect(nextTabIndex("End", 1, 4)).toBe(3);
+    expect(nextTabIndex("Enter", 1, 4)).toBeNull();
+  });
+
+  it("shows Asleep in the badge when the server is up but its model is out of memory", () => {
+    expect(describeStatusBadge("running", "asleep")).toEqual({ label: "Asleep", tone: "off" });
+    expect(describeStatusBadge("running", "unloaded")).toEqual({ label: "Asleep", tone: "off" });
+    expect(describeStatusBadge("running", "loaded")).toEqual({ label: "Running", tone: "ok" });
+    expect(describeStatusBadge("running", undefined)).toEqual({ label: "Running", tone: "ok" });
+  });
+
+  it("words the model state and stays silent when the backend did not say", () => {
+    expect(describeModelState("asleep")).toContain("loads again on your next message");
+    expect(describeModelState("unknown")).toBe("");
+    expect(describeModelState(undefined)).toBe("");
+  });
+
+  it("explains game pause, its off state, and the router requirement", () => {
+    expect(describeGamePause(0, true)).toContain("Off");
+    expect(describeGamePause(10, true)).toContain("10 GiB or more");
+    expect(describeGamePause(10, false)).toContain("Update llama.cpp first");
+  });
+
+  it("accepts off or 4 to 40 whole GiB and nothing else", () => {
+    expect(isGamePauseValid("0")).toBe(true);
+    expect(isGamePauseValid(" 8 ")).toBe(true);
+    expect(isGamePauseValid("40")).toBe(true);
+    expect(isGamePauseValid("3")).toBe(false);
+    expect(isGamePauseValid("41")).toBe(false);
+    expect(isGamePauseValid("")).toBe(false);
+    expect(isGamePauseValid("8.5")).toBe(false);
+  });
+
+  it("maps every server phase to one badge", () => {
+    expect(describeStatusBadge("running")).toEqual({ label: "Running", tone: "ok" });
+    expect(describeStatusBadge("loading")).toEqual({ label: "Starting…", tone: "busy" });
+    expect(describeStatusBadge("stopped")).toEqual({ label: "Stopped", tone: "off" });
+    expect(describeStatusBadge(undefined)).toEqual({ label: "Unknown", tone: "unknown" });
   });
 
   it("surfaces blockers", () => {

@@ -94,7 +94,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui', 'GameWatch')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $SettingsPatch = '',
@@ -168,7 +168,7 @@ function Get-CatalogJson {
     return $document
 }
 
-$script:CommandCenterVersion = '0.1.6'
+$script:CommandCenterVersion = '0.2.0'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
@@ -184,6 +184,8 @@ $script:ServerSlots = 2
 # Set only by Easy start after the user typed YES once for the whole plan, so the
 # individual download prompts are not asked again. Unlike -Force it keeps every safety check.
 $script:AssumeYes = $false
+# The script's own file: the install folder's copy for the game watcher is made from it.
+$script:ScriptSource = $PSCommandPath
 # Set by the Settings write: the banner writers keep logging but print nothing, so
 # stdout stays exactly one JSON document for the desktop window.
 $script:JsonDocumentsOnly = $false
@@ -799,6 +801,7 @@ function Get-ModelAssessment {
         $assessments += [pscustomobject]@{
             Model = $model
             HeadroomGiB = [Math]::Round($headroom, 1)
+            VramHeadroomGiB = [Math]::Round($vramHeadroom, 1)
             GpuResident = ($vramHeadroom -ge 1.5)
             Status = $status
             Color = $color
@@ -979,10 +982,16 @@ function Get-TierReason {
         return "$($Model.Name) is marked experimental in the catalogue: publisher claims are not independently verified, and this project has not validated it end to end."
     }
     if ($Status -eq 'recommended') {
-        $headroom = if ($null -ne $Assessment) { "$($Assessment.HeadroomGiB) GiB of memory budget headroom" } else { 'fits comfortably' }
-        return "Stays entirely in VRAM; $headroom."
+        # Residency is decided by graphics memory alone, so the claim and the number must both be VRAM.
+        if ($null -ne $Assessment -and $Assessment.GpuResident) {
+            if ($Assessment.PSObject.Properties.Name -contains 'VramHeadroomGiB') {
+                return "Stays entirely in VRAM, with $($Assessment.VramHeadroomGiB) GiB of graphics memory to spare."
+            }
+            return 'Stays entirely in VRAM.'
+        }
+        return "Fits this machine's memory budget."
     }
-    return 'Runs, but part of it loads from system RAM, so replies are slower than a fully VRAM-resident model.'
+    return 'Runs, but slower: it does not fit entirely in graphics memory, so some of it runs from system RAM.'
 }
 
 function Get-WorkloadRecommendations {
@@ -1280,8 +1289,9 @@ function Get-RuntimeHealth {
         return [pscustomobject]@{ schema_version = 1; adapter = [string]$adapter.id; state = 'unknown'; ok = $false; confidence = 'none'; reason = "The $($adapter.display_name) adapter is a structured stub: no health surface exists."; process_ids = @(); port = 0; base_url = '' }
     }
     $server = Get-ServerState
+    $asleep = @('asleep', 'unloaded') -contains [string]$server.model_state
     $reason = switch ([string]$server.state) {
-        'running' { 'The server answers /health with status ok.' }
+        'running' { if ($asleep) { 'The server answers /health; the model is asleep and loads on your next message.' } else { 'The server answers /health with status ok.' } }
         'loading' { 'A llama-server process is up but not answering health checks yet.' }
         default { 'No llama-server process is running.' }
     }
@@ -1295,6 +1305,7 @@ function Get-RuntimeHealth {
         process_ids = @($server.process_ids)
         port = [int]$server.port
         base_url = [string]$server.base_url
+        model_state = [string]$server.model_state
     }
 }
 
@@ -2120,6 +2131,264 @@ function Get-ServerArguments {
     return ,(Merge-ServerArguments -Base $arguments -Overrides (Get-UserServerArgOverrides))
 }
 
+# ---- Router mode and game pause -------------------------------------------------
+# The server runs as llama.cpp's router with one preset section: the model's own flags live
+# in server-preset.ini (generated from Get-ServerArguments, so the launcher and the direct
+# start cannot disagree), and the router owns the port. The router is what makes unloading
+# possible: POST /models/unload frees the model's memory, and the next request loads it again.
+# Single-model mode has no such route (verified: 404). Idle sleep stays per model, because a
+# router-level --sleep-idle-seconds does not unload (verified on the installed build).
+
+function Get-ServerPresetPath {
+    return (Join-Path $InstallRoot 'server-preset.ini')
+}
+
+function Split-ServerArguments {
+    # Pairs each flag with its value (a flag without one is a switch). Returns the router's
+    # own flags and the model's flags, each in the original order.
+    param([string[]] $Arguments)
+    $router = New-Object System.Collections.Generic.List[string]
+    $model = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $Arguments.Count) {
+        $flag = [string]$Arguments[$i]
+        $pair = @($flag)
+        if (($i + 1) -lt $Arguments.Count -and -not ([string]$Arguments[$i + 1]).StartsWith('--')) {
+            $pair += [string]$Arguments[$i + 1]
+            $i++
+        }
+        $i++
+        if (@('--host', '--port', '--metrics') -contains $flag) { $router.AddRange([string[]]$pair) } else { $model.AddRange([string[]]$pair) }
+    }
+    return [pscustomobject]@{ Router = @($router.ToArray()); Model = @($model.ToArray()) }
+}
+
+function Get-InstallRelativePath {
+    # The server runs with the install folder as its working directory (the launcher and the
+    # direct start both push there), so a model file inside the folder is written relative to
+    # it, with forward slashes. That keeps the folder movable. Anything outside stays absolute.
+    param([string] $Path)
+    $root = ([string]$InstallRoot).TrimEnd('\') + '\'
+    if ($Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return ($Path.Substring($root.Length) -replace '\\', '/') }
+    return $Path
+}
+
+function ConvertTo-ServerPresetText {
+    # INI for the router: one section named after the alias (the name clients send as
+    # "model"), one key per flag without its dashes, and a switch written as "true".
+    # load-on-startup keeps the old behaviour: the model is in memory when the server answers.
+    param([string] $Alias, [string[]] $ModelArguments)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("[$Alias]")
+    $i = 0
+    while ($i -lt $ModelArguments.Count) {
+        $key = ([string]$ModelArguments[$i]).Substring(2)
+        if (($i + 1) -lt $ModelArguments.Count -and -not ([string]$ModelArguments[$i + 1]).StartsWith('--')) {
+            $value = [string]$ModelArguments[$i + 1]
+            if (@('model', 'mmproj') -contains $key) { $value = Get-InstallRelativePath -Path $value }
+            $lines.Add("$key = $value")
+            $i += 2
+        } else {
+            $lines.Add("$key = true")
+            $i++
+        }
+    }
+    $lines.Add('load-on-startup = true')
+    return (($lines -join "`n") + "`n")
+}
+
+function Write-ServerPreset {
+    # Writes server-preset.ini and returns the router's own command line. Launchers and the
+    # direct start both come through here, so the preset and the command line always come
+    # from the same Get-ServerArguments list (single source of truth, as before).
+    param($ActiveModel, [int] $EffectiveContext)
+    # Assigned, not wrapped in @(): Get-ServerArguments returns its list through ,(...), and @()
+    # would wrap that once more, so the whole list would arrive as a single item.
+    $all = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device (Get-PrimaryLlamaDevice)
+    $split = Split-ServerArguments -Arguments ([string[]]$all)
+    $text = ConvertTo-ServerPresetText -Alias ([string]$ActiveModel.alias) -ModelArguments $split.Model
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Get-ServerPresetPath), $text, (New-Object System.Text.UTF8Encoding($false)))
+    return ,@($split.Router + @('--models-preset', (Get-ServerPresetPath), '--models-max', '1'))
+}
+
+function Resolve-RouterModelState {
+    # Pure: the router's /models status plus the model process's own sleep flag from /props.
+    # 'loaded' with is_sleeping means the model is asleep (memory released, wakes on the next request).
+    param([string] $RouterStatus, $IsSleeping = $null)
+    switch ($RouterStatus) {
+        'loaded' { if ($IsSleeping -eq $true) { return 'asleep' } return 'loaded' }
+        'loading' { return 'loading' }
+        'unloaded' { return 'unloaded' }
+        default { return 'unknown' }
+    }
+}
+
+function Get-RouterModelState {
+    param([string] $Alias)
+    if ([string]::IsNullOrWhiteSpace($Alias)) { return 'unknown' }
+    $status = ''
+    try {
+        $models = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/models" -TimeoutSec 2
+        $entry = @($models.data | Where-Object { [string]$_.id -eq $Alias } | Select-Object -First 1)
+        if ($entry.Count -gt 0 -and $entry[0].PSObject.Properties.Name -contains 'status') { $status = [string]$entry[0].status.value }
+    } catch { return 'unknown' }
+    $sleeping = $null
+    if ($status -eq 'loaded') {
+        try {
+            $props = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/props?model=$([uri]::EscapeDataString($Alias))" -TimeoutSec 2
+            if ($props.PSObject.Properties.Name -contains 'is_sleeping') { $sleeping = [bool]$props.is_sleeping }
+        } catch { $sleeping = $null }
+    }
+    return (Resolve-RouterModelState -RouterStatus $status -IsSleeping $sleeping)
+}
+
+function Get-ServerRequestsProcessing {
+    # -1 when unknown: the watcher then treats the model as busy and does not unload.
+    param([string] $Alias)
+    try {
+        $text = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/metrics?model=$([uri]::EscapeDataString($Alias))" -TimeoutSec 2
+        $match = [regex]::Match([string]$text, '(?m)^llamacpp:requests_processing\s+([0-9.]+)')
+        if ($match.Success) { return [int][double]$match.Groups[1].Value }
+    } catch { }
+    return -1
+}
+
+function Invoke-ModelUnload {
+    param([string] $Alias)
+    $body = ConvertTo-Json -InputObject @{ model = $Alias } -Compress
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/models/unload" -ContentType 'application/json' -Body $body -TimeoutSec 60 | Out-Null
+}
+
+function Invoke-ModelWarmup {
+    # A one-token request: the router loads the model on demand, so this is the wake-up.
+    param([string] $Alias)
+    $body = ConvertTo-Json -InputObject @{
+        model = $Alias
+        messages = @(@{ role = 'user'; content = 'Reply with OK.' })
+        max_tokens = 1
+        stream = $false
+        chat_template_kwargs = @{ enable_thinking = $false }
+    } -Depth 6 -Compress
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ContentType 'application/json' -Body $body -TimeoutSec 600 | Out-Null
+}
+
+function Get-GamePauseGiB {
+    # 0 = off (the default, opt-in like idle unload). When on, the model unloads while another
+    # program holds at least this much graphics memory.
+    $settings = Get-AppSettings
+    if (-not $settings.ContainsKey('game_pause_gib')) { return 0 }
+    $gib = 0
+    if (-not [int]::TryParse([string]$settings['game_pause_gib'], [ref]$gib)) { return 0 }
+    if ($gib -lt 4) { return 0 }
+    return [Math]::Min($gib, 40)
+}
+
+function Get-GamePauseStep {
+    # One watcher tick as a pure function, so the tests can drive it with a sequence of samples.
+    # Unload only after two high samples in a row and only while no request is running, so a
+    # brief spike or a chat in progress never flaps the model. Wake only after a full minute of
+    # low use, with a 3 GiB gap below the threshold as hysteresis.
+    param([hashtable] $State, [bool] $ModelLoaded, [int] $RequestsProcessing, [double] $TotalGiB, [double] $EstimateGiB, [double] $ThresholdGiB, [int] $TickSeconds = 5)
+    $next = @{ high = [int]$State['high']; low = [int]$State['low']; paused = [bool]$State['paused'] }
+    $otherGiB = $TotalGiB
+    if ($ModelLoaded) { $otherGiB = $TotalGiB - $EstimateGiB }
+    $action = 'none'
+    if ($ModelLoaded -and $otherGiB -ge $ThresholdGiB) { $next['high'] = $next['high'] + 1 } else { $next['high'] = 0 }
+    if ($next['high'] -ge 2 -and $RequestsProcessing -eq 0) {
+        $action = 'unload'
+        $next['paused'] = $true
+        $next['high'] = 0
+        $next['low'] = 0
+    } elseif ($next['paused']) {
+        if ($otherGiB -le ($ThresholdGiB - 3)) { $next['low'] = $next['low'] + $TickSeconds } else { $next['low'] = 0 }
+        if ($next['low'] -ge 60) {
+            if (-not $ModelLoaded) { $action = 'wake' }
+            $next['paused'] = $false
+            $next['low'] = 0
+        }
+    }
+    return @{ action = $action; state = $next; other_gib = [Math]::Round($otherGiB, 1) }
+}
+
+function Copy-WatcherTools {
+    # The install folder keeps its own copy of this script and its catalogue, so the generated
+    # launchers and the watcher keep working after the extracted ZIP folder is moved or deleted.
+    New-Item -ItemType Directory -Path (Join-Path (Join-Path $InstallRoot 'tools') 'catalog') -Force | Out-Null
+    $toolsScript = Join-Path (Join-Path $InstallRoot 'tools') 'Install-LlamaCpp-AMD.ps1'
+    Copy-Item -LiteralPath $script:ScriptSource -Destination $toolsScript -Force
+    Copy-Item -Path (Join-Path (Get-CatalogDirectory) '*.json') -Destination (Join-Path (Join-Path $InstallRoot 'tools') 'catalog') -Force
+    return $toolsScript
+}
+
+function Write-WatchLog {
+    param([string] $Message)
+    $logDir = Join-Path $InstallRoot 'logs'
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $line = "$((Get-Date).ToString('s')) $Message`r`n"
+    [IO.File]::AppendAllText((Join-Path $logDir 'game-watch.log'), $line, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Start-GameWatchIfEnabled {
+    # Direct starts (the window, the text menu, the desktop) launch the watcher here; generated
+    # launchers start the same copy with a line of their own.
+    if ((Get-GamePauseGiB) -le 0) { return }
+    $toolsScript = Copy-WatcherTools
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Minimized -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $toolsScript, '-Action', 'GameWatch', '-InstallRoot', $InstallRoot) | Out-Null
+}
+
+function Invoke-GameWatch {
+    # Background helper (-Action GameWatch). Samples the graphics memory every 5 s and unloads
+    # or wakes the model through the router. It exits on its own after the server has been gone
+    # for 15 s, and a second copy exits at once, so it never outlives the server.
+    $lockPath = Join-Path (Join-Path $InstallRoot 'logs') 'game-watch.pid'
+    New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'logs') -Force | Out-Null
+    if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+        $otherPid = 0
+        if ([int]::TryParse((Get-Content -LiteralPath $lockPath -Raw).Trim(), [ref]$otherPid) -and $otherPid -ne $PID -and $null -ne (Get-Process -Id $otherPid -ErrorAction SilentlyContinue)) { return 0 }
+    }
+    Set-Content -LiteralPath $lockPath -Value ([string]$PID) -Encoding ASCII
+    $hardware = Get-HardwareProfile
+    $total = [double]$hardware.MaxAmdVramGiB
+    if (-not $hardware.HasAmdGpu -or $total -lt 4) { Write-WatchLog 'Game pause needs a discrete Radeon with at least 4 GiB of graphics memory; exiting.'; Remove-Item -LiteralPath $lockPath -Force; return 0 }
+    Write-WatchLog "Game pause watching $total GiB of graphics memory."
+    $state = @{ high = 0; low = 0; paused = $false }
+    $absent = 0
+    try {
+        while ($true) {
+            Start-Sleep -Seconds 5
+            $threshold = [double](Get-GamePauseGiB)
+            if ($threshold -le 0) { Write-WatchLog 'Game pause is off; exiting.'; break }
+            $server = Get-ServerState
+            if (@($server.process_ids).Count -eq 0) { $absent++; if ($absent -ge 3) { Write-WatchLog 'The server is gone; exiting.'; break }; continue }
+            $absent = 0
+            $active = Get-ActiveModel
+            if ($null -eq $active) { continue }
+            $alias = [string]$active.alias
+            $usage = Get-GpuMemoryUsage -TotalGiB $total
+            if ($null -eq $usage) { continue }
+            $modelState = Get-RouterModelState -Alias $alias
+            if ($modelState -eq 'loading') { continue }
+            $catalogModel = Get-ModelById -Id ([string]$active.id)
+            $estimate = 0.0
+            if ($null -ne $catalogModel) { $estimate = [double](Get-VramPreflight -Model $catalogModel -Hardware $hardware -Context ([int]$active.context_size) -UsedGiB 0).NeededGiB }
+            $requests = Get-ServerRequestsProcessing -Alias $alias
+            $step = Get-GamePauseStep -State $state -ModelLoaded ($modelState -eq 'loaded') -RequestsProcessing $requests -TotalGiB ([double]$usage.UsedGiB) -EstimateGiB $estimate -ThresholdGiB $threshold
+            $state = $step.state
+            if ($step.action -eq 'unload') {
+                Invoke-ModelUnload -Alias $alias
+                Write-WatchLog "Unloaded ${alias}: another program holds about $($step.other_gib) GiB of graphics memory."
+            } elseif ($step.action -eq 'wake') {
+                Invoke-ModelWarmup -Alias $alias
+                Write-WatchLog "Loaded $alias again: the other program has gone."
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+    }
+    return 0
+}
+
 function Test-ThinkingEnabled {
     param($ActiveModel)
     if ($ActiveModel.PSObject.Properties.Name -contains 'thinking') { return [bool]$ActiveModel.thinking }
@@ -2149,7 +2418,8 @@ function New-Launchers {
 
     # Get-ServerArguments returns its list through the ,@() idiom, so a pipeline would see
     # it as one object; iterate it with foreach instead of piping it.
-    $rawArgs = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device (Get-PrimaryLlamaDevice)
+    # The router's command line; the model's own flags go to server-preset.ini (Write-ServerPreset).
+    $rawArgs = Write-ServerPreset -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext
     $serverArgs = @()
     foreach ($arg in $rawArgs) { $serverArgs += ConvertTo-LauncherArgument -Value ([string]$arg) }
 
@@ -2161,7 +2431,8 @@ function New-Launchers {
         $line = $serverArgs[$i]
         if (($i + 1) -lt $serverArgs.Count -and -not $serverArgs[$i + 1].StartsWith('--')) {
             $value = $serverArgs[$i + 1]
-            if ($value -match '[\s\\]') { $value = "`"$value`"" }
+            # A %~dp0 path is quoted too: unquoted, a spaced install folder would split it.
+            if ($value -match '[\s\\%]') { $value = "`"$value`"" }
             $line = "$line $value"
             $i++
         }
@@ -2169,11 +2440,20 @@ function New-Launchers {
     }
     $argumentBlock = $lines -join " ^`r`n"
 
+    # Game pause: the watcher runs from the install folder's own copy, minimised, and exits by
+    # itself when the server stops. Only written when the setting is on.
+    $gameWatchLine = ''
+    if ((Get-GamePauseGiB) -gt 0) {
+        Copy-WatcherTools | Out-Null
+        $gameWatchLine = 'if exist "%~dp0tools\Install-LlamaCpp-AMD.ps1" start "llama.cpp game watch" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Install-LlamaCpp-AMD.ps1" -Action GameWatch -InstallRoot "%~dp0."'
+    }
+
     $start = @"
 @echo off
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
-pushd "%~dp0current"
+$gameWatchLine
+pushd "%~dp0"
 "%~dp0current\llama-server.exe" ^
 $argumentBlock
 set "LLAMA_EXIT=%ERRORLEVEL%"
@@ -2251,7 +2531,8 @@ if not defined LLAMACPP_NO_PAUSE pause
 exit /b 1
 :ready
 set "READY=0"
-curl.exe -s -m 2 "%URL%/health" 2>nul | findstr /r /c:"status.:.ok" >nul && set "READY=1"
+rem The router answers /health while its model is still loading, so ready means the model is loaded.
+curl.exe -s -m 2 "%URL%/models" 2>nul | findstr /r /c:"value.:.loaded" >nul && set "READY=1"
 exit /b 0
 "@
     Set-Content -LiteralPath (Join-Path $InstallRoot 'Chat.cmd') -Value $chat -Encoding ASCII
@@ -2802,7 +3083,7 @@ function Start-ActiveServer {
     }
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
-    $arguments = Get-ServerArguments -ActiveModel $active -EffectiveContext $context -Device (Get-PrimaryLlamaDevice)
+    $arguments = Write-ServerPreset -ActiveModel $active -EffectiveContext $context
 
     Clear-Screen
     Show-Banner
@@ -2810,7 +3091,9 @@ function Start-ActiveServer {
     Write-Info "Context: $context | API/Web UI: http://127.0.0.1:$Port/"
     Write-Info 'Open Open-WebUI.cmd in another terminal or paste the URL after startup.'
     Write-Info 'Press Ctrl+C in this terminal to stop the server.'
-    Push-Location (Split-Path -Parent $server)
+    Start-GameWatchIfEnabled
+    # The install folder is the working directory: the preset's relative model paths resolve from it.
+    Push-Location $InstallRoot
     try { & $server @arguments } finally { Pop-Location }
 }
 
@@ -2819,17 +3102,26 @@ function Get-ServerState {
     # state: running (health ok), loading (process up, not answering yet) or stopped.
     $processes = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
     $state = 'stopped'
+    # model_state: loaded, asleep, unloaded, loading or unknown. The router answers /health
+    # while its model is still loading, so a loading model keeps the server state at 'loading'.
+    $modelState = 'unknown'
     if ($processes.Count -gt 0) {
         $state = 'loading'
         try {
             if ((Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2).status -eq 'ok') { $state = 'running' }
         } catch { }
+        if ($state -eq 'running') {
+            $active = Get-ActiveModel
+            $modelState = Get-RouterModelState -Alias $(if ($null -ne $active) { [string]$active.alias } else { '' })
+            if ($modelState -eq 'loading') { $state = 'loading' }
+        }
     }
     return [pscustomobject]@{
         state = $state
         port = [int]$Port
         base_url = "http://127.0.0.1:$Port"
         process_ids = @($processes | ForEach-Object { $_.Id })
+        model_state = $modelState
     }
 }
 
@@ -3098,6 +3390,32 @@ function Set-IdleSleep {
         Write-Success "Idle unload is on: after $Minutes idle minutes the model leaves graphics memory and returns on your next message."
     } else {
         Write-Success 'Idle unload is off: the model stays in graphics memory until you stop the server.'
+    }
+    Write-Info 'This applies the next time the AI server starts.'
+    return $true
+}
+
+function Set-GamePause {
+    # Opt-in, like idle unload. Turning it on needs router mode; the change reaches the
+    # running server only after the next start, because the launchers are rebuilt here.
+    param([int] $Gib)
+    if ($Gib -ne 0 -and ($Gib -lt 4 -or $Gib -gt 40)) {
+        Write-WarnLine 'Game pause must be 0 (off) or a whole number from 4 to 40 GiB.'
+        return $false
+    }
+    if ($Gib -gt 0 -and -not (Test-LlamaServerSupports -Flag '--models-preset')) {
+        Write-WarnLine 'The installed llama.cpp is too old for game pause (it needs router mode). Update llama.cpp from the setup screen first.'
+        return $false
+    }
+    Set-AppSetting -Name 'game_pause_gib' -Value $Gib
+    $active = Get-ActiveModel
+    if ($null -ne $active -and (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe') -PathType Leaf)) {
+        New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
+    }
+    if ($Gib -gt 0) {
+        Write-Success "Game pause is on: when other programs hold $Gib GiB or more of graphics memory, the model unloads and loads again on your next message."
+    } else {
+        Write-Success 'Game pause is off.'
     }
     Write-Info 'This applies the next time the AI server starts.'
     return $true
@@ -4724,6 +5042,12 @@ function Get-SettingsDocument {
             saved = $useCaseSaved
             allowed = @('chat', 'coding', 'images', 'fast', 'quality')
         }
+        game_pause = [pscustomobject]@{
+            gib = [int](Get-GamePauseGiB)
+            capable = Test-LlamaServerSupports -Flag '--models-preset'
+            min = 4
+            max = 40
+        }
     }
 }
 
@@ -4788,6 +5112,20 @@ function Set-SettingsFromDocument {
         } else {
             Set-AppSetting -Name 'use_case' -Value $useCase
             $result['applied'] += @([pscustomobject]@{ field = 'use_case'; value = $useCase; note = 'set'; triple = $null })
+        }
+    }
+    # Optional: a patch without game_pause leaves it alone.
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'game_pause') {
+        $pauseGib = -1
+        $pause = $parsed.game_pause
+        if ($null -eq $pause -or $pause.PSObject.Properties.Name -notcontains 'gib' -or -not [int]::TryParse([string]$pause.gib, [ref]$pauseGib) -or ($pauseGib -ne 0 -and ($pauseGib -lt 4 -or $pauseGib -gt 40))) {
+            $result['rejected'] += @([pscustomobject]@{ field = 'game_pause.gib'; reason = 'Game pause must be 0 (off) or a whole number from 4 to 40 GiB.' })
+        } elseif ($pauseGib -eq (Get-GamePauseGiB)) {
+            $result['applied'] += @([pscustomobject]@{ field = 'game_pause.gib'; value = $pauseGib; note = 'already'; triple = $null })
+        } elseif (Set-GamePause -Gib $pauseGib) {
+            $result['applied'] += @([pscustomobject]@{ field = 'game_pause.gib'; value = $pauseGib; note = 'set'; triple = $null })
+        } else {
+            $result['rejected'] += @([pscustomobject]@{ field = 'game_pause.gib'; reason = 'The installed llama.cpp is too old for game pause (it needs router mode). Update llama.cpp first.' })
         }
     }
     $result['settings'] = Get-SettingsDocument
@@ -4969,6 +5307,11 @@ try {
             Write-JsonStdout -Document (Get-SettingsDocument)
         }
         exit 0
+    }
+
+    if ($Action -eq 'GameWatch') {
+        # Background helper started by the launcher when game pause is on: no run log, no menu.
+        exit (Invoke-GameWatch)
     }
 
     if ($Action -eq 'Library') {

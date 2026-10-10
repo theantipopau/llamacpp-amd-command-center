@@ -1,7 +1,7 @@
 {
   "name": "llamacpp-command-center-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop vertical slice for the llama.cpp Command Center (ADR-006).",
   "type": "module",
   "scripts": {

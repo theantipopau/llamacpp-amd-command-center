@@ -5,7 +5,7 @@ documents the backend already prints (`-Action State`, `-Action Recommend`,
 `-Action Diagnose`, `-Action Runtime`, `-Action Settings`), and it owns no domain logic: it
 never reads files, never parses output text and never decides what the state is (ADR-006).
 
-Shipped so far: launch, show state, Start, Stop, Diagnose, and the Settings screen (idle
+Shipped so far: launch, show state, Start, Stop, Open chat, Diagnose, and the Settings screen (idle
 unload minutes and the use-case picker, saved through the backend's own settings
 helpers). Model downloads and editor integrations are later phases.
 
@@ -33,7 +33,7 @@ npm run dev     # one command: Vite + the window against it
 | Command | What it does |
 |---|---|
 | `npm run dev` | development: starts Vite (127.0.0.1:5173) and opens the window |
-| `npm run build` | standalone release binary in `src-tauri/target/release/` (frontend embedded, no dev server, no network) |
+| `npm run build` | standalone release binary in `src-tauri/target/release/` (frontend embedded, no dev server, no network) and the NSIS installer in `src-tauri/target/release/bundle/nsis/`, which bundles the backend in a `backend` folder |
 | `npm run check` | `tsc --noEmit` + the pure display-rule tests (vitest) |
 | `npm test` | the display-rule tests only |
 
@@ -60,7 +60,8 @@ Checked in order, and all listed in the window when none resolves:
 
 1. `LLAMACPP_SCRIPT` — full path to `Install-LlamaCpp-AMD.ps1`.
 2. `<install root>\Install-LlamaCpp-AMD.ps1`.
-3. Walking up to six folders from the executable (which is how it works from a build tree).
+3. `backend\Install-LlamaCpp-AMD.ps1` beside the app: where the installer puts the backend and its `catalog` folder.
+4. Walking up to six folders from the executable (which is how it works from a build tree).
 
 The install root is `LLAMACPP_INSTALL_ROOT`, or the same
 `%LOCALAPPDATA%\Programs\llama.cpp` the script uses by default.
@@ -86,16 +87,19 @@ The install root is `LLAMACPP_INSTALL_ROOT`, or the same
   build would unblock — computed by the backend **from the compatibility catalogue**
   (`unlocked_models` in the Library document), never a hardcoded list, and the line
   simply does not render when nothing would unlock.
-- **Run diagnostics** — renders the four health sections in plain language, with the raw
+- **Open chat** — opens the install's own `Chat.cmd`. That helper starts the AI when it is off, waits for it and opens the chat window, so the desktop never repeats that logic. A missing `Chat.cmd` gets a plain message that says how to recreate it.
+- **Run diagnostics** (Health tab) — renders the four health sections in plain language, with the raw
   document behind a disclosure.
 - **Model library** — every catalogued model with its size, capability flags, fit
   wording and local state straight from the backend's `-Action Library` document.
   Download validates first (disk space, runtime blocker, not-already-downloaded) and
   then opens the real transfer in its own console window through the proven
-  `-Action Models` path, size- and SHA-256-verified; Activate switches instantly through
+  `-Action Models` path, size- and SHA-256-verified. While that download runs, the list re-reads the library every 15 seconds (for up to an hour) and marks the model downloaded when the file lands; Refresh always works too. Activate switches instantly through
   the existing offline switch (launchers and VS Code endpoint re-sync included);
   Remove asks first and refuses the active model. Blocked models show the backend's
   own reason with the operation disabled, never a hidden row.
+- **Asleep** — the header badge reads Asleep when the server is up but its model has left graphics memory (idle sleep or game pause). The next message loads it again; Home says so under the server line.
+- **Game pause** (Settings) — a GiB box: 0 is off, 4 to 40 unloads the model while other programs hold that much graphics memory. The control is hidden as unavailable when the installed llama.cpp is too old for router mode, and the save sends the value only then.
 - **Settings** — reads the backend's settings document; idle unload offers a minute box
   **only when the installed llama.cpp actually supports `--sleep-idle-seconds`** (probed,
   never assumed), and the use-case picker lists exactly what the backend catalogues.
@@ -108,6 +112,7 @@ The install root is `LLAMACPP_INSTALL_ROOT`, or the same
   idle write leaves no stale value on disk.
 - Anything that fails shows the backend's own sentence plus an expandable "Technical
   detail" block with the exact command, exit code, standard error and document.
+- **Header and tabs** — the logo, the title and one status badge (Running, Starting…, Stopped) sit at the top. Start, Stop, Open chat, Update and Refresh stay in a bar that remains visible while scrolling. Home, Models, Settings and Health are tabs; the Start-to-Running wait shows one progress line that stays accurate.
 - **The layout scales with the window** — fluid type and spacing, single-column fact
   tables below 640 px, a two-column model library on wide windows. Verified at narrow
   and wide sizes with `Capture-DesktopScreenshot.ps1` (`docs/desktop-window-narrow.png`
@@ -134,7 +139,7 @@ No external dependencies beyond .NET (`System.Drawing`).
 
 ## Tests
 
-- `npm run check` — display rules and types (30 vitest cases, including the settings
+- `npm run check` — display rules and types (35 vitest cases, including the settings
   wording, minutes/use-case validation, and the model-library badges/fit/state/operation
   rules).
 - `cargo test` (in `src-tauri`) — the supervisor layer against a real backend call:

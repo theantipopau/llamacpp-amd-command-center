@@ -90,6 +90,19 @@
     <figcaption>The window you get when you double-click <code>Start-LlamaCpp.cmd</code>: one big button for what to do next, plus your graphics memory and gaming switches.</figcaption>
   </figure>
 
+  <h2>Desktop app (new in v0.2.0)</h2>
+  <p>A normal Windows window with tabs for Home, Models, Settings and Health. The status badge shows <strong>Running</strong>, <strong>Starting</strong>, <strong>Stopped</strong> or <strong>Asleep</strong>, and the server buttons stay in view while you scroll. A Windows installer is attached to each release; it needs no administrator rights.</p>
+
+  <figure class="shot">
+    <img src="desktop-window.png" alt="The desktop app's Home tab: status badge, Start, Stop, Open chat, Update and Refresh buttons, your model, and the recommended models" width="984" height="772">
+    <figcaption>The desktop app. Models, Settings and Health are one click away in the tab bar.</figcaption>
+  </figure>
+
+  <figure class="shot">
+    <img src="desktop-settings.png" alt="The Settings tab with idle unload, graphics memory, the game-pause limit in GiB, use case and Save settings" width="984" height="772">
+    <figcaption>Settings include <strong>game pause</strong>: the model unloads while another program holds the GiB you set, and loads again on your next message.</figcaption>
+  </figure>
+
   <figure class="shot">
     <img src="menu.png" alt="The text menu: status panel showing the Qwen3.5 9B model, the AI server running, and VS Code connected, followed by grouped menu options" width="1043" height="710">
     <figcaption>The text menu (choose <strong>More options</strong> in the window, or press <strong>W</strong> here to go back). The <strong>NEXT STEP</strong> line always says what to do next.</figcaption>
@@ -129,7 +142,7 @@
   </div>
 
   <h2>Quick start</h2>
-  <p>Allow about 15 minutes, most of it the one-time 6 GB model download.</p>
+  <p>Allow about 15 minutes, most of it the one-time 6 GB model download. Prefer a normal Windows app? Run the <code>llamacpp-command-center-setup-vX.Y.Z.exe</code> installer from the latest release instead; it installs per user and bundles everything the app needs. It is not code-signed yet, so SmartScreen may warn.</p>
   <ol class="steps">
     <li><strong>Update your AMD graphics driver</strong> (AMD Software: Adrenalin Edition).</li>
     <li><strong>Download</strong> the ZIP from the <a href="https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest">latest release</a>, right-click it, choose <strong>Extract All</strong>, and open the extracted folder. Do not run it from inside the ZIP.</li>
@@ -156,7 +169,7 @@
     <thead><tr><th>Option</th><th>What it does</th></tr></thead>
     <tbody>
       <tr><td><strong>[E] Easy start</strong></td><td>The one-step path: sets up whatever is missing after a single <code>YES</code>, starts the AI and opens a chat window.</td></tr>
-      <tr><td><strong>[G] Gaming mode</strong></td><td>Turn the AI off to free graphics memory, switch auto-unload when idle on or off, and add or remove the <strong>AI Chat</strong> and <strong>AI Off</strong> desktop shortcuts.</td></tr>
+      <tr><td><strong>[G] Gaming mode</strong></td><td>Turn the AI off to free graphics memory, switch auto-unload when idle on or off, and add or remove the <strong>AI Chat</strong> and <strong>AI Off</strong> desktop shortcuts. The desktop app's Settings also has <strong>game pause</strong>: the model unloads while a game holds the set amount of graphics memory, and loads again afterwards.</td></tr>
       <tr><td><strong>[1] Setup and models</strong></td><td>First-time install, model browser, llama.cpp updates, diagnostics, removing a model you no longer need (frees disk space), and uninstall.</td></tr>
       <tr><td><strong>[2] Start AI server</strong></td><td>Starts the model in its own window and waits until it is ready. With several models downloaded, it asks which one to run first; switching is instant and VS Code follows.</td></tr>
       <tr><td><strong>[3] Stop AI server</strong></td><td>Frees GPU memory, for example before gaming. Asks first.</td></tr>

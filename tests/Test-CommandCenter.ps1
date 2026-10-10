@@ -32,9 +32,11 @@ $Thinking = 'Auto'
 $ContextSize = 0
 $script:ServerSlots = 2
 $script:AssumeYes = $false
+# The game watcher's copy is made from the script file (the real one, never a stand-in).
+$script:ScriptSource = $scriptPath
 $script:JsonDocumentsOnly = $false
 $UseCase = ''
-$script:CommandCenterVersion = '0.1.6'
+$script:CommandCenterVersion = '0.2.0'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{}
@@ -88,12 +90,14 @@ try {
         $danglingCaret = $lines[-1].TrimEnd().EndsWith('^')
         $missingCaret = @($lines | Select-Object -SkipLast 1 | Where-Object { -not $_.TrimEnd().EndsWith('^') }).Count
         Assert-True (($blank -eq 0) -and -not $danglingCaret -and ($missingCaret -eq 0)) "$($model.Id): continuation lines are well formed"
-        Assert-True ($block -match '--jinja' -and $block -match '--parallel 2' -and $block -match '--ctx-size 65536' -and $block -match "--alias $([regex]::Escape($model.Alias))") "$($model.Id): launcher keeps jinja, alias, and a 2-slot pool sized for two conversations"
+        # Model flags live in the router preset now; the launcher keeps only the router's own flags.
+        $preset = Get-Content -LiteralPath (Join-Path $InstallRoot 'server-preset.ini') -Raw
+        Assert-True (($preset -match "(?m)^\[$([regex]::Escape($model.Alias))\]") -and ($preset -match '(?m)^jinja = true') -and ($preset -match '(?m)^parallel = 2') -and ($preset -match '(?m)^ctx-size = 65536') -and ($preset -match "(?m)^alias = $([regex]::Escape($model.Alias))$") -and ($block -match '--models-preset')) "$($model.Id): preset keeps jinja, alias, and a 2-slot pool sized for two conversations"
         $state = Get-Content -LiteralPath (Join-Path $InstallRoot 'active-model.json') -Raw | ConvertFrom-Json
         Assert-True ($state.tool_calling -eq [bool]$model.Tools) "$($model.Id): tool_calling follows the catalog Tools flag"
         $expectOff = [bool]$model.Reasoning -and [bool]$model.Tools
         $expectOn = [bool]$model.Reasoning -and -not $expectOff
-        Assert-True ((($block -match '--reasoning off') -eq $expectOff) -and (($block -match '--reasoning on') -eq $expectOn)) "$($model.Id): thinking is off for tool-capable reasoning models"
+        Assert-True ((($preset -match '(?m)^reasoning = off') -eq $expectOff) -and (($preset -match '(?m)^reasoning = on') -eq $expectOn)) "$($model.Id): thinking is off for tool-capable reasoning models"
     }
 
     Write-Host 'Hardware recommendation (16 GB Radeon, 31 GB RAM)'
@@ -268,7 +272,8 @@ try {
     Set-ActiveModel -Model $qwen -EffectiveContext 65536 -SkipVerification
     $idleLauncher = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
     $idleBlock = @([regex]::Match($idleLauncher, '(?s)llama-server\.exe"? \^\r?\n(.*?)\r?\nset "LLAMA_EXIT').Groups[1].Value -split '\r?\n')
-    Assert-True (($idleLauncher -match '--sleep-idle-seconds 900') -and (@($idleBlock | Select-Object -SkipLast 1 | Where-Object { -not $_.TrimEnd().EndsWith('^') }).Count -eq 0)) 'the launcher keeps well-formed continuation lines with the idle flag'
+    $idlePreset = Get-Content -LiteralPath (Join-Path $InstallRoot 'server-preset.ini') -Raw
+    Assert-True (($idlePreset -match '(?m)^sleep-idle-seconds = 900$') -and (@($idleBlock | Select-Object -SkipLast 1 | Where-Object { -not $_.TrimEnd().EndsWith('^') }).Count -eq 0)) 'the idle flag reaches the model preset, and the launcher keeps well-formed continuation lines'
     Set-AppSetting -Name 'easy_extras_done' -Value $true
     Assert-True ((Get-AppSettings).ContainsKey('idle_sleep_minutes') -and (Get-AppSettings).ContainsKey('easy_extras_done')) 'saving one setting keeps the others'
     [IO.File]::WriteAllText((Get-AppSettingsPath), '{ not json')
@@ -618,6 +623,14 @@ try {
         $tier = $tiers16.$tierName
         Assert-True ((@('supported', 'recommended', 'experimental', 'unsupported') -contains $tier.status) -and (@('high', 'medium', 'low') -contains $tier.confidence) -and (-not [string]::IsNullOrWhiteSpace([string]$tier.reason)) -and ($tier.blockers -is [array])) "${tierName}: status, confidence, reason and blockers are typed"
     }
+    # Fit wording: a resident pick states VRAM headroom only; a spilling or Radeon-less pick never claims VRAM residency.
+    $residentReason = [string]$tiers16.balanced.reason
+    Assert-True (($residentReason -match 'Stays entirely in VRAM, with [0-9.]+ GiB of graphics memory to spare') -and ($residentReason -notmatch 'memory budget headroom')) 'a resident tier states VRAM headroom, never the RAM-inclusive budget'
+    Assert-True ([string]$tiers16.maximum.reason -notmatch 'Stays entirely in VRAM') 'a spilling tier never claims VRAM residency'
+    $noAmdHw = [pscustomobject]@{ HasAmdGpu = $false; HasDiscreteAmdGpu = $false; HasAmdIntegratedGpu = $false; RocmRecommended = $false; RocmReason = 'test'; MaxAmdVramGiB = 0.0; RamGiB = 32.0; ModelBudgetGiB = 25.0; Gpus = @() }
+    $noAmdTiers = Get-WorkloadRecommendations -Hardware $noAmdHw -Runtime $null -DetectionConfidence 'medium'
+    Assert-True ([string]$noAmdTiers.recommended.balanced.reason -notmatch 'VRAM') 'without a Radeon, a fitting pick never claims VRAM residency'
+
     # All four statuses are reachable, proven on the classifier itself.
     $qwen35 = Get-ModelById 'qwen3.5-9b'
     $ornithModel = Get-ModelById 'ornith-1.5-9b'
@@ -645,6 +658,84 @@ try {
     $recByNameA = Get-WorkloadRecommendations -Hardware $nameHwA -Runtime $rocmRuntime -DetectionConfidence 'high'
     $recByNameB = Get-WorkloadRecommendations -Hardware $nameHwB -Runtime $rocmRuntime -DetectionConfidence 'high'
     Assert-True (((ConvertTo-Json -InputObject $recByNameA.recommended -Depth 6) -eq (ConvertTo-Json -InputObject $recByNameB.recommended -Depth 6)) -and ((ConvertTo-Json -InputObject $recByNameA.recommended -Depth 6) -notmatch 'Fake-GPU')) 'machines differing only in GPU name get byte-identical recommendations'
+
+    Write-Host 'Router mode and game pause: preset, command line, model state, unload decisions'
+    $routerModel = Get-ModelById 'qwen3.5-9b'
+    Set-ActiveModel -Model $routerModel -EffectiveContext 65536 -SkipVerification
+    $routerActive = Get-ActiveModel
+    $routerArgs = Write-ServerPreset -ActiveModel $routerActive -EffectiveContext 65536
+    $routerLine = @($routerArgs) -join ' '
+    Assert-True (($routerLine -match '--models-preset') -and ($routerLine -match '--models-max 1') -and ($routerLine -match '--host 127\.0\.0\.1') -and ($routerLine -match '--metrics') -and ($routerLine -notmatch '--model ') -and ($routerLine -notmatch '--jinja')) 'the router command line carries host, port, metrics, the preset and a one-model limit, and no model flags'
+    $presetText = Get-Content -LiteralPath (Get-ServerPresetPath) -Raw
+    Assert-True (($presetText -match "(?m)^\[$([regex]::Escape($routerActive.alias))\]") -and ($presetText -match '(?m)^load-on-startup = true$') -and ($presetText -notmatch '(?m)^(host|port|metrics) =')) 'the preset has one model section, loads on startup, and holds no router-level keys'
+    $presetBytes = [IO.File]::ReadAllBytes((Get-ServerPresetPath))
+    Assert-True (-not ($presetBytes.Length -ge 3 -and $presetBytes[0] -eq 0xEF -and $presetBytes[1] -eq 0xBB -and $presetBytes[2] -eq 0xBF)) 'the preset is written without a byte-order mark'
+    $routerSplit = Split-ServerArguments -Arguments @('--model', 'C:\x\m.gguf', '--host', '127.0.0.1', '--port', '8080', '--metrics', '--jinja')
+    Assert-True ((($routerSplit.Router -join ' ') -eq '--host 127.0.0.1 --port 8080 --metrics') -and (($routerSplit.Model -join ' ') -eq '--model C:\x\m.gguf --jinja')) 'the split keeps router flags and model flags apart, in order'
+    Assert-True ((Get-InstallRelativePath -Path (Join-Path $InstallRoot 'models\m.gguf')) -eq 'models/m.gguf') 'a model inside the install folder is written relative to it'
+    Assert-True ((Get-InstallRelativePath -Path 'D:\elsewhere\m.gguf') -eq 'D:\elsewhere\m.gguf') 'a model outside the install folder stays absolute'
+    Assert-True ((Resolve-RouterModelState -RouterStatus 'loaded' -IsSleeping $false) -eq 'loaded') 'a loaded model that is not sleeping reads as loaded'
+    Assert-True ((Resolve-RouterModelState -RouterStatus 'loaded' -IsSleeping $true) -eq 'asleep') 'a loaded model whose process sleeps reads as asleep'
+    Assert-True ((Resolve-RouterModelState -RouterStatus 'loaded' -IsSleeping $null) -eq 'loaded') 'without the sleep flag a loaded model reads as loaded'
+    Assert-True (((Resolve-RouterModelState -RouterStatus 'loading') -eq 'loading') -and ((Resolve-RouterModelState -RouterStatus 'unloaded') -eq 'unloaded') -and ((Resolve-RouterModelState -RouterStatus '') -eq 'unknown')) 'loading, unloaded and missing statuses map to their own states'
+
+    # Watcher decisions: 15.8 GiB card, 7 GiB model footprint, 8 GiB threshold.
+    $pauseState = @{ high = 0; low = 0; paused = $false }
+    $tick1 = Get-GamePauseStep -State $pauseState -ModelLoaded $true -RequestsProcessing 0 -TotalGiB 15.8 -EstimateGiB 7.0 -ThresholdGiB 8
+    Assert-True (($tick1.action -eq 'none') -and ($tick1.state['high'] -eq 1)) 'one high sample is not enough to unload'
+    $tick2 = Get-GamePauseStep -State $tick1.state -ModelLoaded $true -RequestsProcessing 0 -TotalGiB 15.8 -EstimateGiB 7.0 -ThresholdGiB 8
+    Assert-True (($tick2.action -eq 'unload') -and $tick2.state['paused']) 'two high samples in a row unload the model and remember the pause'
+    $spike = Get-GamePauseStep -State @{ high = 1; low = 0; paused = $false } -ModelLoaded $true -RequestsProcessing 0 -TotalGiB 6.0 -EstimateGiB 7.0 -ThresholdGiB 8
+    Assert-True (($spike.action -eq 'none') -and ($spike.state['high'] -eq 0)) 'a spike that ends resets the count, so nothing unloads'
+    $busy = Get-GamePauseStep -State @{ high = 1; low = 0; paused = $false } -ModelLoaded $true -RequestsProcessing 2 -TotalGiB 15.8 -EstimateGiB 7.0 -ThresholdGiB 8
+    Assert-True (($busy.action -eq 'none') -and ($busy.state['high'] -eq 2)) 'a chat still running blocks the unload until it finishes'
+    $unknownMetrics = Get-GamePauseStep -State @{ high = 1; low = 0; paused = $false } -ModelLoaded $true -RequestsProcessing -1 -TotalGiB 15.8 -EstimateGiB 7.0 -ThresholdGiB 8
+    Assert-True ($unknownMetrics.action -eq 'none') 'unknown request counts count as busy, so nothing unloads'
+    $wakeState = @{ high = 0; low = 0; paused = $true }
+    $wakeAt = 0
+    for ($n = 1; $n -le 24; $n++) {
+        $r = Get-GamePauseStep -State $wakeState -ModelLoaded $false -RequestsProcessing 0 -TotalGiB 4.0 -EstimateGiB 7.0 -ThresholdGiB 8
+        $wakeState = $r.state
+        if ($r.action -eq 'wake') { $wakeAt = $n; break }
+    }
+    Assert-True ($wakeAt -eq 12) 'the model wakes only after a full minute of low use (twelve 5-second samples)'
+    $holdState = @{ high = 0; low = 0; paused = $true }
+    $holdActions = @()
+    for ($n = 1; $n -le 24; $n++) {
+        $r = Get-GamePauseStep -State $holdState -ModelLoaded $false -RequestsProcessing 0 -TotalGiB 6.0 -EstimateGiB 7.0 -ThresholdGiB 8
+        $holdState = $r.state
+        $holdActions += $r.action
+    }
+    Assert-True ((@($holdActions | Where-Object { $_ -ne 'none' }).Count -eq 0) -and $holdState['paused']) 'a game still holding 6 GiB keeps the model unloaded (3 GiB gap below the threshold)'
+    $askedState = @{ high = 0; low = 0; paused = $true }
+    $askedAction = 'none'
+    for ($n = 1; $n -le 12; $n++) {
+        $r = Get-GamePauseStep -State $askedState -ModelLoaded $true -RequestsProcessing 0 -TotalGiB 10.0 -EstimateGiB 7.0 -ThresholdGiB 8
+        $askedState = $r.state
+        $askedAction = $r.action
+    }
+    Assert-True ((-not $askedState['paused']) -and ($askedAction -eq 'none')) 'a model loaded by a chat after the game left needs no warm-up and clears the pause'
+
+    # Settings: the game-pause value is clamped, validated and reported.
+    Set-AppSetting -Name 'game_pause_gib' -Value 50
+    Assert-True ((Get-GamePauseGiB) -eq 40) 'a stored game-pause value above 40 is capped at 40'
+    Set-AppSetting -Name 'game_pause_gib' -Value 2
+    Assert-True ((Get-GamePauseGiB) -eq 0) 'a stored value below 4 means off'
+    Assert-True ((Set-GamePause -Gib 3) -eq $false) 'Set-GamePause refuses 3 GiB'
+    $pauseDoc = Get-SettingsDocument
+    Assert-True (($pauseDoc.game_pause.min -eq 4) -and ($pauseDoc.game_pause.max -eq 40) -and ($null -ne $pauseDoc.game_pause.capable)) 'the settings document reports game pause with its limits and capability'
+    $badPatch = Set-SettingsFromDocument -SettingsPatchText '{"idle_unload":{"minutes":0},"use_case":"chat","game_pause":{"gib":50}}'
+    Assert-True (@($badPatch.rejected | Where-Object { $_.field -eq 'game_pause.gib' }).Count -eq 1) 'a game-pause value of 50 is rejected field by field'
+
+    # The launcher gets the watcher line only when the setting is on, and the watcher runs from the install folder's own copy.
+    Set-AppSetting -Name 'game_pause_gib' -Value 10
+    New-Launchers -ActiveModel $routerActive -EffectiveContext 65536
+    $pauseLauncher = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
+    Assert-True (($pauseLauncher -match 'Install-LlamaCpp-AMD\.ps1" -Action GameWatch') -and ($pauseLauncher -match '%~dp0tools') -and -not $pauseLauncher.Contains((Split-Path -Parent $scriptPath))) 'with game pause on, the launcher starts the watcher from the install folder copy, never from the ZIP folder'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $InstallRoot 'tools\Install-LlamaCpp-AMD.ps1') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'tools\catalog\models.json') -PathType Leaf)) 'the watcher copy and its catalogue are in the install folder'
+    Set-AppSetting -Name 'game_pause_gib' -Value 0
+    New-Launchers -ActiveModel $routerActive -EffectiveContext 65536
+    Assert-True (-not ((Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw) -match 'GameWatch')) 'with game pause off, the launcher has no watcher line'
 
     Write-Host 'Runtime adapters: one interface, honest stubs (ADR-005)'
     $adapterList = @(Get-RuntimeAdapters)
@@ -996,7 +1087,8 @@ try {
         $launcherText = Get-Content -LiteralPath $launcherPath -Raw
         Assert-True (-not [regex]::IsMatch($launcherText, '[^\x00-\x7F]')) 'the generated launcher is pure ASCII even under a Unicode install root'
         Assert-True ($launcherText -match '%~dp0current\\llama-server\.exe') 'the launcher reaches llama-server.exe through %~dp0, never an embedded path'
-        Assert-True ($launcherText -match '--model "%~dp0models\\.') 'the model path is quoted and relative to %~dp0'
+        $unicodePreset = Get-Content -LiteralPath (Join-Path $InstallRoot 'server-preset.ini') -Raw
+        Assert-True (($unicodePreset -match '(?m)^model = models/') -and -not $unicodePreset.Contains($unicodeFolder)) 'the preset points at the model relative to the install folder, never at the Unicode path'
         Assert-True (-not $launcherText.Contains($unicodeFolder)) 'no part of the Unicode install path is written into the launcher'
         $devicesText = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-Devices.cmd') -Raw
         Assert-True (-not [regex]::IsMatch($devicesText, '[^\x00-\x7F]')) 'the device launcher is ASCII too'

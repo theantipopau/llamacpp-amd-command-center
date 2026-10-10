@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import * as api from "./api";
+import logo from "./assets/logo.png";
 import {
   describeDiagnostics,
   describeGpu,
@@ -7,6 +8,10 @@ import {
   describeIdleVramEffect,
   describeLibraryBadges,
   describeLibraryFit,
+  describeGamePause,
+  describeModelState,
+  describeStatusBadge,
+  isGamePauseValid,
   describeUnlockableModels,
   describeLibraryResult,
   describeLibraryState,
@@ -21,6 +26,7 @@ import {
   describeUseCase,
   formatStartProgress,
   isMinutesValid,
+  nextTabIndex,
   isUseCaseValid,
   libraryConfirmText,
   libraryOperation
@@ -43,8 +49,20 @@ import type {
 const POLL_INTERVAL_MS = 2000;
 const GIVE_UP_AFTER_MS = 25000;
 const START_DEADLINE_MS = 240000;
+// A download runs in its own console window: check the read-only library list every
+// 15 s for up to an hour, then stop and leave the Refresh button to the user.
+const LIBRARY_POLL_MS = 15000;
+const LIBRARY_POLL_LIMIT = 240;
 
-type Busy = null | "refresh" | "start" | "stop" | "updateRuntime" | "diagnose" | "settings" | `library:${string}`;
+type Busy = null | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `library:${string}`;
+type Tab = "home" | "models" | "settings" | "health";
+
+const TABS: Array<[Tab, string]> = [
+  ["home", "Home"],
+  ["models", "Models"],
+  ["settings", "Settings"],
+  ["health", "Health"]
+];
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -108,17 +126,21 @@ export default function App() {
   const [diagnosticResult, setDiagnosticResult] = useState<BackendResult | null>(null);
   const [failure, setFailure] = useState<BackendResult | null>(null);
   const [settings, setSettings] = useState<SettingsDocument | null>(null);
-  const [settingsDraftMinutes, setSettingsDraftMinutes] = useState<number | null>(null);
+  // Kept as text so a cleared box stays empty while the user types a new number.
+  const [settingsDraftMinutes, setSettingsDraftMinutes] = useState<string>("");
   const [settingsDraftUseCase, setSettingsDraftUseCase] = useState<string | null>(null);
+  const [settingsDraftGamePause, setSettingsDraftGamePause] = useState<string>("");
   const [settingsSave, setSettingsSave] = useState<{ message: string; ok: boolean } | null>(null);
   const [library, setLibrary] = useState<LibraryDocument | null>(null);
   const [libraryNote, setLibraryNote] = useState<{ message: string; ok: boolean } | null>(null);
+  const [pendingDownload, setPendingDownload] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
   const [busy, setBusy] = useState<Busy>("refresh");
   const [progress, setProgress] = useState<string>("");
   const [loading, setLoading] = useState(true);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [tab, setTab] = useState<Tab>("home");
   const busyRef = useRef<Busy>(null);
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
   const applyStateResult = useCallback((result: BackendResult): boolean => {
     const document = narrow<StateDocument>(result.document);
@@ -150,17 +172,6 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
-  // Elapsed time is part of the progress message, so it is real information, not a spinner.
-  useEffect(() => {
-    if (startedAt === null) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setProgress((current) => (current === "" ? current : formatStartProgress(state?.server?.state, Date.now() - startedAt)));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [startedAt, state?.server?.state]);
-
   async function onStart() {
     if (busyRef.current !== null) {
       return;
@@ -169,31 +180,34 @@ export default function App() {
     setBusy("start");
     setNotice("");
     const begin = Date.now();
-    setStartedAt(begin);
-    setProgress(formatStartProgress("stopped", 0));
+    setProgress(formatStartProgress("loading", 0));
     const startResult = await api.startServer();
     if (!startResult.ok) {
       setFailure(startResult);
       setNotice("The server was not started.");
     } else {
-      setProgress(formatStartProgress("loading", 0));
-      let phase: string = "stopped";
+      // One loop drives the progress text: it ticks every second and probes the health
+      // endpoint every POLL_INTERVAL_MS. The text always uses the phase from the last probe.
+      let phase = "loading";
+      let nextProbe = begin;
       while (Date.now() - begin < START_DEADLINE_MS) {
-        await sleep(POLL_INTERVAL_MS);
-        const health = await api.runtimeHealth();
-        const document = narrow<RuntimeHealthDocument>(health.document);
-        phase = document?.state ?? "";
-        if (!health.ok) {
-          setFailure(health);
-          break;
+        await sleep(1000);
+        if (Date.now() >= nextProbe) {
+          nextProbe = Date.now() + POLL_INTERVAL_MS;
+          const health = await api.runtimeHealth();
+          if (!health.ok) {
+            setFailure(health);
+            break;
+          }
+          phase = narrow<RuntimeHealthDocument>(health.document)?.state ?? "";
+          if (phase === "running") {
+            break;
+          }
+          if (phase === "stopped" && Date.now() - begin > GIVE_UP_AFTER_MS) {
+            break;
+          }
         }
         setProgress(formatStartProgress(phase, Date.now() - begin));
-        if (phase === "running") {
-          break;
-        }
-        if (phase === "stopped" && Date.now() - begin > GIVE_UP_AFTER_MS) {
-          break;
-        }
       }
       if (phase === "running") {
         setNotice(`The AI is running at ${state?.server?.base_url ?? ""}.`);
@@ -206,11 +220,33 @@ export default function App() {
         if (!result.ok) {
           setFailure(result);
         }
-        setNotice("The server did not come up. The reasons below come from the backend's own diagnostics.");
+        setTab("health");
+        setNotice("The server did not come up. The reasons are under Health, from the backend's own diagnostics.");
       }
     }
-    setStartedAt(null);
     setProgress("");
+    await refresh();
+    busyRef.current = null;
+    setBusy(null);
+  }
+
+  /** Open the chat window through the install's own Chat.cmd, which starts the AI first when it is off. */
+  async function onOpenChat() {
+    if (busyRef.current !== null) {
+      return;
+    }
+    busyRef.current = "chat";
+    setBusy("chat");
+    setNotice("");
+    const result = await api.openChat();
+    if (result.ok) {
+      setNotice("The chat window is opening. If the AI is off, it starts first; the first load can take a minute or two.");
+    } else {
+      setFailure(result);
+      setNotice("The chat window did not open.");
+    }
+    // Give the helper a moment to begin before reading the server state again.
+    await sleep(2000);
     await refresh();
     busyRef.current = null;
     setBusy(null);
@@ -328,11 +364,13 @@ export default function App() {
   const applySettingsDocument = useCallback((document: SettingsDocument | null) => {
     setSettings(document);
     if (document) {
-      setSettingsDraftMinutes(document.idle_unload.capable ? document.idle_unload.minutes ?? 0 : null);
+      setSettingsDraftMinutes(document.idle_unload.capable ? String(document.idle_unload.minutes ?? 0) : "");
       setSettingsDraftUseCase(document.use_case.saved ?? document.use_case.allowed[0] ?? null);
+      setSettingsDraftGamePause(String(document.game_pause?.gib ?? 0));
     } else {
-      setSettingsDraftMinutes(null);
+      setSettingsDraftMinutes("");
       setSettingsDraftUseCase(null);
+      setSettingsDraftGamePause("");
     }
   }, []);
 
@@ -356,7 +394,8 @@ export default function App() {
     }
     // Validate in the UI first, but the backend is still the authority: its result
     // document answers, and the drafts re-sync to whatever it actually saved.
-    const minutesPrefilled = settingsDraftMinutes;
+    const minutesText = settingsDraftMinutes.trim();
+    const minutesPrefilled = /^\d+$/.test(minutesText) ? Number(minutesText) : null;
     const useCase = settingsDraftUseCase;
     if (settings.idle_unload.capable && !isMinutesValid(minutesPrefilled)) {
       setSettingsSave({ message: "Idle unload needs a whole number of minutes from 0 to 1440.", ok: false });
@@ -366,12 +405,19 @@ export default function App() {
       setSettingsSave({ message: "Pick one of the listed use cases.", ok: false });
       return;
     }
+    const pauseCapable = settings.game_pause?.capable !== false;
+    if (pauseCapable && !isGamePauseValid(settingsDraftGamePause)) {
+      setSettingsSave({ message: "Game pause needs 0 (off) or a whole number from 4 to 40 GiB.", ok: false });
+      return;
+    }
     busyRef.current = "settings";
     setBusy("settings");
     setSettingsSave(null);
     const patch = JSON.stringify({
       idle_unload: { minutes: settings.idle_unload.capable ? minutesPrefilled : (settings.idle_unload.minutes ?? 0) },
-      use_case: useCase
+      use_case: useCase,
+      // Only sent when the installed llama.cpp can do it; otherwise the backend leaves it alone.
+      ...(pauseCapable ? { game_pause: { gib: Number(settingsDraftGamePause.trim()) } } : {})
     });
     const result = await api.saveSettings(patch);
     const document = narrow<SettingsSaveDocument>(result.document);
@@ -407,6 +453,30 @@ export default function App() {
     void loadLibrary();
   }, [loadLibrary]);
 
+  // While a download runs in its own window, re-read the library so the list shows the
+  // model as downloaded when the file lands. Stops on success or after the poll limit.
+  useEffect(() => {
+    if (pendingDownload === null) {
+      return;
+    }
+    let polls = 0;
+    const timer = window.setInterval(() => {
+      polls += 1;
+      if (polls > LIBRARY_POLL_LIMIT) {
+        setPendingDownload(null);
+        return;
+      }
+      void loadLibrary();
+    }, LIBRARY_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [pendingDownload, loadLibrary]);
+
+  useEffect(() => {
+    if (pendingDownload !== null && library?.models.some((model) => model.id === pendingDownload && model.downloaded)) {
+      setPendingDownload(null);
+    }
+  }, [library, pendingDownload]);
+
   async function onLibraryOperation(model: LibraryModel) {
     if (busyRef.current !== null) {
       return;
@@ -437,12 +507,25 @@ export default function App() {
       if (document.library) {
         applyLibraryDocument(document.library);
       }
+      if (operation === "download" && document.status === "validated") {
+        setPendingDownload(model.id);
+      }
     }
-    // A download opened its own console window; a refresh a little later shows the
-    // progress, so refresh the whole window view now as well.
     await refresh();
     busyRef.current = null;
     setBusy(null);
+  }
+
+  /** ARIA tabs: arrows, Home and End move the selection and focus together. */
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const next = nextTabIndex(event.key, index, TABS.length);
+    if (next === null) {
+      return;
+    }
+    event.preventDefault();
+    const [id] = TABS[next];
+    setTab(id);
+    tabRefs.current[id]?.focus();
   }
 
   if (loading) {
@@ -468,6 +551,8 @@ export default function App() {
   }
 
   const phase = state.server?.state;
+  const badge = describeStatusBadge(phase, state.server?.model_state);
+  const modelLine = describeModelState(state.server?.model_state);
   const hardware = state.hardware;
   // What the idle choice means in VRAM terms; the backend's settings document already
   // carries the two facts, the rule only words them (null when either is unknown).
@@ -478,52 +563,26 @@ export default function App() {
 
   return (
     <main className="window">
-      <header>
-        <h1>llama.cpp Command Center</h1>
-        <p className="subtitle" role="status" aria-live="polite">
-          {describeServer(phase)}
-          {notice ? ` — ${notice}` : ""}
-        </p>
+      <header className="app-header">
+        <img src={logo} alt="" className="logo" />
+        <div className="titles">
+          <h1>llama.cpp Command Center</h1>
+          <p className="subtitle">Runs entirely on this PC</p>
+        </div>
+        <span className={`badge ${badge.tone}`} role="status" aria-live="polite">
+          {badge.label}
+        </span>
       </header>
 
-      {progress ? (
-        <p className="progress" role="status" aria-live="polite">
-          {progress}
-        </p>
-      ) : null}
-
-      <ErrorBox result={failure} />
-
-      <section className="card">
-        <h2>Your AI</h2>
-        <dl className="facts">
-          <dt>Active model</dt>
-          <dd>{describeModel(state.model)}</dd>
-          <dt>Server</dt>
-          <dd>
-            {describeServer(phase)} on port {state.server?.port ?? 0}
-          </dd>
-          <dt>Runtime</dt>
-          <dd>{describeRuntime(state.runtime)}</dd>
-          <dt>GPU</dt>
-          <dd>{describeGpu(hardware)}</dd>
-          <dt>Support</dt>
-          <dd>{describeSupport(hardware?.support?.level, hardware?.support?.confidence)}</dd>
-          <dt>Install root</dt>
-          <dd>
-            <code>{state.install_root}</code>
-          </dd>
-        </dl>
-        {state.hardware_error ? <p className="warning">Hardware scan problem: {state.hardware_error}</p> : null}
-        {state.model?.runtime_blocker ? <p className="warning">{state.model.runtime_blocker}</p> : null}
-      </section>
-
-      <section className="actions">
-        <button type="button" onClick={onStart} disabled={busy !== null || phase === "running"} autoFocus>
+      <div className="action-bar" role="toolbar" aria-label="Server actions">
+        <button type="button" className="primary" onClick={onStart} disabled={busy !== null || phase === "running"} autoFocus>
           {busy === "start" ? "Starting…" : "Start the AI"}
         </button>
         <button type="button" onClick={onStop} disabled={busy !== null || phase === "stopped"}>
           {busy === "stop" ? "Stopping…" : "Stop the AI"}
+        </button>
+        <button type="button" onClick={onOpenChat} disabled={busy !== null}>
+          {busy === "chat" ? "Opening…" : "Open chat"}
         </button>
         <button
           type="button"
@@ -533,207 +592,310 @@ export default function App() {
         >
           {busy === "updateRuntime" ? "Updating llama.cpp…" : "Update llama.cpp"}
         </button>
-        <button type="button" onClick={onDiagnose} disabled={busy !== null}>
-          {busy === "diagnose" ? "Checking…" : "Run diagnostics"}
-        </button>
         <button type="button" onClick={() => void refresh()} disabled={busy !== null}>
           {busy === "refresh" ? "Refreshing…" : "Refresh"}
         </button>
-        {unlockLine ? (
-          <p className="muted" role="status">
-            {unlockLine}
+      </div>
+
+      <div className="status-line">
+        {notice ? (
+          <p role="status" aria-live="polite">
+            {notice}
           </p>
         ) : null}
-      </section>
+        {progress ? (
+          <p className="progress" role="status" aria-live="polite">
+            {progress}
+          </p>
+        ) : null}
+      </div>
 
-      <section className="card">
-        <h2>Recommended models</h2>
-        {recommendations ? (
-          <ul className="tiers">
-            {(["fast", "balanced", "maximum"] as const).map((key) => (
-              <li key={key} className={state.model?.id === recommendations.recommended[key]?.model_id ? "current" : undefined}>
-                <h3>{key}</h3>
-                <p>{describeTier(recommendations.recommended[key])}</p>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p>The recommendation engine did not return a document.</p>
-        )}
-        {recommendations?.hardware_error ? <p className="warning">Hardware scan problem: {recommendations.hardware_error}</p> : null}
-      </section>
+      <ErrorBox result={failure} />
 
-      <section className="card">
-        <h2>Model library</h2>
-        {library ? (
+      <nav className="tabs" role="tablist" aria-label="Sections">
+        {TABS.map(([id, label], index) => (
+          <button
+            key={id}
+            ref={(element) => {
+              tabRefs.current[id] = element;
+            }}
+            type="button"
+            role="tab"
+            id={`tab-${id}`}
+            aria-selected={tab === id}
+            aria-controls={`panel-${id}`}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => setTab(id)}
+            onKeyDown={(event) => onTabKeyDown(event, index)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="tab-panel">
+        {tab === "home" ? (
           <>
-            <ul className="models">
-              {library.models.map((model) => {
-                const operation = libraryOperation(model);
-                return (
-                  <li key={model.id} className={model.active ? "current" : undefined}>
-                    <div className="model-line">
-                      <span className="model-name">{model.name}</span>
-                      <span className="muted model-badges">{describeLibraryBadges(model)}</span>
-                    </div>
-                    <p className="model-state">{describeLibraryState(model)}{describeLibraryFit(model) ? ` — ${describeLibraryFit(model)}` : ""}</p>
-                    {model.runtime_blocker ? <p className="warning">{model.runtime_blocker}</p> : null}
-                    {operation === "active" ? null : (
-                      <div className="actions">
-                        {operation === "download" ? (
-                          <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                            Download
-                          </button>
-                        ) : null}
-                        {operation === "remove" ? (
-                          <>
-                            <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                              Switch to this model
-                            </button>
-                            <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                              Remove from disk
-                            </button>
-                          </>
-                        ) : null}
-                        {operation === "blocked" ? (
-                          <button type="button" disabled title={model.runtime_blocker || "Blocked by the installed runtime"}>
-                            Not available on this runtime
-                          </button>
-                        ) : null}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-            {library.hardware_error ? <p className="warning">Hardware scan problem: {library.hardware_error}</p> : null}
-            {libraryNote ? (
-              <p className={libraryNote.ok ? "verdict" : "warning"} role="status" aria-live="polite">
-                {libraryNote.message}
-              </p>
-            ) : null}
-            {busy?.startsWith("library:") ? (
-              <p className="progress" role="status" aria-live="polite">
-                {busy === "library:download" ? "Download started in its own window — this screen refreshes when it is done." : "Working…"}
-              </p>
-            ) : null}
-          </>
-        ) : (
-          <p>The model library document was not returned by the backend.</p>
-        )}
-      </section>
+            <section className="card">
+              <h2>Your AI</h2>
+              <dl className="facts">
+                <dt>Active model</dt>
+                <dd>{describeModel(state.model)}</dd>
+                <dt>Server</dt>
+                <dd>
+                  {describeServer(phase)} on port {state.server?.port ?? 0}
+                  {modelLine && phase === "running" ? ` · ${modelLine}` : ""}
+                </dd>
+                <dt>Runtime</dt>
+                <dd>{describeRuntime(state.runtime)}</dd>
+                <dt>GPU</dt>
+                <dd>{describeGpu(hardware)}</dd>
+                <dt>Support</dt>
+                <dd>{describeSupport(hardware?.support?.level, hardware?.support?.confidence)}</dd>
+                <dt>Install root</dt>
+                <dd>
+                  <code>{state.install_root}</code>
+                </dd>
+              </dl>
+              {state.hardware_error ? <p className="warning">Hardware scan problem: {state.hardware_error}</p> : null}
+              {state.model?.runtime_blocker ? <p className="warning">{state.model.runtime_blocker}</p> : null}
+            </section>
 
-      <section className="card">
-        <h2>Settings</h2>
-        {settings ? (
-          <>
-            <dl className="facts">
-              <dt>Idle unload</dt>
-              <dd>
-                {settings.idle_unload.capable ? (
-                  <label>
-                    Unload the model after
-                    {" "}
-                    <input
-                      type="number"
-                      min={0}
-                      max={1440}
-                      value={settingsDraftMinutes ?? 0}
-                      onChange={(event) => {
-                        const parsed = Number.parseInt(event.target.value, 10);
-                        setSettingsDraftMinutes(Number.isNaN(parsed) ? null : parsed);
-                      }}
-                      style={{ width: "5em" }}
-                      aria-label="Minutes of idle time before the model unloads"
-                    />
-                    {" "}
-                    idle minutes (0 turns it off)
-                  </label>
-                ) : (
-                  "Not available with the installed runtime"
-                )}
-              </dd>
-              <dt>{"\u00a0"}</dt>
-              <dd className="muted">{describeIdleCapability(settings.idle_unload.capable, settings.idle_unload.installed_models)}</dd>
-              {idleVramEffect ? (
-                <>
-                  <dt>Graphics memory</dt>
-                  <dd className="muted">{idleVramEffect}</dd>
-                </>
-              ) : null}
-              <dt>Use case</dt>
-              <dd>
-                <select
-                  value={settingsDraftUseCase ?? ""}
-                  onChange={(event) => setSettingsDraftUseCase(event.target.value)}
-                  aria-label="What you use the AI for"
-                >
-                  {settings.use_case.allowed.map((id) => (
-                    <option key={id} value={id}>
-                      {describeUseCase(id)}
-                    </option>
+            <section className="card">
+              <h2>Recommended models</h2>
+              {recommendations ? (
+                <ul className="tiers">
+                  {(["fast", "balanced", "maximum"] as const).map((key) => (
+                    <li key={key} className={state.model?.id === recommendations.recommended[key]?.model_id ? "current" : undefined}>
+                      <h3>{key}</h3>
+                      <p>{describeTier(recommendations.recommended[key])}</p>
+                    </li>
                   ))}
-                </select>
-              </dd>
-              <dt>{"\u00a0"}</dt>
-              <dd className="muted">The suggestion engine uses this when you ask for a model.</dd>
-            </dl>
-            {settingsSave ? (
-              <p className={settingsSave.ok ? "verdict" : "warning"} role="status" aria-live="polite">
-                {settingsSave.message}
+                </ul>
+              ) : (
+                <p>The recommendation engine did not return a document.</p>
+              )}
+              {recommendations?.hardware_error ? <p className="warning">Hardware scan problem: {recommendations.hardware_error}</p> : null}
+            </section>
+          </>
+        ) : null}
+
+        {tab === "models" ? (
+          <section className="card">
+            <h2>Model library</h2>
+            {unlockLine ? (
+              <p className="muted" role="status">
+                {unlockLine}
               </p>
             ) : null}
+            {library ? (
+              <>
+                <ul className="models">
+                  {library.models.map((model) => {
+                    const operation = libraryOperation(model);
+                    return (
+                      <li key={model.id} className={model.active ? "current" : undefined}>
+                        <div className="model-line">
+                          <span className="model-name">{model.name}</span>
+                          <span className="muted model-badges">{describeLibraryBadges(model)}</span>
+                        </div>
+                        <p className="model-state">{describeLibraryState(model)}{describeLibraryFit(model) ? ` — ${describeLibraryFit(model)}` : ""}</p>
+                        {model.runtime_blocker ? <p className="warning">{model.runtime_blocker}</p> : null}
+                        {operation === "active" ? null : (
+                          <div className="actions">
+                            {operation === "download" ? (
+                              <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
+                                Download
+                              </button>
+                            ) : null}
+                            {operation === "remove" ? (
+                              <>
+                                <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
+                                  Switch to this model
+                                </button>
+                                <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
+                                  Remove from disk
+                                </button>
+                              </>
+                            ) : null}
+                            {operation === "blocked" ? (
+                              <button type="button" disabled title={model.runtime_blocker || "Blocked by the installed runtime"}>
+                                Not available on this runtime
+                              </button>
+                            ) : null}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {library.hardware_error ? <p className="warning">Hardware scan problem: {library.hardware_error}</p> : null}
+                {libraryNote ? (
+                  <p className={libraryNote.ok ? "verdict" : "warning"} role="status" aria-live="polite">
+                    {libraryNote.message}
+                  </p>
+                ) : null}
+                {pendingDownload !== null ? (
+                  <p className="progress" role="status" aria-live="polite">
+                    Download running in its own window. This list updates when the file is in place.
+                  </p>
+                ) : null}
+                {busy?.startsWith("library:") ? (
+                  <p className="progress" role="status" aria-live="polite">
+                    Working…
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p>The model library document was not returned by the backend.</p>
+            )}
+          </section>
+        ) : null}
+
+        {tab === "settings" ? (
+          <section className="card">
+            <h2>Settings</h2>
+            {settings ? (
+              <>
+                <dl className="facts">
+                  <dt>Idle unload</dt>
+                  <dd>
+                    {settings.idle_unload.capable ? (
+                      <label>
+                        Unload the model after
+                        {" "}
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          max={1440}
+                          value={settingsDraftMinutes}
+                          onChange={(event) => setSettingsDraftMinutes(event.target.value)}
+                          style={{ width: "5em" }}
+                          aria-label="Minutes of idle time before the model unloads"
+                        />
+                        {" "}
+                        idle minutes (0 turns it off)
+                      </label>
+                    ) : (
+                      "Not available with the installed runtime"
+                    )}
+                  </dd>
+                  <dt>{" "}</dt>
+                  <dd className="muted">{describeIdleCapability(settings.idle_unload.capable, settings.idle_unload.installed_models)}</dd>
+                  {idleVramEffect ? (
+                    <>
+                      <dt>Graphics memory</dt>
+                      <dd className="muted">{idleVramEffect}</dd>
+                    </>
+                  ) : null}
+                  <dt>Game pause</dt>
+                  <dd>
+                    {settings.game_pause?.capable === false ? (
+                      "Not available with the installed runtime"
+                    ) : (
+                      <label>
+                        Unload the model when other programs use
+                        {" "}
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          max={40}
+                          value={settingsDraftGamePause}
+                          onChange={(event) => setSettingsDraftGamePause(event.target.value)}
+                          style={{ width: "5em" }}
+                          aria-label="Graphics memory in GiB at which other programs pause the model (0 is off)"
+                        />
+                        {" "}
+                        GiB or more (0 is off)
+                      </label>
+                    )}
+                  </dd>
+                  <dt>{" "}</dt>
+                  <dd className="muted">{describeGamePause(Number(settingsDraftGamePause) || 0, settings.game_pause?.capable)}</dd>
+                  <dt>Use case</dt>
+                  <dd>
+                    <select
+                      value={settingsDraftUseCase ?? ""}
+                      onChange={(event) => setSettingsDraftUseCase(event.target.value)}
+                      aria-label="What you use the AI for"
+                    >
+                      {settings.use_case.allowed.map((id) => (
+                        <option key={id} value={id}>
+                          {describeUseCase(id)}
+                        </option>
+                      ))}
+                    </select>
+                  </dd>
+                  <dt>{" "}</dt>
+                  <dd className="muted">The suggestion engine uses this when you ask for a model.</dd>
+                </dl>
+                {settingsSave ? (
+                  <p className={settingsSave.ok ? "verdict" : "warning"} role="status" aria-live="polite">
+                    {settingsSave.message}
+                  </p>
+                ) : null}
+                <div className="actions">
+                  <button type="button" className="primary" onClick={onSaveSettings} disabled={busy !== null}>
+                    {busy === "settings" ? "Saving…" : "Save settings"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p>The settings document was not returned by the backend.</p>
+            )}
+          </section>
+        ) : null}
+
+        {tab === "health" ? (
+          <section className="card">
+            <h2>Health</h2>
             <div className="actions">
-              <button type="button" onClick={onSaveSettings} disabled={busy !== null}>
-                {busy === "settings" ? "Saving…" : "Save settings"}
+              <button type="button" onClick={onDiagnose} disabled={busy !== null}>
+                {busy === "diagnose" ? "Checking…" : "Run diagnostics"}
               </button>
             </div>
-          </>
-        ) : (
-          <p>The settings document was not returned by the backend.</p>
-        )}
-      </section>
-
-      <section className="card">
-        <h2>Diagnostics</h2>
-        {diagnostics ? (
-          <>
-            <p className="verdict">{describeDiagnostics(diagnostics)}</p>
-            <dl className="facts">
-              <dt>Runtime</dt>
-              <dd>
-                {describeServer(diagnostics.runtime_health?.state)} · validation {diagnostics.runtime_health?.validation_status ?? "unknown"} ·{" "}
-                {describePortOwner(diagnostics.runtime_health?.port_owner)}
-              </dd>
-              <dt>Hardware</dt>
-              <dd>{describeSupport(diagnostics.hardware_health?.level ?? undefined, diagnostics.hardware_health?.confidence)}</dd>
-              <dt>Model</dt>
-              <dd>
-                {diagnostics.model_health?.id || "no active model"} · fit {diagnostics.model_health?.fit || "unknown"} ·{" "}
-                {diagnostics.model_health?.present ? "file present" : "file missing"}
-              </dd>
-              <dt>Editors</dt>
-              <dd>
-                VS Code {diagnostics.editor_health?.vscode?.state ?? "unknown"} · Continue{" "}
-                {diagnostics.editor_health?.ll_continue?.configured ? "configured" : "not configured"} · llama-vscode{" "}
-                {diagnostics.editor_health?.llama_vscode?.endpoint_set ? "endpoint set" : "no endpoint"}
-              </dd>
-            </dl>
-            {[...diagnostics.blockers, ...(diagnostics.runtime_health?.blockers ?? []), ...diagnostics.warnings].map((line) => (
-              <p className="warning" key={line}>
-                {line}
-              </p>
-            ))}
-            <details className="raw">
-              <summary>Raw diagnostics document</summary>
-              <pre>{JSON.stringify(diagnostics, null, 2)}</pre>
-            </details>
-            <RawDetail result={diagnosticResult} />
-          </>
-        ) : (
-          <p>Press “Run diagnostics” to ask the backend for its four health sections.</p>
-        )}
-      </section>
+            {diagnostics ? (
+              <>
+                <p className="verdict">{describeDiagnostics(diagnostics)}</p>
+                <dl className="facts">
+                  <dt>Runtime</dt>
+                  <dd>
+                    {describeServer(diagnostics.runtime_health?.state)} · validation {diagnostics.runtime_health?.validation_status ?? "unknown"} ·{" "}
+                    {describePortOwner(diagnostics.runtime_health?.port_owner)}
+                  </dd>
+                  <dt>Hardware</dt>
+                  <dd>{describeSupport(diagnostics.hardware_health?.level ?? undefined, diagnostics.hardware_health?.confidence)}</dd>
+                  <dt>Model</dt>
+                  <dd>
+                    {diagnostics.model_health?.id || "no active model"} · fit {diagnostics.model_health?.fit || "unknown"} ·{" "}
+                    {diagnostics.model_health?.present ? "file present" : "file missing"}
+                  </dd>
+                  <dt>Editors</dt>
+                  <dd>
+                    VS Code {diagnostics.editor_health?.vscode?.state ?? "unknown"} · Continue{" "}
+                    {diagnostics.editor_health?.ll_continue?.configured ? "configured" : "not configured"} · llama-vscode{" "}
+                    {diagnostics.editor_health?.llama_vscode?.endpoint_set ? "endpoint set" : "no endpoint"}
+                  </dd>
+                </dl>
+                {[...diagnostics.blockers, ...(diagnostics.runtime_health?.blockers ?? []), ...diagnostics.warnings].map((line) => (
+                  <p className="warning" key={line}>
+                    {line}
+                  </p>
+                ))}
+                <details className="raw">
+                  <summary>Raw diagnostics document</summary>
+                  <pre>{JSON.stringify(diagnostics, null, 2)}</pre>
+                </details>
+                <RawDetail result={diagnosticResult} />
+              </>
+            ) : (
+              <p>Press “Run diagnostics” to ask the backend for its four health sections.</p>
+            )}
+          </section>
+        ) : null}
+      </div>
     </main>
   );
 }

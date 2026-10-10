@@ -53,6 +53,11 @@ export function libraryChange(action: string, modelId: string): Promise<BackendR
   return invoke<BackendResult>("library_change", { action, modelId });
 }
 
+/** Opens the install's own Chat.cmd (starts the AI first when it is off). */
+export function openChat(): Promise<BackendResult> {
+  return invoke<BackendResult>("open_chat");
+}
+
 export function downloadModel(modelId: string): Promise<BackendResult> {
   return invoke<BackendResult>("download_model", { modelId });
 }

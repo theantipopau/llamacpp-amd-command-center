@@ -9,6 +9,7 @@ import type {
   UnlockableModel,
   ModelState,
   PortOwner,
+  RouterModelState,
   RuntimeState,
   ServerPhase,
   Tier
@@ -89,13 +90,91 @@ export function describeTierStatus(status: string | undefined): string {
   }
 }
 
+/** The backend's reason already states residency (VRAM or system RAM), so it is not repeated here. */
 export function describeTier(tier: Tier | undefined): string {
   if (!tier) {
     return "No recommendation for this tier";
   }
-  const residency = tier.gpu_resident ? "stays in VRAM" : "partly loads from system RAM";
   const blockers = tier.blockers.length > 0 ? ` Blockers: ${tier.blockers.join(" ")}` : "";
-  return `${tier.model_name} — ${describeTierStatus(tier.status)} (${tier.confidence} confidence), ${residency}. ${tier.reason}${blockers}`;
+  return `${tier.model_name} — ${describeTierStatus(tier.status)} (${tier.confidence} confidence). ${tier.reason}${blockers}`;
+}
+
+/**
+ * The tab the arrow, Home and End keys move to (ARIA tabs pattern, wrapping at the ends),
+ * or null when the key is not one of those. Keeps the keyboard rule testable.
+ */
+export function nextTabIndex(key: string, current: number, count: number): number | null {
+  switch (key) {
+    case "ArrowRight":
+      return (current + 1) % count;
+    case "ArrowLeft":
+      return (current - 1 + count) % count;
+    case "Home":
+      return 0;
+    case "End":
+      return count - 1;
+    default:
+      return null;
+  }
+}
+
+/** What the model inside a running server is doing; empty when the backend did not say. */
+export function describeModelState(modelState: RouterModelState | string | undefined): string {
+  switch (modelState) {
+    case "loaded":
+      return "model loaded";
+    case "asleep":
+      return "model asleep: it frees graphics memory and loads again on your next message";
+    case "unloaded":
+      return "model unloaded: it loads again on your next message";
+    case "loading":
+      return "model loading";
+    default:
+      return "";
+  }
+}
+
+/** The game-pause line under the setting: what the number means, or why it is unavailable. */
+export function describeGamePause(gib: number | null | undefined, capable: boolean | undefined): string {
+  if (capable === false) {
+    return "Needs a newer llama.cpp (router mode). Update llama.cpp first.";
+  }
+  if (!gib) {
+    return "Off. The model stays in graphics memory until you stop the server.";
+  }
+  return `When other programs hold ${gib} GiB or more of graphics memory, the model unloads. It loads again on your next message, or once they have left for a minute.`;
+}
+
+/** Validation for the game-pause box: 0 is off, otherwise a whole number from 4 to 40. */
+export function isGamePauseValid(text: string): boolean {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return false;
+  }
+  const value = Number(trimmed);
+  return value === 0 || (value >= 4 && value <= 40);
+}
+
+export type BadgeTone = "ok" | "busy" | "off" | "unknown";
+
+/** The header badge: one word and one colour for the server phase, and "Asleep" when the model is out of memory. */
+export function describeStatusBadge(
+  phase: ServerPhase | string | undefined,
+  modelState?: RouterModelState | string
+): { label: string; tone: BadgeTone } {
+  switch (phase) {
+    case "running":
+      if (modelState === "asleep" || modelState === "unloaded") {
+        return { label: "Asleep", tone: "off" };
+      }
+      return { label: "Running", tone: "ok" };
+    case "loading":
+      return { label: "Starting…", tone: "busy" };
+    case "stopped":
+      return { label: "Stopped", tone: "off" };
+    default:
+      return { label: "Unknown", tone: "unknown" };
+  }
 }
 
 export function describePortOwner(owner: PortOwner | null | undefined): string {

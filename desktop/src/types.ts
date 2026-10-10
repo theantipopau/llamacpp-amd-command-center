@@ -18,11 +18,15 @@ export interface BackendResult {
 
 export type ServerPhase = "running" | "loading" | "stopped";
 
+/** The model inside a running server: loaded, asleep (memory released, wakes on the next request), unloaded, loading or unknown. */
+export type RouterModelState = "loaded" | "asleep" | "unloaded" | "loading" | "unknown";
+
 export interface ServerState {
   state: ServerPhase;
   port: number;
   base_url: string;
   process_ids: number[];
+  model_state?: RouterModelState;
 }
 
 export interface ModelState {
@@ -179,6 +183,8 @@ export interface SettingsDocument {
   active_model_gib: number | null;
   idle_unload: { minutes: number | null; capable: boolean; installed_models: number };
   use_case: { saved: string | null; allowed: string[] };
+  /** Optional so an older backend document still parses. */
+  game_pause?: { gib: number; capable: boolean; min: number; max: number };
 }
 
 /** One applied or rejected field in the settings save result. */

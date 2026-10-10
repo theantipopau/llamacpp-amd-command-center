@@ -25,6 +25,26 @@
 
 <sub>The window you get when you double-click `Start-LlamaCpp.cmd`. The text menu below is still there under **More options**, and runs by itself if the window cannot open.</sub>
 
+## New in v0.2.0
+
+- **A desktop app with a Windows installer.** A window with tabs for Home, Models, Settings and Health, one status badge, and Start, Stop, Open chat and Update buttons that stay in view while you scroll. It installs per user, needs no administrator rights, and bundles the backend it runs.
+- **Game pause.** Set a graphics-memory limit in the desktop app's Settings (0 is off, 4 to 40 GiB). When a game takes that much graphics memory, the model unloads, and it loads again on your next message. It never cuts off a chat in progress.
+- **Router mode.** The server now runs llama.cpp's router with a generated `server-preset.ini`, which is what makes unloading possible. Idle unload keeps working as before.
+- **Asleep, not stopped.** When the model is out of graphics memory but the server is up, the badge says **Asleep** instead of showing a misleading status.
+
+![The desktop app's Home tab: status badge, server actions, your model, and the recommended models](docs/desktop-window.png)
+
+<sub>The desktop app (optional). Models, Settings and Health are one click away in the tab bar; the Settings tab includes the game-pause limit.</sub>
+
+<p align="center">
+  <img src="docs/desktop-settings.png" alt="Desktop app Settings tab: idle unload, graphics memory, the game-pause limit, use case and Save settings" width="48%">
+  <img src="docs/desktop-models.png" alt="Desktop app Models tab: the model library with fit, download, switch and remove actions" width="48%">
+</p>
+
+<p align="center">
+  <img src="docs/desktop-health.png" alt="Desktop app Health tab after Run diagnostics: runtime, hardware, model and editor checks" width="60%">
+</p>
+
 ![The text menu showing the model, a running AI server, and VS Code connected](docs/menu.png)
 
 ## What you get
@@ -62,6 +82,8 @@ No programming or AI knowledge is needed. The menu explains each step and always
 
 Allow about 15 minutes, most of it the one-time 6 GB model download.
 
+**Prefer a normal Windows app?** Download `llamacpp-command-center-setup-vX.Y.Z.exe` from the [latest release](https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest) and run it. It installs per user into `%LOCALAPPDATA%\llama.cpp Command Center`, and needs no administrator rights. Open **llama.cpp Command Center** from the Start menu (the installer adds a shortcut for your user) and follow the same steps the window shows. The installer is not code-signed yet, so Windows SmartScreen may warn; choose **More info → Run anyway** only if you downloaded it from the release page above.
+
 **Fastest path:** update your AMD driver, extract the ZIP, double-click `Start-LlamaCpp.cmd`, then press the big orange **Set up and start** button (in the text menu that is **E**, Easy start). It shows what it will download, asks for one `YES`, installs, starts the AI and opens a chat window. The numbered steps below do the same thing one stage at a time.
 
 1. **Update your AMD graphics driver** (AMD Software: Adrenalin Edition).
@@ -85,6 +107,7 @@ The **NEXT STEP** line at the top of the menu always tells you what to do next.
 A game and the AI model both want your graphics memory (VRAM). Easy start and **[G]** handle that for you:
 
 - **AI Off / Turn the AI off now** stops the server and frees VRAM at once. **AI Chat** (or **E**) brings it back.
+- **Game pause** (off by default) unloads the model while other programs hold a set amount of graphics memory, from 4 to 40 GiB (8 is a good start). Set it in the **desktop app's Settings** (or with `-Action Settings`). The model loads again on your next message, or a minute after the other program leaves. A chat in progress is never cut off, and nothing is stopped. It needs a llama.cpp new enough for router mode; the app says so when it is not. The classic window and text menu show idle unload only.
 - **Auto-unload when idle** (off by default; Easy start offers it, and you can switch it in **[G]**) adds `--sleep-idle-seconds 900` to the server. After 15 minutes without a message the model leaves VRAM, and it reloads on your next message (a few seconds). It needs a llama.cpp build that has that option; the AMD ROCm 7.2.1 package does.
 - **Free-memory check:** before starting, the menu asks Windows how much graphics memory other apps are using. If a game or browser leaves too little room for the model, it names the biggest users and lets you cancel or start anyway (the model then partly runs from system RAM, more slowly). If Windows' counters are unavailable (for example a non-English Windows), the check is skipped.
 - **Desktop shortcuts** (optional, only added when you say yes) point at `Chat.cmd` and `Gaming-Mode.cmd` in the install folder, so they keep working if you move or delete the extracted ZIP folder.
@@ -204,6 +227,9 @@ Start with **[5] Health check**. It names the failing step and what to do.
 | *Only X GiB of your graphics memory is free* when starting | Another app is using VRAM. Close it and press Enter to start, or start anyway and accept slower replies. |
 | Graphics card not detected | Update the AMD driver, restart Windows, then run **Diagnostics** from **[1]**. |
 | *Install-LlamaCpp-AMD.ps1 is missing* | Extract the whole ZIP and keep both scripts and the `catalog` folder in the same folder. |
+| The desktop app says *The PowerShell backend was not found* | Use the installer, which bundles the backend in its `backend` folder. If you run the app from a build, set `LLAMACPP_SCRIPT` to the full path of `Install-LlamaCpp-AMD.ps1`. |
+| Game pause does nothing | Check `%LOCALAPPDATA%\Programs\llama.cpp\logs\game-watch.log`. It needs a discrete Radeon with at least 4 GiB of graphics memory, a llama.cpp new enough for router mode, and a server started after you saved the setting (saving rebuilds the launchers). |
+| The model shows *Asleep* in the app | Normal: the server is up, but the model has left graphics memory (idle unload or game pause). Send a message, or press **Open chat**, and it loads again. |
 | The model list says a model *cannot run on the installed llama.cpp build* | That model needs a newer llama.cpp than AMD's ROCm 7.2.1 package. Pick another model, or switch backend (the Which model? and AMD backends tables explain the options). |
 | The server window closed by itself | Choose **[9] Logs and fixes**, then start it again with **[2]**. If it keeps happening on the Vulkan backend, see the next row. |
 | PC froze, blue-screened (`VIDEO_TDR_FAILURE`, 0x116), or the server log says `device lost on Vulkan0` | On a Radeon that supports ROCm (such as the RX 9070 XT), use the **ROCm backend**. In testing on an RX 9070 XT, the Vulkan build lost the GPU during long Agent sessions (about 58k tokens of context), once taking Windows down with it; ROCm ran for days without a fault. From v0.1.5 the launcher also pins the dedicated Radeon, so Ryzen integrated graphics is never used automatically. |
@@ -255,6 +281,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `Easy` | Menu option [E]: set up whatever is missing after one `YES` (`-Force` skips it), then offer the optional extras once. Exit code 2 means you cancelled. |
 | `Preflight` | Check free graphics memory before starting the server. Exit code 3 means other apps leave too little room for the active model. |
 | `IdleSleep` | `-IdleMinutes 15` unloads the model after 15 idle minutes; `-IdleMinutes 0` turns it off. Applies at the next server start. |
+| `GameWatch` | The background helper the launcher starts when game pause is on. It exits by itself when the server stops, so there is nothing to run by hand. |
 | `Shortcuts` / `RemoveShortcuts` | Add or remove the **AI Chat** and **AI Off** desktop shortcuts. Removal only deletes shortcuts that still point into this install. |
 | `Update` | Update llama.cpp and keep every model. |
 | `Diagnostics` | llama.cpp version, detected devices, and active model check. |
@@ -287,7 +314,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 | `%LOCALAPPDATA%\Programs\llama.cpp\models` | Downloaded models. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\Start-LlamaCpp.cmd` | The generated server launcher that menu option [2] runs. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\active-model.json` | The active model and its settings. |
-| `%LOCALAPPDATA%\Programs\llama.cpp\settings.json` | Settings this project manages, such as `idle_sleep_minutes`. Safe to delete. |
+| `%LOCALAPPDATA%\Programs\llama.cpp\settings.json` | Settings this project manages, such as `idle_sleep_minutes` and `game_pause_gib`. Safe to delete. |
+| `%LOCALAPPDATA%\Programs\llama.cpp\server-preset.ini` | The model's settings for llama.cpp's router, rebuilt by the launchers and every server start. Model files inside the install folder are written relative to it. Safe to delete (the next start rewrites it). |
+| `%LOCALAPPDATA%\Programs\llama.cpp\tools\`, `logs\game-watch.log` | With game pause on: this project's own copy of the script and catalogue, which the watcher runs, and the watcher's log. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\Chat.cmd`, `Gaming-Mode.cmd` | Generated helpers the desktop shortcuts run: start the AI and open the chat, or stop it and free VRAM. |
 | `%LOCALAPPDATA%\Programs\llama.cpp\logs` | Run logs (`run-*.log`, `run-*.jsonl`, `run-*-summary.json`, `latest.log`). |
 | `%LOCALAPPDATA%\Programs\llama.cpp\server-args.user.json` | Optional. Your own `llama-server` flags as a JSON array of strings, e.g. `["--threads", "12", "--no-mmap"]`. Merged in **last**, after every program and hardware default, so your choices always win. This file is never created or overwritten by setup or updates — it is entirely yours. |
@@ -338,9 +367,10 @@ calls them. It renders the same typed documents (`-Action State`, `Recommend`, `
 cd desktop
 npm install
 npm run dev        # one command: front end + window
+npm run build      # release app AND the Windows installer (NSIS, per user)
 ```
 
-See [desktop/README.md](desktop/README.md) for requirements, the backend-discovery order,
+`npm run build` writes the installer to `desktop\src-tauri\target\release\bundle\nsis\`. The installer bundles `Install-LlamaCpp-AMD.ps1` and `catalog\` in a `backend` folder beside the app, which is where the app looks first after its own folder. See [desktop/README.md](desktop/README.md) for requirements, the backend-discovery order,
 and the debug-vs-release difference (a debug build loads the Vite dev server, so run it
 with `npm run dev` or build the standalone release binary with `npm run build`).
 
