@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Run AI models privately on your AMD Radeon PC and use them in VS Code Copilot Chat, set up from one friendly Windows menu.">
+  <title>llama.cpp AMD Command Center</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="canonical" href="https://theantipopau.github.io/llamacpp-amd-command-center/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="llama.cpp AMD Command Center">
+  <meta property="og:description" content="Run AI models privately on your AMD Radeon PC and use them in VS Code Copilot Chat, set up from one friendly Windows menu.">
+  <meta property="og:url" content="https://theantipopau.github.io/llamacpp-amd-command-center/">
+  <meta property="og:image" content="https://theantipopau.github.io/llamacpp-amd-command-center/menu.png">
+  <meta property="og:image:alt" content="The command center main menu showing the model, a running AI server, and VS Code connected">
+  <meta name="twitter:card" content="summary_large_image">
+  <style>
+    :root { color-scheme: dark; --bg: #0b1020; --panel: #121a31; --text: #edf3ff; --muted: #aab8d6; --cyan: #55e6ff; --purple: #b794ff; --green: #72f1a6; --yellow: #ffd166; --red: #ff8a8a; --line: #2c3c64; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 15% 0%, #1b2a55 0, transparent 38%), var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 22px 80px; }
+    header { padding: 42px; border: 1px solid var(--line); border-radius: 24px; background: linear-gradient(135deg, #162044, #10172c 60%, #102b3e); box-shadow: 0 20px 70px #0006; }
+    .hero { display: flex; gap: 28px; align-items: center; }
+    .logo { width: 150px; flex: 0 0 150px; border-radius: 28px; box-shadow: 0 10px 30px #0008; }
+    h1 { margin: 0 0 12px; font-size: clamp(2.1rem, 5vw, 3.6rem); line-height: 1.08; color: var(--cyan); }
+    h2 { margin-top: 48px; color: var(--purple); }
+    h3 { color: var(--green); margin-bottom: 6px; }
+    p, li { color: var(--muted); }
+    strong, code, kbd { color: var(--text); }
+    code { overflow-wrap: anywhere; }
+    kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; padding: 1px 6px; font: .9em ui-monospace, "Cascadia Mono", Consolas, monospace; background: #0c1830; }
+    .credit { color: var(--yellow); font-weight: 700; }
+    .lead { font-size: 1.15rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+    .button { display: inline-block; padding: 11px 20px; border-radius: 12px; font-weight: 700; text-decoration: none; border: 1px solid var(--line); }
+    .button.primary { background: var(--cyan); color: #06121f; border-color: var(--cyan); }
+    .button.secondary { color: var(--cyan); background: #0c1830; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+    .card, pre { border: 1px solid var(--line); border-radius: 16px; background: #10182ddd; }
+    .card { padding: 18px 20px; }
+    .card p { margin: 0; }
+    .steps { counter-reset: step; list-style: none; padding: 0; }
+    .steps li { counter-increment: step; position: relative; padding: 12px 16px 12px 58px; margin: 10px 0; border: 1px solid var(--line); border-radius: 14px; background: #10182dcc; }
+    .steps li::before { content: counter(step); position: absolute; left: 16px; top: 12px; width: 28px; height: 28px; border-radius: 50%; background: var(--purple); color: #140a2a; font-weight: 800; text-align: center; line-height: 28px; }
+    figure.shot { margin: 22px 0; padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: #10182dcc; }
+    figure.shot img { display: block; width: 100%; height: auto; border-radius: 10px; }
+    figure.shot figcaption { padding: 10px 4px 2px; color: var(--muted); }
+    pre { overflow-x: auto; padding: 18px; color: #d9e7ff; }
+    a { color: var(--cyan); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0; background: #10182dcc; }
+    th, td { padding: 11px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--yellow); }
+    td.center { text-align: center; }
+    .notice { border-left: 5px solid var(--yellow); padding: 14px 18px; margin: 24px 0; background: #2a2415; color: #ffe6a4; border-radius: 0 12px 12px 0; }
+    .notice p { color: #ffe6a4; margin: 0; }
+    .err { color: var(--red); font-style: normal; }
+    footer { margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); }
+    @media (max-width: 700px) {
+      header { padding: 26px 20px; }
+      .hero { flex-direction: column; align-items: flex-start; }
+      .logo { width: 96px; flex-basis: 96px; border-radius: 20px; }
+      main { padding: 20px 16px 60px; }
+      th, td { padding: 8px; font-size: .92rem; }
+      .steps li { padding-left: 52px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="hero">
+      <img class="logo" src="logo.png" alt="llama.cpp AMD Command Center logo">
+      <div>
+        <div class="credit">Created by Matt Hurley - matthurley.dev</div>
+        <h1>llama.cpp AMD Command Center</h1>
+        <p class="lead">Run AI models privately on your AMD Radeon PC and use them in VS Code Copilot Chat, set up from one friendly Windows menu. No subscription and no cloud account.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest">Download the latest release</a>
+          <a class="button secondary" href="https://github.com/theantipopau/llamacpp-amd-command-center">View on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="notice"><p><strong>Community project.</strong> An independent helper around <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>. It is not affiliated with, endorsed by, or published by ggml-org, AMD, Microsoft, GitHub, Continue, Cline, or Anthropic.</p></div>
+
+  <figure class="shot">
+    <img src="window.png" alt="The command center window: Your AI is on, an Open chat button, the model, graphics memory use, the Radeon in use, and gaming switches" width="1410" height="1029">
+    <figcaption>The window you get when you double-click <code>Start-LlamaCpp.cmd</code>: one big button for what to do next, plus your graphics memory and gaming switches.</figcaption>
+  </figure>
+
+  <figure class="shot">
+    <img src="menu.png" alt="The text menu: status panel showing the Qwen3.5 9B model, the AI server running, and VS Code connected, followed by grouped menu options" width="1043" height="710">
+    <figcaption>The text menu (choose <strong>More options</strong> in the window, or press <strong>W</strong> here to go back). The <strong>NEXT STEP</strong> line always says what to do next.</figcaption>
+  </figure>
+
+  <h2>What you get</h2>
+  <div class="grid">
+    <div class="card"><h3>Private, local AI</h3><p>The model runs on your own Radeon graphics card. Your code and questions stay on your PC.</p></div>
+    <div class="card"><h3>Guided setup</h3><p>Scans your hardware, picks a model that fits, and verifies every download. Nothing downloads until you type YES.</p></div>
+    <div class="card"><h3>Copilot Chat, including Agent</h3><p>One option adds the model to GitHub Copilot Chat. Your Copilot account and cloud models are untouched.</p></div>
+    <div class="card"><h3>Health check</h3><p>Tests chat, tool calling, and memory in about 10 seconds, and explains any failure in plain English.</p></div>
+  </div>
+
+  <h2>Before you start</h2>
+  <ul>
+    <li><strong>Windows 10 or 11</strong> (64-bit).</li>
+    <li><strong>An AMD Radeon graphics card.</strong> 12–16 GB cards such as the RX 7700 XT, 7900, 9060 XT or 9070 XT work best. Older Radeon cards and Ryzen processors with built-in Radeon graphics also work, more slowly.</li>
+    <li><strong>Any modern processor.</strong> AMD Ryzen and Intel CPUs are both fine. Intel CPUs are supported as the main processor; Intel graphics are not used to run models.</li>
+    <li><strong>About 20 GB of free disk space</strong> and an internet connection for the one-time downloads. After that, everything runs offline.</li>
+    <li><strong>Optional:</strong> VS Code with the GitHub Copilot Chat extension. You can also just chat in your web browser.</li>
+  </ul>
+  <p>No programming or AI knowledge is needed. The menu explains each step and always asks before downloading anything.</p>
+
+  <h2>Words you will see</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Word</th><th>What it means</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Model</strong></td><td>The AI itself: one large file (about 6 GB). You can download several and switch between them.</td></tr>
+      <tr><td><strong>AI server</strong></td><td>A program that loads the model onto your graphics card so apps can talk to it. It runs in its own window; close the window and the AI stops.</td></tr>
+      <tr><td><strong>VRAM</strong></td><td>Your graphics card's own memory. A model that fits entirely in VRAM replies quickly.</td></tr>
+      <tr><td><strong>Context</strong></td><td>How much of the conversation and your code the model can keep in mind at once, measured in tokens (roughly three-quarters of a word each).</td></tr>
+      <tr><td><strong>Agent mode</strong></td><td>A Copilot mode where the AI can read and edit files in your project.</td></tr>
+      <tr><td><strong>Backend (ROCm / Vulkan)</strong></td><td>The engine that runs the model on your graphics card. The setup picks the right one for you.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Quick start</h2>
+  <p>Allow about 15 minutes, most of it the one-time 6 GB model download.</p>
+  <ol class="steps">
+    <li><strong>Update your AMD graphics driver</strong> (AMD Software: Adrenalin Edition).</li>
+    <li><strong>Download</strong> the ZIP from the <a href="https://github.com/theantipopau/llamacpp-amd-command-center/releases/latest">latest release</a>, right-click it, choose <strong>Extract All</strong>, and open the extracted folder. Do not run it from inside the ZIP.</li>
+    <li><strong>Double-click <code>Start-LlamaCpp.cmd</code>.</strong> Windows may show a SmartScreen warning because the file came from the internet. If you downloaded it from the release page, choose <strong>More info → Run anyway</strong>.</li>
+    <li>In the window that opens, press the big orange button (<strong>Set up and start</strong>; in the text menu this is <strong>E</strong>, Easy start). It scans your PC, shows what it will download, and asks you to type <code>YES</code> once. It then installs, starts the AI and opens a chat window. It also offers two optional extras: desktop shortcuts and automatic unloading when idle.</li>
+    <li><strong>Want it in VS Code?</strong> Choose <strong>[5] Health check</strong> (every line should say <strong>PASS</strong>), then <strong>[6] Connect VS Code</strong>, type <code>YES</code>, and follow the four steps it prints.</li>
+  </ol>
+  <p>Prefer to go step by step? <strong>[1] Setup and models</strong> then <strong>[2] Start AI server</strong> still work exactly as before.</p>
+  <h3>Every day after that</h3>
+  <ol class="steps">
+    <li>Double-click the <strong>AI Chat</strong> desktop shortcut if you added it, or press the orange <strong>Start AI and open chat</strong> button in the window. The AI starts and the chat opens. If another app is using a lot of graphics memory, it tells you first.</li>
+    <li>Use the chat window, or the model in VS Code.</li>
+    <li>Before a game, double-click <strong>AI Off</strong> (or press <strong>Turn off</strong> in the window) to give your graphics card back. With auto-unload on, the model also leaves graphics memory by itself after 15 idle minutes and returns on your next message.</li>
+  </ol>
+
+  <figure class="shot">
+    <img src="healthcheck.png" alt="Health check screen with five passing checks: server running, model loaded, chat reply, tool calling, and room for Agent mode" width="1043" height="370" loading="lazy">
+    <figcaption>The health check. Every check names what it tested and, if it fails, what to do.</figcaption>
+  </figure>
+
+  <h2>The menu</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><strong>[E] Easy start</strong></td><td>The one-step path: sets up whatever is missing after a single <code>YES</code>, starts the AI and opens a chat window.</td></tr>
+      <tr><td><strong>[G] Gaming mode</strong></td><td>Turn the AI off to free graphics memory, switch auto-unload when idle on or off, and add or remove the <strong>AI Chat</strong> and <strong>AI Off</strong> desktop shortcuts.</td></tr>
+      <tr><td><strong>[1] Setup and models</strong></td><td>First-time install, model browser, llama.cpp updates, diagnostics, removing a model you no longer need (frees disk space), and uninstall.</td></tr>
+      <tr><td><strong>[2] Start AI server</strong></td><td>Starts the model in its own window and waits until it is ready. With several models downloaded, it asks which one to run first; switching is instant and VS Code follows.</td></tr>
+      <tr><td><strong>[3] Stop AI server</strong></td><td>Frees GPU memory, for example before gaming. Asks first.</td></tr>
+      <tr><td><strong>[4] Open the chat window</strong></td><td>Opens the built-in chat at <code>http://127.0.0.1:8080/</code> in an app-style Edge or Chrome window (your default browser if neither is found).</td></tr>
+      <tr><td><strong>[5] Health check</strong></td><td>Tests the server, a chat reply, tool calling, and memory for Agent mode.</td></tr>
+      <tr><td><strong>[6] Connect VS Code</strong></td><td>Adds the model to GitHub Copilot Chat. Backs up first and only edits its own entry. You connect once: after that, switching models updates VS Code automatically.</td></tr>
+      <tr><td><strong>[7] Other editors</strong></td><td>llama-vscode, Continue, Cline, and any OpenAI-compatible tool.</td></tr>
+      <tr><td><strong>[8] Beginner guide</strong></td><td>Plain-English explanations of every term, plus official links.</td></tr>
+      <tr><td><strong>[9] Logs and fixes</strong></td><td>The latest run log and answers to common problems.</td></tr>
+      <tr><td><strong>[M] Live monitor</strong></td><td>Server status, active model, and prompt/generation speed, refreshing every 2 seconds.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Using the model in VS Code</h2>
+  <ol>
+    <li>In VS Code press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>, type <strong>Reload Window</strong>, and press Enter.</li>
+    <li>Open Copilot Chat with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>I</kbd>.</li>
+    <li>Click the model name under the chat box and choose <strong>Qwen3.5 9B - llama.cpp local</strong>.</li>
+    <li>Choose <strong>Agent</strong> to let it read and edit files, or <strong>Ask</strong> for questions.</li>
+  </ol>
+  <p>Switch back to a cloud model at any time from the same list. Keep the AI server running while you use the local model.</p>
+
+  <h2>Which model?</h2>
+  <p>The setup recommends the <strong>strongest tool-capable model that fits entirely in your graphics card's memory</strong>. Models that spill into system RAM still work, but reply several times more slowly.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Model</th><th>Download</th><th>Agent mode</th><th>Vision</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Qwen3.5 9B</strong></td><td>6.2 GB</td><td class="center">✓</td><td class="center">✓</td><td><strong>Recommended for 12–16 GB Radeon cards.</strong> On an RX 9070 XT: fully on the GPU (33/33 layers), 64k context. First measured run: median <strong>13.3 tokens/s</strong>, 235&nbsp;ms to first token, on a busy desktop — see <code>benchmarks/results</code>. Earlier 45–90&nbsp;t/s figures were never reproduced and stay labelled unverified.</td></tr>
+      <tr><td>Qwen3.8 27B</td><td>18.3 GB</td><td class="center">✓</td><td class="center">✓</td><td>Strongest answers, but on a 16 GB card part of it runs from system RAM: roughly 4–7 tokens/s.</td></tr>
+      <tr><td>Qwen3 8B</td><td>8.1 GB</td><td class="center">✓</td><td></td><td>High-quality 8-bit weights.</td></tr>
+      <tr><td>Llama 3.1 8B</td><td>5.6 GB</td><td class="center">✓</td><td></td><td>Proven general-purpose model.</td></tr>
+      <tr><td>Gemma 4 12B <em>(new)</em></td><td>6.9 GB</td><td class="center">✓</td><td class="center">✓</td><td>Google's April 2026 model. Tool calling works in current llama.cpp but hasn't been tested with Copilot Agent mode here. Needs the Vulkan or <em>llama.cpp ROCm (latest)</em> backend: AMD's ROCm 7.2.1 package can't load it.</td></tr>
+      <tr><td>Gemma 3 12B</td><td>7.6 GB</td><td></td><td class="center">✓</td><td>Chat and image understanding.</td></tr>
+      <tr><td>Gemma 3 4B</td><td>3.1 GB</td><td></td><td class="center">✓</td><td>For 8 GB systems and Ryzen integrated graphics.</td></tr>
+      <tr><td>Qwen3 4B</td><td>2.3 GB</td><td class="center">✓</td><td></td><td>Smallest and fastest; good for CPU-only machines.</td></tr>
+      <tr><td>Ornith 1.5 9B <em>(experimental)</em></td><td>6.2 GB</td><td class="center">✓</td><td class="center">✓</td><td>A community-tuned version of Qwen3.5 9B aimed at coding; its makers' claims haven't been checked here. AMD's ROCm 7.2.1 package can't load it (the menu stops you before downloading). It needs the Vulkan backend, which crashed during long sessions on an RX 9070 XT, or the advanced <em>llama.cpp ROCm (latest)</em> backend, which should load it but hasn't been tested with it here.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <figure class="shot">
+    <img src="advisor.png" alt="Hardware advisor: detected Ryzen 7 9800X3D, Radeon RX 9070 XT with 15.8 GiB VRAM, a model fit table, and Qwen3.5 9B recommended with 65536 context" width="1043" height="640" loading="lazy">
+    <figcaption>The hardware advisor: what it detected, how each model fits, and why it recommends one.</figcaption>
+  </figure>
+
+  <h2>How it is tuned for Copilot, and why</h2>
+  <p>These settings came from diagnosing real Copilot failures on an RX 9070 XT. They are applied automatically when you activate a model.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Context per conversation</td><td>65,536 tokens</td><td>Copilot's Agent prompt alone is 26k–40k tokens. Below about 32k, VS Code fails with <em class="err">No lowest priority node found</em>.</td></tr>
+      <tr><td>Conversations at once</td><td>2 (131,072-token pool)</td><td>VS Code can send a second large request while an Agent turn runs. With room for only one, both fail with <em class="err">Server error: 500</em>.</td></tr>
+      <tr><td>Thinking</td><td>Off for tool-capable models</td><td>With thinking on, Qwen often hides its tool call inside the thinking text and VS Code shows <em class="err">Sorry, no response was returned</em>.</td></tr>
+      <tr><td>VS Code token budget</td><td>57,344 in / 8,192 out</td><td>Matches one conversation's context.</td></tr>
+      <tr><td>Network</td><td><code>127.0.0.1</code> only</td><td>Other devices on your network cannot reach the server.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Troubleshooting</h2>
+  <p>Start with <strong>[5] Health check</strong>. It names the failing step and what to do.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>What you see</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr><td>Health check: <em>Server is running</em> fails</td><td>Choose <strong>[2]</strong> and wait for <strong>READY</strong>. Loading takes 5–60 seconds.</td></tr>
+      <tr><td><em class="err">No lowest priority node found</em></td><td>The context is too small for Copilot. In <strong>[1]</strong> activate your model again (it now gets 64k), then stop and start the server.</td></tr>
+      <tr><td><em class="err">Sorry, no response was returned</em></td><td>Re-activate the model in <strong>[1]</strong> so thinking is turned off, then restart the server.</td></tr>
+      <tr><td><em class="err">Server error: 500</em> / <em>Context size has been exceeded</em></td><td>Re-activate the model in <strong>[1]</strong> for the two-conversation setting, then restart the server.</td></tr>
+      <tr><td><em class="err">ERR_CONNECTION_RESET</em></td><td>The server stopped mid-reply. Start it with <strong>[2]</strong> and click <strong>Try again</strong>.</td></tr>
+      <tr><td>Model missing from Copilot's list</td><td>Run <strong>[6]</strong> again, then <strong>Reload Window</strong> in VS Code.</td></tr>
+      <tr><td>Replies are very slow</td><td>Pick a model marked <code>VRAM</code> (not <code>VRAM+RAM</code>) in the model browser.</td></tr>
+      <tr><td>Graphics card not detected</td><td>Update the AMD driver, restart Windows, then run <strong>Diagnostics</strong> from <strong>[1]</strong>.</td></tr>
+      <tr><td>The server window closed by itself</td><td>Choose <strong>[9] Logs and fixes</strong>, then start it again with <strong>[2]</strong>.</td></tr>
+      <tr><td>PC froze or blue-screened, or the log says <code>device lost</code></td><td>On a Radeon that supports ROCm (such as the RX 9070 XT), use the ROCm backend. Vulkan crashed during long sessions on that card; ROCm ran for days without a fault.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>AMD backends</h2>
+  <div class="grid">
+    <div class="card"><h3>ROCm</h3><p>AMD's validated Windows package (ROCm 7.2.1) for Radeon cards on AMD's list, such as the RX 9070 XT. Fastest on supported cards.</p></div>
+    <div class="card"><h3>Vulkan</h3><p>The official llama.cpp Vulkan build for Ryzen integrated graphics, older Radeon cards, and everything else. On cards that support ROCm, stay on ROCm: on an RX 9070 XT, Vulkan crashed during long sessions.</p></div>
+    <div class="card"><h3>llama.cpp ROCm (latest)</h3><p>Advanced and opt-in. llama.cpp's own Windows ROCm build, updated with every llama.cpp release, for newer models such as Gemma 4. It needs AMD's ROCm runtime libraries installed separately. Setup checks that it can see your Radeon and, if not, keeps your previous llama.cpp.</p></div>
+  </div>
+  <p>The setup chooses ROCm or Vulkan automatically on a fresh install; the backend selector in <strong>[1]</strong> lets you override it. Updates keep the backend you have installed.</p>
+
+  <h2>Other editors and tools</h2>
+  <ul>
+    <li><strong>llama-vscode</strong>: the official llama.cpp VS Code extension (<code>ggml-org.llama-vscode</code>). Option <strong>[7]</strong> installs it and points its endpoint settings at your server. Your other settings are kept, and if your <code>settings.json</code> has comments it shows the lines to paste instead.</li>
+    <li><strong>Continue</strong>: option <strong>[7]</strong> adds a marked, removable block to Continue's <code>config.yaml</code> (backed up first). If you already have your own <code>models:</code> list, it shows the lines to paste instead of editing the file.</li>
+    <li><strong>Cline and OpenAI-compatible tools</strong>: base URL <code>http://127.0.0.1:8080/v1</code>, model <code>qwen3.5:9b</code>, API key <code>local</code>.</li>
+    <li><strong>Claude Code</strong> needs an Anthropic-compatible gateway; this project does not install or claim support for one.</li>
+  </ul>
+
+  <h2>Safety and privacy</h2>
+  <ul>
+    <li>Nothing is installed or downloaded until you choose it and confirm.</li>
+    <li>Model files are checked against their published SHA-256 values before activation. AMD publishes no SHA-256 for its ROCm package, so its hash is recorded locally instead.</li>
+    <li>The server listens on <code>127.0.0.1</code> only and needs no API key.</li>
+    <li>Editor settings (VS Code Chat, llama-vscode, Continue) change only when you choose to connect that editor. Each file is backed up first and only this project's own entries are edited. GitHub Copilot itself is never changed.</li>
+    <li>Only your dedicated Radeon card is used. Ryzen built-in graphics is never used automatically.</li>
+    <li>Run logs live in <code>%LOCALAPPDATA%\Programs\llama.cpp\logs</code>; common keys and tokens are removed automatically.</li>
+  </ul>
+
+  <footer>
+    <p><strong>Created by Matt Hurley - <a href="https://matthurley.dev">matthurley.dev</a></strong></p>
+    <p>MIT licensed. Full documentation, command-line reference, and source on <a href="https://github.com/theantipopau/llamacpp-amd-command-center">GitHub</a>.</p>
+  </footer>
+</main>
+</body>
+</html>

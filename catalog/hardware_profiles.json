@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "catalog_version": "0.1.6",
+  "verified_on": "2026-10-08",
+  "verified_against": "docs/research/upstream-evidence.md",
+  "rocm": {
+    "recommended_pattern": "RX\\s*9070(\\s*XT)?|RX\\s*9060\\s*XT|RX\\s*7900\\s*XTX|Radeon\\s*PRO\\s*W7900|RX\\s*7700",
+    "recommended_reason": "AMD Windows ROCm 7.2.1 compatibility matrix lists this Radeon dGPU (gfx120X/gfx110X/gfx115X family).",
+    "integrated_reason": "Ryzen iGPU/UMA systems use Vulkan by default; AMD Windows ROCm support is hardware-specific.",
+    "fallback_reason": "This Radeon is not in the current AMD Windows ROCm matrix; Vulkan is the portable fallback."
+  }
+}

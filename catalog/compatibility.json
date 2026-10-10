@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "catalog_version": "0.1.6",
+  "rules": [
+    {
+      "id": "amd-rocm-7.2.1-b8407-cannot-load-newer-models",
+      "backend": "ROCm",
+      "tag_regex": "b8407",
+      "model_flags": ["NeedsMtpLoader", "NeedsCurrentLlamaCpp"],
+      "message_template": "{model_name} needs a newer llama.cpp than AMD's ROCm 7.2.1 package (b8407) provides. Open the backend selector ([8]), pick llama.cpp ROCm (latest) or Vulkan, then [5] to update.",
+      "evidence": "Ornith's GGUF carries a trailing MTP (nextn) block; b8407 fails with missing tensor 'blk.32.ssm_conv1d.weight' (verified on an RX 9070 XT). Gemma 4 (April 2026) is newer than b8407 (March 2026), which cannot load it at all."
+    }
+  ]
+}

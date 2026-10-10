@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMD local AI command centre benchmark result",
+  "schema_version": 1,
+  "description": "Stable contract for benchmark results. Measurement fields stay null until a real, reproducible run populates them; fabricated numbers are forbidden (ADR-005).",
+  "type": "object",
+  "required": ["schema_version", "ttft_ms", "tokens_per_second", "memory_peak_mb", "runtime", "model", "timestamp"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "ttft_ms": { "type": ["number", "null"], "description": "Time to first token in milliseconds; null until measured." },
+    "tokens_per_second": { "type": ["number", "null"], "description": "Generation throughput; null until measured." },
+    "memory_peak_mb": { "type": ["number", "null"], "description": "Peak memory during the run in MiB; null until measured." },
+    "runtime": { "type": ["string", "null"], "description": "Runtime adapter id and version/tag that produced the numbers." },
+    "model": { "type": ["string", "null"], "description": "Catalogue model id that produced the numbers." },
+    "timestamp": { "type": ["string", "null"], "description": "UTC ISO-8601 time of the run." }
+  },
+  "additionalProperties": true
+}

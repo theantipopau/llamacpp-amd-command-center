@@ -1,0 +1,280 @@
+:root {
+  color-scheme: dark;
+  --bg: #101418;
+  --panel: #171d23;
+  --line: #263039;
+  --text: #e8eef4;
+  --muted: #9fb0be;
+  --accent: #f2a33c;
+  --danger: #ff8a7a;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* The window scales with its size: the column stretches to whatever width the
+   user drags to (up to a readable maximum) and type/breathing room grow a little
+   on large displays, so the app does not look like a phone UI in a big window. */
+.window {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: clamp(14px, 1.5vw, 28px) clamp(14px, 2.5vw, 40px) 32px;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 1.2vw, 20px);
+}
+
+h1 {
+  font-size: clamp(1.15rem, 0.9rem + 0.7vw, 1.6rem);
+  margin: 0;
+}
+
+h2 {
+  font-size: clamp(0.95rem, 0.85rem + 0.35vw, 1.15rem);
+  margin: 0 0 10px;
+  color: var(--accent);
+}
+
+/* Narrow windows: drop the two-column fact tables to stacked rows so nothing
+   truncates, and let model rows wrap instead of squeezing the badges. */
+@media (max-width: 640px) {
+  .facts,
+  .raw dl {
+    grid-template-columns: 1fr;
+  }
+
+  .facts dt {
+    margin-top: 4px;
+  }
+
+  .model-line {
+    flex-wrap: wrap;
+  }
+}
+
+/* Medium-and-narrow windows: two model cards side by side is wasted space, so
+   keep the single column; wide windows use two columns for the model library. */
+@media (min-width: 1100px) {
+  .models {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+
+  .models li.current {
+    grid-column: 1 / -1;
+  }
+}
+
+
+h3 {
+  font-size: 0.8rem;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.card,
+.error,
+.progress {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: clamp(10px, 1.2vw, 20px) clamp(12px, 1.5vw, 24px);
+  min-width: 0;
+}
+
+.progress {
+  border-color: var(--accent);
+  margin: 0;
+}
+
+.error {
+  border-color: var(--danger);
+}
+
+.error p {
+  margin: 0 0 8px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: 6px 14px;
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+code,
+pre {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0d1116;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+button {
+  background: #1f2830;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tiers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.tiers li {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.tiers li.current {
+  border-color: var(--accent);
+}
+
+.tiers p {
+  margin: 0;
+}
+
+.warning {
+  color: var(--danger);
+  margin: 8px 0 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+input[type="number"],
+select {
+  background: #0d1116;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.92rem;
+}
+
+.models {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.models li {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.models li.current {
+  border-color: var(--accent);
+}
+
+.model-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.model-line .model-badges {
+  flex-shrink: 0;
+}
+
+.model-name {
+  font-weight: 600;
+}
+
+.model-state {
+  margin: 4px 0 0;
+}
+
+.models .actions {
+  margin-top: 8px;
+}
+
+.verdict {
+  font-weight: 600;
+}
+
+.raw summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.raw dl {
+  display: grid;
+  grid-template-columns: minmax(100px, 140px) 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+
+.raw dt {
+  color: var(--muted);
+}
+
+.raw dd {
+  margin: 0;
+}

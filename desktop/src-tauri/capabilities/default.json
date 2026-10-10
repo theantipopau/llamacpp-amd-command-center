@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Core window permissions for the command center slice. The app defines its own commands; no filesystem or shell plugin is granted to the webview.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "catalog_version": "0.1.6",
+  "verified_on": "2026-10-08",
+  "verified_against": "docs/research/upstream-evidence.md",
+  "amd_rocm_package": {
+    "tag": "rocm-7.2.1-b8407",
+    "url": "https://repo.radeon.com/rocm/llama.cpp/windows/rocm-rel-7.2.1/llama-b8407-windows-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip",
+    "name": "llama-b8407-windows-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip",
+    "size": 565651083,
+    "page": "https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/advanced/advancedrad/windows/llm/llamacpp.html",
+    "checked_on": "2026-10-08",
+    "freshness_days": 120
+  },
+  "adapters": [
+    {
+      "id": "llamacpp",
+      "display_name": "llama.cpp",
+      "status": "active",
+      "description": "The supported runtime: official Windows builds, AMD's ROCm package or Vulkan, launched by the generated start scripts.",
+      "unknowns": []
+    },
+    {
+      "id": "lemonade",
+      "display_name": "Lemonade",
+      "status": "stub",
+      "description": "Structured stub. This project has not validated Lemonade's install, flags or health surface on this hardware.",
+      "unknowns": [
+        "Install and update path on Windows with Radeon GPUs",
+        "Server flags, port and health endpoint",
+        "Model format and catalogue compatibility"
+      ]
+    },
+    {
+      "id": "strata",
+      "display_name": "Strata",
+      "status": "stub",
+      "description": "Structured stub, experimental per ADR-002: not validated on this hardware by this project.",
+      "unknowns": [
+        "Acceleration behaviour on gfx1201",
+        "Install footprint and coexistence with llama.cpp",
+        "Health and stop semantics"
+      ]
+    }
+  ],
+  "llamacpp_capabilities": [
+    { "flag": "--device", "required": true, "purpose": "Pins the dedicated Radeon; the generated launcher passes it on every start." },
+    { "flag": "--parallel", "required": true, "purpose": "Two conversation slots share one KV pool (prevents concurrent-request 500s)." },
+    { "flag": "--ctx-size", "required": true, "purpose": "Context sized from hardware; the launcher always passes it." },
+    { "flag": "--jinja", "required": true, "purpose": "Tool-call templates for Copilot Agent and other tool users." },
+    { "flag": "--reasoning", "required": true, "purpose": "Thinking on/off; tool calls land in reasoning_content otherwise." },
+    { "flag": "--fit", "required": true, "purpose": "Automatic layer placement; the launcher passes --fit on with a target budget." },
+    { "flag": "--flash-attn", "required": true, "purpose": "Passed on every start for attention performance." },
+    { "flag": "--metrics", "required": true, "purpose": "Token metrics endpoint used by the monitor." },
+    { "flag": "--sleep-idle-seconds", "required": false, "purpose": "Idle unload; only passed when idle-unload is configured." },
+    { "flag": "--list-devices", "required": false, "purpose": "Device inventory for diagnostics." }
+  ]
+}

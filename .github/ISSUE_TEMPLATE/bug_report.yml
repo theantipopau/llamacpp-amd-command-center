@@ -1,0 +1,71 @@
+name: Something isn't working
+description: Report a problem with the menu, setup, a model, or an editor connection.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please run **[5] Health check** first; it often names the fix.
+        Logs have common keys and tokens removed automatically, but read them over before pasting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw instead (copy any error text).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Command center version
+      description: From the release ZIP name, for example v0.1.5 in llamacpp-amd-command-center-v0.1.5.zip.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and AMD driver version
+      description: For example "RX 9070 XT, Adrenalin 26.6.4".
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend (BACKEND line on the setup screen)
+      options:
+        - ROCm
+        - Vulkan
+        - Not installed yet
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Active model
+      description: For example Qwen3.5 9B.
+  - type: dropdown
+    id: editor
+    attributes:
+      label: Where did it go wrong?
+      options:
+        - Menu or setup
+        - Downloading or installing
+        - Starting the AI server
+        - Health check
+        - VS Code Copilot Chat
+        - llama-vscode
+        - Continue
+        - Other
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Health check or Diagnostics output
+      description: Paste the output of **[5] Health check**, or **Diagnostics** from **[1]**.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt (optional)
+      description: From **[9] Logs and fixes**. The last 30-50 lines are usually enough.
+      render: text

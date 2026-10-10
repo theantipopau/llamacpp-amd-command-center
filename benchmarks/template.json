@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "ttft_ms": null,
+  "tokens_per_second": null,
+  "memory_peak_mb": null,
+  "runtime": null,
+  "model": null,
+  "timestamp": null
+}

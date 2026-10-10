@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "ttft_ms": 235.2,
+  "tokens_per_second": 13.31,
+  "memory_peak_mb": 10052.8,
+  "runtime": "ROCm rocm-7.2.1-b8407",
+  "model": "qwen3.5-9b",
+  "timestamp": "2026-10-08T23:10:38Z",
+  "measurements": {
+    "ttft_ms": {
+      "median": 235.2,
+      "min": 191.5,
+      "max": 264.7
+    },
+    "tokens_per_second": {
+      "median": 13.31,
+      "min": 11.08,
+      "max": 13.7
+    },
+    "memory_peak_mb": {
+      "value": 10052.8,
+      "kind": "peak working set of llama-server since it started, so it includes loading the model"
+    }
+  },
+  "runs": [
+    {
+      "ttft_ms": 264.7,
+      "generation_ms": 4781.4,
+      "tokens": 53,
+      "tokens_per_second": 11.08,
+      "total_ms": 5046.1
+    },
+    {
+      "ttft_ms": 235.2,
+      "generation_ms": 3980.5,
+      "tokens": 53,
+      "tokens_per_second": 13.31,
+      "total_ms": 4215.7
+    },
+    {
+      "ttft_ms": 191.5,
+      "generation_ms": 3868.2,
+      "tokens": 53,
+      "tokens_per_second": 13.7,
+      "total_ms": 4059.7
+    }
+  ],
+  "setup": {
+    "model_alias": "qwen3.5:9b",
+    "quantisation": "Q4_K_M",
+    "context_size_tokens": 65536,
+    "per_slot_context_tokens_reported_by_server": 65536,
+    "parallel_slots": 2,
+    "context_window_total_tokens": 131072,
+    "reported_by": "the server's /props endpoint (setup) and -Action State (runtime, model, hardware)",
+    "max_tokens_per_run": 192,
+    "temperature": 0,
+    "prompt": "In two sentences, explain what a local large language model is and one reason to run one on your own computer.",
+    "server_port": 8080,
+    "install_root": "C:\\Users\\matth\\AppData\\Local\\Programs\\llama.cpp",
+    "command_center_version": "0.1.6"
+  },
+  "hardware": {
+    "gpu": "AMD Radeon RX 9070 XT",
+    "cpu": "AMD Ryzen 7 9800X3D 8-Core Processor",
+    "ram_gib": 31.2,
+    "vram_gib_max_dedicated": 15.8,
+    "support_level": "supported",
+    "detection_confidence": "high"
+  },
+  "environment": {
+    "desktop_activity": [
+      "Settings",
+      "Project Governance and Tools Overview - Google Chrome",
+      "Claude",
+      "#\u2699\ufe0f\u2503operating-systems | Freebuff - Discord",
+      "theantipopau/omencore - GitHub Release Stats \u2014 Mozilla Firefox",
+      "Freebuff Desktop",
+      "SouthernSpear - Unreal Editor",
+      "C:\\WINDOWS\\system32\\cmd.exe"
+    ],
+    "os": "Windows 11 (10.0.26300)",
+    "python": "3.14.6",
+    "note": "Measured on a working desktop, not a clean room; the windows above were open or idle."
+  }
+}

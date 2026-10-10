@@ -1,0 +1,34 @@
+# Local AI-assistant workspace metadata
+.freebuff/
+
+# Generated local integration files
+Continue-llamacpp-config.yaml
+
+# Runtime output and logs
+*.log
+*.tmp
+*.bak
+
+# Local release package output
+dist/
+
+# Desktop slice build output (desktop/dist is covered by the dist/ rule above)
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# Local model/runtime directories
+models/
+runtime/
+backups/
+logs/
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Private working notes (kept out of the public repo and Pages site)
+notes/

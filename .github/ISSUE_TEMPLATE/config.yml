@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/theantipopau/llamacpp-amd-command-center/security/advisories/new
+    about: Please don't open a public issue for security problems. See SECURITY.md.
+  - name: Troubleshooting guide
+    url: https://github.com/theantipopau/llamacpp-amd-command-center#troubleshooting
+    about: Common errors and their fixes.

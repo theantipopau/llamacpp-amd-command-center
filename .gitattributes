@@ -1,0 +1,6 @@
+# Windows scripts must keep CRLF endings everywhere, including the Linux-built
+# release ZIP: cmd.exe can mis-parse labels and goto targets in LF-only batch files.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
