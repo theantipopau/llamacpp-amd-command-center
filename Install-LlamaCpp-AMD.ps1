@@ -1122,7 +1122,7 @@ function Get-RuntimeAdapters {
 function Get-LlamaServerHelpText {
     # One --help invocation shared by capability probing. Empty string when the
     # installed server cannot run (missing exe, spawn failure).
-    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $exe = Get-RuntimeExecutablePath
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return '' }
     $previous = $ErrorActionPreference
     $text = ''
@@ -1154,7 +1154,7 @@ function Get-RuntimeCapabilities {
         }
     }
     $declared = @((Get-CatalogJson -Name 'runtimes.json').llamacpp_capabilities)
-    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $exe = Get-RuntimeExecutablePath
     $available = Test-Path -LiteralPath $exe -PathType Leaf
     $help = if ($available) { Get-LlamaServerHelpText } else { '' }
     $confidence = if (-not $available) { 'none' } elseif ($help -eq '') { 'low' } else { 'high' }
@@ -1245,15 +1245,42 @@ function Start-Runtime {
     if ([string]$adapter.status -ne 'active') {
         return [pscustomobject]@{ schema_version = 1; adapter = [string]$adapter.id; status = 'not_implemented'; detail = "The $($adapter.display_name) adapter is a structured stub and was not started."; unknowns = @($adapter.unknowns) }
     }
+    if ($null -eq $Hardware) { $Hardware = Get-HardwareProfile }
+    $processes = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+    $selection = $null
+    try {
+        # A running server can be stopped here only because this is an explicit start of a
+        # model that prefers the other backend. The stop is limited to our install root.
+        $selection = Select-RuntimeForActiveModel -Hardware $Hardware -AllowStop:($processes.Count -gt 0)
+    } catch {
+        Write-WarnLine "The backend preference could not be applied: $($_.Exception.Message)"
+        $selection = $null
+    }
+    if ($null -ne $selection -and $selection.status -eq 'backend_not_installed') {
+        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'backend_not_installed'; detail = $selection.message; preferred_backend = $selection.preferred_backend; unknowns = @() }
+    }
+    if ($null -ne $selection -and $selection.status -eq 'not_installed') {
+        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'failed'; detail = 'llama.cpp is not installed. Run the installer first.'; unknowns = @() }
+    }
+    if ($null -ne $selection -and $selection.status -eq 'server_running') {
+        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'failed'; detail = $selection.message; unknowns = @() }
+    }
+    if ($null -ne $selection -and $selection.status -eq 'switched') {
+        Write-Info $selection.message
+        # Let the old listener leave the socket table before the new process binds it.
+        $deadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $deadline -and $null -ne (Get-PortListener -Port $Port)) { Start-Sleep -Milliseconds 200 }
+    }
     $processes = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
     $serverState = [string](Get-ServerState).state
     if ($processes.Count -gt 0 -and $serverState -eq 'running') {
         return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'already_running'; detail = 'The server is already up and healthy.'; unknowns = @() }
     }
-    if ($null -eq $Hardware) { $Hardware = Get-HardwareProfile }
     try {
-        Start-ActiveServer -Hardware $Hardware
-        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'started'; detail = 'The server is running in this console.'; unknowns = @() }
+        $started = Start-ActiveServer -Hardware $Hardware
+        $detail = 'The server is running in this console.'
+        if ($null -ne $selection -and $selection.status -eq 'switched') { $detail = "$($selection.message) $detail" }
+        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'started'; detail = $detail; switched_backend = ($null -ne $selection -and $selection.status -eq 'switched'); unknowns = @() }
     } catch {
         return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'failed'; detail = [string]$_.Exception.Message; unknowns = @() }
     }
@@ -1363,6 +1390,103 @@ function Update-Runtime {
     }
 }
 
+function Find-RuntimeDependency {
+    param([string] $Directory, [string] $Name, [string[]] $SearchPath)
+    if ([string]::IsNullOrWhiteSpace($Directory) -or [string]::IsNullOrWhiteSpace($Name)) { return '' }
+    if ($Name -match '\*') {
+        $match = @(Get-ChildItem -LiteralPath $Directory -Filter $Name -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($match.Count -gt 0) { return $match[0].FullName }
+    } else {
+        $candidate = Join-Path $Directory $Name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    foreach ($folder in @($SearchPath)) {
+        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+        $candidate = Join-Path $folder $Name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        if ($Name -match '\*') {
+            $match = @(Get-ChildItem -LiteralPath $folder -Filter $Name -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($match.Count -gt 0) { return $match[0].FullName }
+        }
+    }
+    return ''
+}
+
+function Get-RuntimeDependencyReport {
+    # Exactly which files one installed build is missing, and where to get them. The
+    # ROCm 10 builds load hipBLAS/rocBLAS/rocSOLVER from a separately installed runtime;
+    # the AMD-validated 7.2.1 ZIP bundles them. Both cases are described from the build's
+    # own files, never from the tag alone.
+    param([string] $Path, [string] $Backend, [string[]] $SearchPath = $null)
+    if ($null -eq $SearchPath) { $SearchPath = @($env:PATH -split ';') }
+    $family = Get-BackendFamily -Backend $Backend
+    $required = @()
+    if ($family -eq 'vulkan') {
+        $required = @('llama-server.exe', 'ggml-vulkan.dll', 'vulkan-1.dll')
+        $SearchPath = @($SearchPath) + @((Join-Path $env:SystemRoot 'System32'))
+    } elseif ($family -eq 'rocm') {
+        $required = @('llama-server.exe', 'ggml-hip.dll', 'amdhip64*.dll')
+        try {
+            $external = @((Get-CatalogJson -Name 'runtimes.json').ggml_org_rocm_windows.required_external_dlls)
+            $required += $external
+        } catch { }
+    } else {
+        $required = @('llama-server.exe')
+    }
+    $missing = @()
+    $found = @()
+    foreach ($name in $required) {
+        $resolved = Find-RuntimeDependency -Directory $Path -Name $name -SearchPath $SearchPath
+        if ([string]::IsNullOrWhiteSpace($resolved)) { $missing += $name } else { $found += [pscustomobject]@{ name = $name; path = $resolved } }
+    }
+    $where = ''
+    if ($missing.Count -gt 0) {
+        if ($family -eq 'rocm') {
+            $where = "Install the AMD ROCm runtime (hipBLAS, rocBLAS, rocSOLVER) from https://rocm.docs.amd.com/projects/install-on-windows/en/latest/ , or use the AMD-validated package from $script:AmdRocmPage."
+        } else {
+            $where = 'Install or update the AMD Adrenalin driver from https://www.amd.com/en/support; it supplies vulkan-1.dll. Then reinstall this backend.'
+        }
+    }
+    $asset = ''
+    $manifest = Join-Path $Path 'installation.json'
+    if (Test-Path -LiteralPath $manifest -PathType Leaf) {
+        try { $asset = [string](Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).asset } catch { $asset = '' }
+    }
+    $driverMinimum = $null
+    $driverSource = ''
+    if ($family -eq 'rocm' -and $asset -match 'rocm-10\.0') {
+        try {
+            $info = Get-CatalogJson -Name 'runtimes.json'
+            $driverMinimum = [string]$info.ggml_org_rocm_windows.min_adrenalin
+            $driverSource = [string]$info.ggml_org_rocm_windows.min_adrenalin_source
+        } catch { }
+    }
+    return [pscustomobject]@{
+        backend = [string]$Backend
+        path = [string]$Path
+        installed = (Test-Path -LiteralPath (Join-Path $Path 'llama-server.exe') -PathType Leaf)
+        status = if ($missing.Count -eq 0) { 'ok' } else { 'missing_files' }
+        missing_files = @($missing)
+        found_files = @($found)
+        where_to_get = $where
+        driver_min_version = $driverMinimum
+        driver_min_source = $driverSource
+        driver_requirement = if ($null -ne $driverMinimum) { "AMD's ROCm 10.0 matrix lists Adrenalin $driverMinimum for RX 9000. llama.cpp's own release notes state no driver minimum; treat this as guidance, not a hard gate." } else { '' }
+    }
+}
+
+function Get-GpuDriverInfo {
+    # Driver version from Windows itself; no vendor tool needed.
+    try {
+        $controllers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match 'Radeon|AMD' -and $_.Name -notmatch 'Basic' })
+        if ($controllers.Count -eq 0) { return $null }
+        $controller = $controllers[0]
+        $date = ''
+        try { if ($null -ne $controller.DriverDate) { $date = ([datetime]$controller.DriverDate).ToString('yyyy-MM-dd') } } catch { $date = '' }
+        return [pscustomobject]@{ name = [string]$controller.Name; version = [string]$controller.DriverVersion; date = $date; source = 'Win32_VideoController' }
+    } catch { return $null }
+}
+
 function Get-DiagnosticReport {
     # Task 3: one typed diagnostics document. No string parsing, no GUI, never
     # throws: a failed section degrades to null + error (ADR-003/ADR-005).
@@ -1374,6 +1498,7 @@ function Get-DiagnosticReport {
     $hardware = $null
     $hardwareError = $null
     try { $hardware = Get-HardwareProfile } catch { $hardwareError = [string]$_.Exception.Message }
+    $gpuDriver = Get-GpuDriverInfo
 
     # runtime health + validation + capabilities (adapter llamacpp)
     $runtimeHealth = $null
@@ -1487,6 +1612,21 @@ function Get-DiagnosticReport {
         warnings = @($editorWarnings)
     }
 
+    # Runtimes side by side: report each installed build's files, not just the active one.
+    $runtimes = @()
+    foreach ($install in @(Get-RuntimeInstallations)) {
+        try { $runtimes += Get-RuntimeDependencyReport -Path ([string]$install.path) -Backend ([string]$install.backend) }
+        catch { $runtimes += [pscustomobject]@{ backend = [string]$install.backend; path = [string]$install.path; installed = [bool]$install.exe_present; status = 'unknown'; missing_files = @(); found_files = @(); where_to_get = ''; driver_min_version = $null; driver_min_source = ''; driver_requirement = '' } }
+    }
+    foreach ($familyName in @('Vulkan', 'ROCm')) {
+        if (@($runtimes | Where-Object { (Get-BackendFamily -Backend $_.backend) -eq (Get-BackendFamily -Backend $familyName) }).Count -eq 0) {
+            $runtimes += [pscustomobject]@{
+                backend = $familyName; path = ''; installed = $false; status = 'not_installed'; missing_files = @(); found_files = @()
+                where_to_get = "Install it from Install/update with Backend $familyName; runtimes are kept side by side."; driver_min_version = $null; driver_min_source = ''; driver_requirement = ''
+            }
+        }
+    }
+
     # roll-up: any blocker -> broken, else any warning -> degraded, else ok
     $blockers = @()
     $warnings = @()
@@ -1512,6 +1652,8 @@ function Get-DiagnosticReport {
         command_center_version = [string]$script:CommandCenterVersion
         install_root = [string]$InstallRoot
         runtime_health = $runtimeHealth
+        runtimes = @($runtimes)
+        gpu_driver = $gpuDriver
         hardware_health = $hardwareHealth
         model_health = $modelHealth
         editor_health = $editorHealth
@@ -1618,6 +1760,21 @@ function Invoke-CurlDownload {
     return [int]$LASTEXITCODE
 }
 
+function Get-ArchiveLocalHash {
+    # Local identity for a package whose publisher has no digest (AMD). Prefers the
+    # sidecar written at download time, then hashes the archive and writes that sidecar.
+    param([string] $ArchivePath)
+    if ([string]::IsNullOrWhiteSpace($ArchivePath) -or -not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) { return '' }
+    $sidecar = "$ArchivePath.sha256"
+    if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+        $parts = @(([string](Get-Content -LiteralPath $sidecar -Raw)).Trim() -split '\s+')
+        if ($parts.Count -gt 0 -and $parts[0] -match '^[0-9a-fA-F]{64}$') { return $parts[0].ToLowerInvariant() }
+    }
+    $hash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath $sidecar -Value "$hash  $([IO.Path]::GetFileName($ArchivePath))" -Encoding ASCII
+    return $hash
+}
+
 function Get-VerifiedDownload {
     param(
         [string] $Url,
@@ -1638,12 +1795,23 @@ function Get-VerifiedDownload {
             if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) {
                 Write-Step "Checking existing $fileName"
                 Write-Success 'Existing AMD package size matches.'
-                return
+                # AMD publishes no digest, so the recorded local hash is the only identity
+                # this file has. Return it so the installer can store it in installation.json.
+                $sidecar = "$Destination.sha256"
+                $knownHash = ''
+                if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+                    $knownHash = ([string](Get-Content -LiteralPath $sidecar -Raw)).Trim().Split(' ')[0]
+                }
+                if ([string]::IsNullOrWhiteSpace($knownHash)) {
+                    $knownHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+                    Set-Content -LiteralPath $sidecar -Value "$knownHash  $fileName" -Encoding ASCII
+                }
+                return $knownHash
             }
             Write-Step "Verifying existing $fileName"
             if (Test-FileDigest -Path $Destination -ExpectedSha256 $ExpectedSha256) {
                 Write-Success 'Already installed and verified.'
-                return
+                return ([string]$ExpectedSha256).ToLowerInvariant()
             }
             Write-WarnLine 'Checksum mismatch; the managed copy will be downloaded again.'
         } else {
@@ -1694,7 +1862,7 @@ function Get-VerifiedDownload {
         Move-Item -LiteralPath $staged -Destination $Destination -Force
         Set-Content -LiteralPath "$Destination.sha256" -Value "$actualHash  $fileName" -Encoding ASCII
         Write-Success "Downloaded from AMD's official repository. Recorded SHA-256: $actualHash"
-        return
+        return $actualHash
     }
     $expected = ([string]$ExpectedSha256).ToLowerInvariant()
     if ($actualHash -ine $expected) {
@@ -1704,6 +1872,7 @@ function Get-VerifiedDownload {
     # Checksum passed: promote the staged file to its real path by rename.
     Move-Item -LiteralPath $staged -Destination $Destination -Force
     Write-Success 'Verified successfully.'
+    return $expected
 }
 
 function Get-HfRepository {
@@ -1791,15 +1960,19 @@ function Assert-HardwareForLlama {
 function Get-AmdRocmAsset {
     Write-Step 'Using AMD validated ROCm package'
     Write-Info $script:AmdRocmPage
+    # Every AMD package field comes from catalog/runtimes.json. The tag used to be
+    # hardcoded here and the name/url/size lived in script variables, which made three
+    # sources of truth that could drift.
+    $amd = (Get-CatalogJson -Name 'runtimes.json').amd_rocm_package
     return [pscustomobject]@{
         Release = [pscustomobject]@{
-            tag_name = 'rocm-7.2.1-b8407'
-            html_url = $script:AmdRocmPage
+            tag_name = [string]$amd.tag
+            html_url = [string]$amd.page
         }
         Asset = [pscustomobject]@{
-            name = $script:AmdRocmPackageName
-            browser_download_url = $script:AmdRocmPackageUrl
-            size = $script:AmdRocmPackageSize
+            name = [string]$amd.name
+            browser_download_url = [string]$amd.url
+            size = [long]$amd.size
             digest = ''
             officialUnverified = $true
         }
@@ -1861,6 +2034,8 @@ function Ensure-LlamaCppInstalled {
     Assert-HardwareForLlama -Hardware $Hardware
     $running = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
     if ($null -ne $running) { throw 'Close every running llama-server.exe process before installing or updating.' }
+    # Migrate a legacy current\ install once, before anything looks for the active build.
+    [void](Initialize-RuntimeLayout)
 
     $backendChoice = Resolve-BackendChoice -RequestedBackend $RequestedBackend -Hardware $Hardware -Runtime (Get-InstalledRuntime)
     if ($backendChoice -eq 'Vulkan' -and $Hardware.RocmRecommended) {
@@ -1898,16 +2073,50 @@ function Ensure-LlamaCppInstalled {
     $downloadRoot = Join-Path $InstallRoot 'downloads'
     $archive = Join-Path $downloadRoot $asset.name
     $extract = Join-Path $InstallRoot ('.extract-' + [Guid]::NewGuid().ToString('N'))
-    $stage = Join-Path $InstallRoot '.current-new'
-    $current = Join-Path $InstallRoot 'current'
+    $stage = Join-Path $InstallRoot ('.runtime-new-' + [Guid]::NewGuid().ToString('N'))
     $backup = Join-Path $InstallRoot ('.backup-' + [Guid]::NewGuid().ToString('N'))
+    $relative = Get-RuntimeFolderName -Backend $backendChoice -Tag $tag
+    $target = Join-Path (Get-RuntimesRoot) ($relative -replace '/', '\')
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+
+    # The same backend and tag already installed: select it and stop. Reinstalling the
+    # same build must never re-download it, and this is what makes a switch back cheap.
+    $targetManifest = Join-Path $target 'installation.json'
+    if ((Test-Path -LiteralPath $targetManifest -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $target 'llama-server.exe') -PathType Leaf)) {
+        $existingInstallation = $null
+        try { $existingInstallation = Get-Content -LiteralPath $targetManifest -Raw | ConvertFrom-Json } catch { $existingInstallation = $null }
+        if ($null -ne $existingInstallation) {
+            $recordedSha = [string]$existingInstallation.sha256
+            if ([string]::IsNullOrWhiteSpace($recordedSha)) {
+                # Old AMD installs stored an empty hash. Backfill it from the archive that is
+                # already in downloads\ (or its .sha256 sidecar) without touching the build.
+                $recordedSha = Get-ArchiveLocalHash -ArchivePath (Join-Path $downloadRoot $asset.name)
+                if (-not [string]::IsNullOrWhiteSpace($recordedSha)) {
+                    $existingInstallation | Add-Member -NotePropertyName 'sha256' -NotePropertyValue $recordedSha -Force
+                    $existingInstallation | Add-Member -NotePropertyName 'sha256_source' -NotePropertyValue 'local' -Force
+                    $existingInstallation | ConvertTo-Json | Set-Content -LiteralPath $targetManifest -Encoding UTF8
+                }
+            }
+            Set-ActiveRuntime -Path $target
+            if (-not $NoPath) {
+                Add-UserPathEntry -Directory $target
+                Remove-UserPathEntry -Directory (Join-Path $InstallRoot 'current')
+            }
+            Write-Success "llama.cpp $tag ($backendChoice) is already installed at $target; no download was needed."
+            $active = Get-ActiveModel
+            if ($null -ne $active) {
+                New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
+                Write-Info 'Server launcher rebuilt for the active runtime.'
+            }
+            return $tag
+        }
+    }
 
     if (-not ($Force -or $script:AssumeYes)) {
         $sizeGiB =[Math]::Round(([double]$asset.size / 1GB), 2)
         $sourceHost = ([Uri][string]$asset.browser_download_url).Host
         Write-Host "`n  About to download llama.cpp ($backendChoice build $tag, ~$sizeGiB GiB) from $sourceHost." -ForegroundColor Yellow
-        Write-Host "  It is installed to $current. Downloaded models are kept." -ForegroundColor DarkGray
+        Write-Host "  It is installed to $target. Downloaded models are kept." -ForegroundColor DarkGray
         if ($backendChoice -eq 'ROCmLatest') {
             foreach ($line in (Get-RocmLatestRequirementText)) { Write-Host "  $line" -ForegroundColor Yellow }
         }
@@ -1917,7 +2126,7 @@ function Ensure-LlamaCppInstalled {
         }
     }
 
-    Get-VerifiedDownload -Url $asset.browser_download_url -Destination $archive -ExpectedSize ([long]$asset.size) -ExpectedSha256 $digest
+    $archiveHash = Get-VerifiedDownload -Url $asset.browser_download_url -Destination $archive -ExpectedSize ([long]$asset.size) -ExpectedSha256 $digest
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
     try {
         Write-Step "Extracting $($asset.name)"
@@ -1929,27 +2138,29 @@ function Ensure-LlamaCppInstalled {
         Copy-Item -Path (Join-Path $server.Directory.FullName '*') -Destination $stage -Recurse -Force
         [ordered]@{
             tag = $tag; release_url = $selected.Release.html_url; asset = $asset.name
-            sha256 = $digest; installed_at = (Get-Date).ToUniversalTime().ToString('o'); backend = $backendChoice
+            sha256 = $archiveHash; sha256_source = $(if ([string]::IsNullOrWhiteSpace($digest)) { 'local' } else { 'publisher' })
+            installed_at = (Get-Date).ToUniversalTime().ToString('o'); backend = $backendChoice
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'installation.json') -Encoding UTF8
 
-        if (Test-Path -LiteralPath $current) { Move-Item -LiteralPath $current -Destination $backup }
+        if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination $backup }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
         try {
-            Move-Item -LiteralPath $stage -Destination $current
+            Move-Item -LiteralPath $stage -Destination $target
         } catch {
-            if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $current)) {
-                Move-Item -LiteralPath $backup -Destination $current
+            if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)) {
+                Move-Item -LiteralPath $backup -Destination $target
             }
             throw
         }
         if ($backendChoice -eq 'ROCmLatest') {
             # This build loads AMD's ROCm libraries from the PC; without them llama.cpp
             # quietly runs on the CPU. Keep it only if it actually lists a ROCm GPU.
-            $foundDevices = Get-LlamaDeviceList -Directory $current
+            $foundDevices = Get-LlamaDeviceList -Directory $target
             $rocmDevices = @($foundDevices | Where-Object { $_.Id -match '^ROCm' -and -not $_.Integrated })
             Write-RunLogEvent -Event 'rocm_latest_check' -Message "ROCm devices found: $($rocmDevices.Count)" -Data @{ tag = $tag; devices = @($rocmDevices | ForEach-Object { $_.Name }) }
             if ($rocmDevices.Count -eq 0) {
-                Remove-Item -LiteralPath $current -Recurse -Force
-                if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $current }
+                Remove-Item -LiteralPath $target -Recurse -Force
+                if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target }
                 Write-WarnLine "llama.cpp $tag (ROCm) could not see your Radeon, so it was not kept. Your previous llama.cpp is unchanged."
                 Write-WarnLine 'This build needs AMD''s ROCm runtime libraries installed separately. Use the AMD ROCm 7.2.1 or Vulkan backend instead.'
                 return $null
@@ -1962,8 +2173,13 @@ function Ensure-LlamaCppInstalled {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     }
 
-    if (-not $NoPath) { Add-UserPathEntry -Directory $current }
-    Write-Success "llama.cpp $tag is installed and the $backendChoice backend is ready."
+    if (-not $NoPath) {
+        Add-UserPathEntry -Directory $target
+        # A migrated install leaves its old current\ entry in PATH; drop it.
+        Remove-UserPathEntry -Directory (Join-Path $InstallRoot 'current')
+    }
+    Set-ActiveRuntime -Path $target
+    Write-Success "llama.cpp $tag ($backendChoice) is installed at $target and is the active runtime."
     # Device names differ between builds (ROCm0 vs Vulkan0), so rebuild the launcher
     # for the new build instead of leaving one that names a device it cannot find.
     $active = Get-ActiveModel
@@ -2067,7 +2283,7 @@ function Select-PrimaryLlamaDevice {
 }
 
 function Get-PrimaryLlamaDevice {
-    return Select-PrimaryLlamaDevice -Devices (Get-LlamaDeviceList -Directory (Join-Path $InstallRoot 'current'))
+    return Select-PrimaryLlamaDevice -Devices (Get-LlamaDeviceList -Directory (Split-Path -Parent (Get-RuntimeExecutablePath)))
 }
 
 function Get-LlamaDeviceList {
@@ -2456,13 +2672,18 @@ function New-Launchers {
         $gameWatchLine = 'if exist "%~dp0tools\Install-LlamaCpp-AMD.ps1" start "llama.cpp game watch" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Install-LlamaCpp-AMD.ps1" -Action GameWatch -InstallRoot "%~dp0."'
     }
 
+    $runtimePath = Get-ActiveRuntimePath
+    $serverTarget = if (-not [string]::IsNullOrWhiteSpace($runtimePath)) { Join-Path $runtimePath 'llama-server.exe' } else { Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe' }
+    $serverLauncher = ConvertTo-LauncherArgument -Value $serverTarget
+    $runtimeFolderLauncher = ConvertTo-LauncherArgument -Value (Split-Path -Parent $serverTarget)
+
     $start = @"
 @echo off
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
 $gameWatchLine
 pushd "%~dp0"
-"%~dp0current\llama-server.exe" ^
+"$serverLauncher" ^
 $argumentBlock
 set "LLAMA_EXIT=%ERRORLEVEL%"
 popd
@@ -2474,8 +2695,8 @@ pause
 
     $devices = @"
 @echo off
-pushd "%~dp0current"
-"%~dp0current\llama-server.exe" --list-devices
+pushd "$runtimeFolderLauncher"
+"$serverLauncher" --list-devices
 echo.
 echo Add --device DEVICE --split-mode none to select one GPU.
 pause
@@ -2576,11 +2797,11 @@ param([switch] $Force)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$current = Join-Path $root 'current'
+$rootPrefix = $root.TrimEnd('\') + '\'
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not [string]::IsNullOrWhiteSpace($userPath)) {
     $kept = @($userPath -split ';' | Where-Object {
-        -not [string]::IsNullOrWhiteSpace($_) -and $_.Trim().TrimEnd('\') -ine $current.Trim().TrimEnd('\')
+        -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimEnd('\').StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
     })
     [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
 }
@@ -2643,10 +2864,155 @@ function Set-ActiveModel {
     New-Launchers -ActiveModel $state -EffectiveContext $EffectiveContext
 }
 
+# ---- Side-by-side runtimes -------------------------------------------------------
+# Every downloaded build lives under <install root>\runtimes\<backend>\<tag>\. Settings
+# key active_runtime names the one in use, so Vulkan and ROCm can be installed side by
+# side and switched without downloading again. Legacy installs that still have current\
+# are migrated by Initialize-RuntimeLayout (a move, never a re-download).
+
+function Get-RuntimesRoot {
+    return (Join-Path $InstallRoot 'runtimes')
+}
+
+function Get-RuntimeFolderName {
+    # Relative folder for one build. The tag is sanitised because it comes from a
+    # release name; the backend decides the first level.
+    param([string] $Backend, [string] $Tag)
+    $family = switch ($Backend) {
+        'Vulkan' { 'vulkan' }
+        'ROCm' { 'rocm' }
+        'ROCmLatest' { 'rocm' }
+        default { 'unknown' }
+    }
+    $safeTag = ([string]$Tag) -replace '[^A-Za-z0-9._-]', '_'
+    if ([string]::IsNullOrWhiteSpace($safeTag)) { $safeTag = 'build' }
+    return "$family/$safeTag"
+}
+
+function Get-BackendFamily {
+    param([string] $Backend)
+    if ($Backend -in @('ROCm', 'ROCmLatest')) { return 'rocm' }
+    if ($Backend -eq 'Vulkan') { return 'vulkan' }
+    return ([string]$Backend).ToLowerInvariant()
+}
+
+function Get-RuntimeInstallations {
+    # Every installed build, newest folder order irrelevant: callers pick by backend/tag.
+    $items = @()
+    $root = Get-RuntimesRoot
+    if (Test-Path -LiteralPath $root -PathType Container) {
+        foreach ($backendDir in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($buildDir in @(Get-ChildItem -LiteralPath $backendDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                $manifestPath = Join-Path $buildDir.FullName 'installation.json'
+                if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { continue }
+                $installation = $null
+                try { $installation = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { continue }
+                $items += [pscustomobject]@{
+                    path = $buildDir.FullName
+                    relative_path = Get-InstallRelativePath -Path $buildDir.FullName
+                    backend = [string]$installation.backend
+                    tag = [string]$installation.tag
+                    installation = $installation
+                    exe_present = Test-Path -LiteralPath (Join-Path $buildDir.FullName 'llama-server.exe') -PathType Leaf
+                }
+            }
+        }
+    }
+    # Legacy current\ stays visible to readers until migration moves it.
+    $legacy = Join-Path $InstallRoot 'current'
+    $legacyManifest = Join-Path $legacy 'installation.json'
+    if (Test-Path -LiteralPath $legacyManifest -PathType Leaf) {
+        $installation = $null
+        try { $installation = Get-Content -LiteralPath $legacyManifest -Raw | ConvertFrom-Json } catch { $installation = $null }
+        if ($null -ne $installation) {
+            $items += [pscustomobject]@{
+                path = $legacy
+                relative_path = 'current'
+                backend = [string]$installation.backend
+                tag = [string]$installation.tag
+                installation = $installation
+                exe_present = Test-Path -LiteralPath (Join-Path $legacy 'llama-server.exe') -PathType Leaf
+            }
+        }
+    }
+    return @($items)
+}
+
+function Get-ActiveRuntimePath {
+    # Settings choose the active build. A legacy current\ is still honoured so an old
+    # install keeps working until the next install/start migrates it.
+    $settings = Get-AppSettings
+    if ($settings.ContainsKey('active_runtime')) {
+        $relative = ([string]$settings['active_runtime']).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($relative)) {
+            $candidate = Join-Path $InstallRoot ($relative -replace '/', '\')
+            if (Test-Path -LiteralPath (Join-Path $candidate 'installation.json') -PathType Leaf) { return $candidate }
+        }
+    }
+    $legacy = Join-Path $InstallRoot 'current'
+    if (Test-Path -LiteralPath (Join-Path $legacy 'installation.json') -PathType Leaf) { return $legacy }
+    $installs = @(Get-RuntimeInstallations | Where-Object { $_.relative_path -ne 'current' })
+    if ($installs.Count -eq 1) { return [string]$installs[0].path }
+    return $null
+}
+
+function Set-ActiveRuntime {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    Set-AppSetting -Name 'active_runtime' -Value (Get-InstallRelativePath -Path $Path)
+}
+
+function Initialize-RuntimeLayout {
+    # One-way, no-download migration of current\ into runtimes\<backend>\<tag>\. Safe to
+    # call repeatedly; a move on the same volume keeps every file and hash intact.
+    $legacy = Join-Path $InstallRoot 'current'
+    $legacyManifest = Join-Path $legacy 'installation.json'
+    if (-not (Test-Path -LiteralPath $legacyManifest -PathType Leaf)) { return (Get-ActiveRuntimePath) }
+    $installation = $null
+    try { $installation = Get-Content -LiteralPath $legacyManifest -Raw | ConvertFrom-Json } catch { return $null }
+    if ($null -eq $installation) { return $null }
+    $relative = Get-RuntimeFolderName -Backend ([string]$installation.backend) -Tag ([string]$installation.tag)
+    $target = Join-Path (Get-RuntimesRoot) ($relative -replace '/', '\')
+    if (-not (Test-Path -LiteralPath $target)) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        try {
+            Move-Item -LiteralPath $legacy -Destination $target
+        } catch {
+            # A running server or another program holds the folder: keep using the legacy
+            # location rather than leaving an unmetadata'd half-move behind.
+            Set-ActiveRuntime -Path $legacy
+            return $legacy
+        }
+    }
+    Set-ActiveRuntime -Path $target
+    return $target
+}
+
+function Get-RuntimeExecutablePath {
+    $runtimePath = Get-ActiveRuntimePath
+    if (-not [string]::IsNullOrWhiteSpace($runtimePath)) { return (Join-Path $runtimePath 'llama-server.exe') }
+    # Legacy fallback only: current\ is used until the next install/start migrates it.
+    return (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')
+}
+
 function Get-InstalledRuntime {
-    $path = Join-Path $InstallRoot 'current\installation.json'
+    $runtimePath = Get-ActiveRuntimePath
+    if ([string]::IsNullOrWhiteSpace($runtimePath)) { return $null }
+    $path = Join-Path $runtimePath 'installation.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
-    try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+    try {
+        $runtime = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $runtime | Add-Member -NotePropertyName 'path' -NotePropertyValue $runtimePath -Force
+        $runtime | Add-Member -NotePropertyName 'relative_path' -NotePropertyValue (Get-InstallRelativePath -Path $runtimePath) -Force
+        if (@($runtime.PSObject.Properties.Name) -notcontains 'sha256_source') {
+            # Old installations omit sha256 entirely; under StrictMode a direct read throws,
+            # which used to make this function return null for a perfectly good runtime.
+            $savedSha = if (@($runtime.PSObject.Properties.Name) -contains 'sha256') { [string]$runtime.sha256 } else { '' }
+            $source = if ([string]::IsNullOrWhiteSpace($savedSha)) { '' } else { 'local' }
+            $runtime | Add-Member -NotePropertyName 'sha256_source' -NotePropertyValue $source -Force
+        }
+        return $runtime
+    } catch { return $null }
 }
 
 function Get-ModelRuntimeBlocker {
@@ -2812,6 +3178,9 @@ function Switch-InstalledModel {
     if ($context -eq 0) { $context = Get-SuggestedContext -Model $Model -Hardware $Hardware }
     Set-ActiveModel -Model $Model -EffectiveContext $context
     Write-Success "$($Model.Name) is now the active model (context $context)."
+    $selection = Select-RuntimeForActiveModel -Hardware $Hardware
+    if ($selection.status -eq 'switched') { Write-Info $selection.message }
+    elseif ($selection.status -eq 'backend_not_installed') { Write-WarnLine $selection.message }
     Sync-VsCodeChatEndpoint
 }
 
@@ -2823,6 +3192,151 @@ function Resolve-BackendChoice {
     if ($null -ne $Runtime -and @('ROCm', 'ROCmLatest', 'Vulkan') -contains [string]$Runtime.backend) { return [string]$Runtime.backend }
     if ($Hardware.RocmRecommended) { return 'ROCm' }
     return 'Vulkan'
+}
+
+# ---- Per-model backend preference ------------------------------------------------
+# The choice is a preference, not a lock: a user override always wins, and the default
+# only says which installed runtime this model should use. Router mode still runs one
+# runtime at a time, so starting a model that prefers the other backend stops our
+# server, selects the other runtime, and starts again under it.
+
+function Get-ModelBackendMap {
+    $settings = Get-AppSettings
+    $map = @{}
+    if (-not $settings.ContainsKey('model_backends')) { return $map }
+    $value = $settings['model_backends']
+    if ($null -eq $value) { return $map }
+    if ($value -is [System.Collections.IDictionary]) {
+        foreach ($key in $value.Keys) { $map[[string]$key] = [string]$value[$key] }
+        return $map
+    }
+    foreach ($property in $value.PSObject.Properties) { $map[[string]$property.Name] = [string]$property.Value }
+    return $map
+}
+
+function Get-ModelBackendOverride {
+    param([string] $ModelId)
+    $map = Get-ModelBackendMap
+    if ($map.ContainsKey($ModelId)) { return [string]$map[$ModelId] }
+    return ''
+}
+
+function Set-ModelBackendOverride {
+    param([string] $ModelId, [string] $Backend)
+    $map = Get-ModelBackendMap
+    if ([string]::IsNullOrWhiteSpace($Backend) -or $Backend -eq 'Auto') { [void]$map.Remove($ModelId) }
+    else { $map[$ModelId] = $Backend }
+    Set-AppSetting -Name 'model_backends' -Value ([pscustomobject]$map)
+}
+
+function Get-DefaultModelBackend {
+    # Policy from the Phase 1 plan, not a measured speed claim: Vulkan for small,
+    # 7B-14B and mixture-of-experts models; ROCm for dense models at 18 GiB and up.
+    param($Model, $Hardware)
+    $supportsRocm = ($null -ne $Hardware) -and (@($Hardware.PSObject.Properties.Name) -contains 'RocmRecommended') -and [bool]$Hardware.RocmRecommended
+    $isMoe = (@($Model.PSObject.Properties.Name) -contains 'Moe') -and [bool]$Model.Moe
+    $gib = [double]$Model.ApproxGiB
+    if (-not $supportsRocm) {
+        return [pscustomobject]@{ backend = 'Vulkan'; reason = 'ROCm is not recommended for this GPU, so Vulkan is the default.' }
+    }
+    if ($isMoe) {
+        return [pscustomobject]@{ backend = 'Vulkan'; reason = 'Mixture-of-experts models use Vulkan by default on this PC.' }
+    }
+    if ($gib -ge 18.0) {
+        return [pscustomobject]@{ backend = 'ROCm'; reason = 'Dense models at 18 GiB or more use ROCm by default on this Radeon.' }
+    }
+    if ($gib -ge 7.0) {
+        return [pscustomobject]@{ backend = 'Vulkan'; reason = '7B-14B models use Vulkan by default on this PC.' }
+    }
+    return [pscustomobject]@{ backend = 'Vulkan'; reason = 'Models below 7 GiB use Vulkan by default on this PC.' }
+}
+
+function Get-ModelBackendPreference {
+    param($Model, $Hardware)
+    $override = Get-ModelBackendOverride -ModelId ([string]$Model.Id)
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        return [pscustomobject]@{ backend = $override; source = 'user'; reason = "You chose $override for this model." }
+    }
+    $default = Get-DefaultModelBackend -Model $Model -Hardware $Hardware
+    return [pscustomobject]@{ backend = [string]$default.backend; source = 'default'; reason = [string]$default.reason }
+}
+
+function Get-RuntimeForBackend {
+    param([string] $Backend)
+    $wanted = Get-BackendFamily -Backend $Backend
+    $installs = @(Get-RuntimeInstallations | Where-Object { $_.exe_present -and (Get-BackendFamily -Backend $_.backend) -eq $wanted })
+    if ($installs.Count -eq 0) { return $null }
+    $activePath = Get-ActiveRuntimePath
+    if (-not [string]::IsNullOrWhiteSpace($activePath)) {
+        $activeMatch = @($installs | Where-Object { $_.path -ieq $activePath }) | Select-Object -First 1
+        if ($null -ne $activeMatch) { return $activeMatch }
+    }
+    # Prefer the AMD-validated tag for ROCm; otherwise keep the first installed build.
+    try {
+        $amdTag = [string](Get-CatalogJson -Name 'runtimes.json').amd_rocm_package.tag
+        $amdMatch = @($installs | Where-Object { $_.tag -eq $amdTag }) | Select-Object -First 1
+        if ($null -ne $amdMatch) { return $amdMatch }
+    } catch { }
+    return ($installs | Select-Object -First 1)
+}
+
+function Stop-OwnedLlamaServer {
+    # Only processes whose executable lives under this install root. A llama-server the
+    # user started from somewhere else is never touched by a backend switch.
+    $stopped = @()
+    $rootPrefix = ([string]$InstallRoot).TrimEnd('\') + '\'
+    foreach ($serverProcess in @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)) {
+        $executablePath = ''
+        try { $executablePath = [string]$serverProcess.Path } catch { $executablePath = '' }
+        if ([string]::IsNullOrWhiteSpace($executablePath)) {
+            try { $executablePath = [string](Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($serverProcess.Id)" -ErrorAction Stop).ExecutablePath } catch { $executablePath = '' }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($executablePath) -and $executablePath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+            $stopped += $serverProcess.Id
+        }
+    }
+    if ($stopped.Count -gt 0) { Start-Sleep -Milliseconds 900 }
+    return @($stopped)
+}
+
+function Select-RuntimeForActiveModel {
+    param($Hardware, [switch] $AllowStop)
+    $active = Get-ActiveModel
+    if ($null -eq $active) { return [pscustomobject]@{ status = 'no_model'; changed = $false; message = '' } }
+    $model = $null
+    try { $model = Get-ModelById -Id ([string]$active.id) } catch { $model = $null }
+    if ($null -eq $model) { return [pscustomobject]@{ status = 'unknown_model'; changed = $false; message = 'The active model is not in the catalogue.' } }
+    $preference = Get-ModelBackendPreference -Model $model -Hardware $Hardware
+    $current = Get-InstalledRuntime
+    if ($null -eq $current) {
+        return [pscustomobject]@{ status = 'not_installed'; changed = $false; message = 'No llama.cpp runtime is installed.'; preferred_backend = $preference.backend }
+    }
+    if ((Get-BackendFamily -Backend $current.backend) -eq (Get-BackendFamily -Backend $preference.backend)) {
+        return [pscustomobject]@{ status = 'current'; changed = $false; message = ''; preferred_backend = $preference.backend; backend = $current.backend }
+    }
+    $target = Get-RuntimeForBackend -Backend $preference.backend
+    if ($null -eq $target) {
+        return [pscustomobject]@{
+            status = 'backend_not_installed'; changed = $false; preferred_backend = $preference.backend
+            message = "This model prefers the $($preference.backend) backend, but no $($preference.backend) runtime is installed. Install it from Install/update with Backend $($preference.backend); it will sit beside the current runtime."
+        }
+    }
+    if (-not $AllowStop -and @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue).Count -gt 0) {
+        return [pscustomobject]@{ status = 'switch_deferred'; changed = $false; preferred_backend = $preference.backend; target = $target.path; message = "A server is running; the switch to $($preference.backend) waits for the next start." }
+    }
+    if ($AllowStop) {
+        [void](Stop-OwnedLlamaServer)
+        if (@(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue).Count -gt 0) {
+            return [pscustomobject]@{ status = 'server_running'; changed = $false; preferred_backend = $preference.backend; target = $target.path; message = 'A llama-server process that this tool does not own is still running, so the runtime was not switched.' }
+        }
+    }
+    $fromBackend = [string]$current.backend
+    Set-ActiveRuntime -Path ([string]$target.path)
+    New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
+    $message = "Switching to $($preference.backend) for this model (was $fromBackend): $($target.tag)."
+    Write-RunLogEvent -Event 'runtime_switch' -Message $message -Data @{ model_id = [string]$model.Id; from = $fromBackend; to = $preference.backend; tag = [string]$target.tag }
+    return [pscustomobject]@{ status = 'switched'; changed = $true; from_backend = $fromBackend; to_backend = $preference.backend; tag = [string]$target.tag; target = [string]$target.path; message = $message }
 }
 
 function Install-Model {
@@ -2941,7 +3455,7 @@ function Write-NativeCommandOutput {
 }
 
 function Test-LlamaCppRuntime {
-    $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $server = Get-RuntimeExecutablePath
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) { return $false }
     Push-Location (Split-Path -Parent $server)
     try {
@@ -2971,11 +3485,24 @@ function Show-Diagnostics {
     Write-Host "  PowerShell: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
     Write-Host "  Vulkan loader (for Vulkan backend): $($Hardware.VulkanLoader)" -ForegroundColor $(if ($Hardware.VulkanLoader) { 'Green' } else { 'Yellow' })
     Write-Host "  Install root: $InstallRoot" -ForegroundColor Gray
+    $driver = Get-GpuDriverInfo
+    if ($null -ne $driver) { Write-Host "  AMD driver: $($driver.version) ($($driver.date)) - $($driver.name)" -ForegroundColor Gray }
+    foreach ($install in @(Get-RuntimeInstallations)) {
+        $dependency = Get-RuntimeDependencyReport -Path ([string]$install.path) -Backend ([string]$install.backend)
+        Write-Host "  Runtime $($install.backend) $($install.tag): $($install.path)" -ForegroundColor Gray
+        if ($dependency.status -eq 'ok') {
+            Write-Success '    all required files are present.'
+        } else {
+            Write-WarnLine "    missing: $(@($dependency.missing_files) -join ', ')"
+            if (-not [string]::IsNullOrWhiteSpace($dependency.where_to_get)) { Write-Info "    $($dependency.where_to_get)" }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$dependency.driver_requirement)) { Write-Info "    $($dependency.driver_requirement)" }
+    }
     $freshness = Get-RocmPackageFreshness
     if ($freshness.Stale) {
         Write-WarnLine "The pinned ROCm package was last hand-checked $($freshness.AgeDays) days ago ($($freshness.CheckedOn.ToString('yyyy-MM-dd'))). Check $script:AmdRocmPage for a newer validated Windows package."
     }
-    $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $server = Get-RuntimeExecutablePath
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
         Write-WarnLine 'llama.cpp is not installed yet. Choose Install/update from the dashboard.'
         return
@@ -3008,22 +3535,48 @@ function Show-Diagnostics {
 function Get-PortListener {
     # Who is listening on this port, if anyone. Strictly read-only: it looks at the
     # socket table and the owning process, and never sends a signal of any kind.
+    #
+    # Do not filter on -State: on this project's RX 9070 XT machine Get-NetTCPConnection
+    # returns a live loopback listener with an EMPTY State, so a -State Listen filter
+    # found nothing and a busy port was reported as free (measured, 2026-11-05). Two
+    # independent views are used instead: GetActiveTcpListeners confirms the port is
+    # listening, then a port-only lookup supplies the owner PID. A port-only row with
+    # RemotePort 0 is also a listener when the first view misses it.
     param([int] $Port)
-    $connection = $null
+    $listening = $false
     try {
-        $connection = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop) | Select-Object -First 1
-    } catch {
-        $connection = $null
+        $listening = @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { [int]$_.Port -eq $Port }).Count -gt 0
+    } catch { $listening = $false }
+
+    $rows = @()
+    try { $rows = @(Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop) } catch { $rows = @() }
+    if (-not $listening) {
+        foreach ($row in $rows) {
+            $stateText = [string]$row.State
+            if ($stateText -eq 'Listen' -or ([string]::IsNullOrWhiteSpace($stateText) -and [int]$row.RemotePort -eq 0)) {
+                $listening = $true
+                break
+            }
+        }
     }
-    if ($null -eq $connection) { return $null }
-    $owner = [int]$connection.OwningProcess
+    if (-not $listening) { return $null }
+
+    $connection = $rows | Select-Object -First 1
+    $owner = 0
+    if ($null -ne $connection) {
+        $candidate = [int]$connection.OwningProcess
+        if ($candidate -gt 0) { $owner = $candidate }
+    }
     $name = ''
-    try { $name = [string](Get-Process -Id $owner -ErrorAction Stop).ProcessName } catch { $name = 'unknown' }
+    if ($owner -gt 0) {
+        try { $name = [string](Get-Process -Id $owner -ErrorAction Stop).ProcessName } catch { $name = 'unknown' }
+    }
     return [pscustomobject]@{
         port = $Port
         process_id = $owner
         process_name = $name
-        local_address = [string]$connection.LocalAddress
+        local_address = if ($null -ne $connection) { [string]$connection.LocalAddress } else { '' }
+        owner_known = ($owner -gt 0)
     }
 }
 
@@ -3046,9 +3599,10 @@ function Resolve-PortConflict {
             message = "llama-server (PID $($listener.process_id)) is already listening on port $Port."
         }
     }
+    $ownerText = if ([bool]$listener.owner_known) { "$($listener.process_name) (PID $($listener.process_id))" } else { 'another program (the owner could not be identified)' }
     return [pscustomobject]@{
         status = 'conflict'; port = $Port; process_id = $listener.process_id; process_name = $listener.process_name
-        message = "Port $Port is already in use by $($listener.process_name) (PID $($listener.process_id)), which this tool does not own. Close that program, or start this one with a different -Port. Nothing was killed and no other port is tried automatically."
+        message = "Port $Port is already in use by $ownerText, which this tool does not own. Close that program, or start this one with a different -Port. Nothing was killed and no other port is tried automatically."
     }
 }
 
@@ -3065,7 +3619,11 @@ function Assert-PortAvailableForStart {
 
 function Start-ActiveServer {
     param($Hardware)
-    $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    if ($null -eq $Hardware) { $Hardware = Get-HardwareProfile }
+    $selection = Select-RuntimeForActiveModel -Hardware $Hardware
+    if ($selection.status -eq 'backend_not_installed') { throw $selection.message }
+    if ($selection.status -eq 'server_running') { throw $selection.message }
+    $server = Get-RuntimeExecutablePath
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) { throw 'llama.cpp is not installed. Run the installer first.' }
     $active = Get-ActiveModel
     if ($null -eq $active) { throw 'No model is active. Use the model browser to install and activate one.' }
@@ -3202,7 +3760,10 @@ function Get-CoreApplicationState {
             tag = [string](Get-StateProperty -Object $runtime -Name 'tag')
             backend = [string](Get-StateProperty -Object $runtime -Name 'backend')
             installed_at = [string](Get-StateProperty -Object $runtime -Name 'installed_at')
-            exe_present = Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe') -PathType Leaf
+            path = [string](Get-StateProperty -Object $runtime -Name 'path' -Default '')
+            sha256 = [string](Get-StateProperty -Object $runtime -Name 'sha256' -Default '')
+            sha256_source = [string](Get-StateProperty -Object $runtime -Name 'sha256_source' -Default '')
+            exe_present = Test-Path -LiteralPath (Get-RuntimeExecutablePath) -PathType Leaf
         }
     }
 
@@ -3368,7 +3929,7 @@ function Get-IdleSleepSeconds {
 
 function Test-LlamaServerSupports {
     param([string] $Flag)
-    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $exe = Get-RuntimeExecutablePath
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return $false }
     $previous = $ErrorActionPreference
     $text = ''
@@ -3393,7 +3954,7 @@ function Set-IdleSleep {
     }
     Set-AppSetting -Name 'idle_sleep_minutes' -Value $Minutes
     $active = Get-ActiveModel
-    if ($null -ne $active -and (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe') -PathType Leaf)) {
+    if ($null -ne $active -and (Test-Path -LiteralPath (Get-RuntimeExecutablePath) -PathType Leaf)) {
         New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
     }
     if ($Minutes -gt 0) {
@@ -3419,7 +3980,7 @@ function Set-GamePause {
     }
     Set-AppSetting -Name 'game_pause_gib' -Value $Gib
     $active = Get-ActiveModel
-    if ($null -ne $active -and (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe') -PathType Leaf)) {
+    if ($null -ne $active -and (Test-Path -LiteralPath (Get-RuntimeExecutablePath) -PathType Leaf)) {
         New-Launchers -ActiveModel $active -EffectiveContext ([int]$active.context_size)
     }
     if ($Gib -gt 0) {
@@ -3546,7 +4107,7 @@ function Invoke-EasyStart {
     param($Hardware)
     # One guided path: set up whatever is missing after a single YES, then the menu starts
     # the AI and opens the chat. Returns $false when the user cancelled.
-    $server = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $server = Get-RuntimeExecutablePath
     $active = Get-ActiveModel
     $needsRuntime = -not (Test-Path -LiteralPath $server -PathType Leaf)
     $needsModel = ($null -eq $active) -or -not (Test-Path -LiteralPath ([string]$active.model_path) -PathType Leaf)
@@ -3841,6 +4402,8 @@ function Remove-Installation {
     Remove-LlamaVscodeSettings
     [void](Remove-DesktopShortcuts)
     Remove-UserPathEntry -Directory (Join-Path $InstallRoot 'current')
+    $activePath = Get-ActiveRuntimePath
+    if (-not [string]::IsNullOrWhiteSpace($activePath)) { Remove-UserPathEntry -Directory $activePath }
     if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force }
     Write-Success 'llama.cpp, downloaded models, launchers, and the user PATH entry were removed.'
 }
@@ -4258,7 +4821,8 @@ function Show-LiveMonitor {
         if ($null -ne $process) { Write-Host ('  Process ID      {0}  (started {1:g})' -f $process.Id, $process.StartTime) -ForegroundColor Gray }
         # Report the installed build only. Whether layers actually landed on the GPU is
         # in the server window's load log; the HTTP API does not expose it.
-        $installInfo = Join-Path $InstallRoot 'current\installation.json'
+        $runtimePath = Get-ActiveRuntimePath
+        $installInfo = if (-not [string]::IsNullOrWhiteSpace($runtimePath)) { Join-Path $runtimePath 'installation.json' } else { Join-Path $InstallRoot 'current\installation.json' }
         $backendText = 'unknown'
         if (Test-Path -LiteralPath $installInfo -PathType Leaf) {
             try { $info = Get-Content -LiteralPath $installInfo -Raw | ConvertFrom-Json; $backendText = "$($info.backend) build $($info.tag)" } catch { }
@@ -4662,7 +5226,7 @@ function Get-GuiState {
     # Everything the window shows, gathered into one object so the display code is pure.
     # Reads the core state directly (ADR-003) - no more splitting the status line.
     $core = Get-CoreApplicationState
-    $exe = Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'
+    $exe = Get-RuntimeExecutablePath
     $hasModel = ($null -ne $core.model)
     $mode = 'off'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or -not $hasModel) { $mode = 'setup' }
@@ -5023,7 +5587,7 @@ function Show-Dashboard {
         $backendLabel = if ($null -ne $runtime) { "$(if ([string]$runtime.backend -eq 'ROCmLatest') { 'llama.cpp ROCm' } else { $runtime.backend }) $($runtime.tag)" } elseif ($Backend -eq 'Auto') { if ($hardware.RocmRecommended) { 'AMD ROCm 7.2.1' } else { 'Vulkan' } } else { $Backend }
         $assessment = @(Get-ModelAssessment -Hardware $hardware | Where-Object { $_.Model.Id -eq $recommended.Id } | Select-Object -First 1)
         $active = Get-ActiveModel
-        $installed = Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')
+        $installed = Test-Path -LiteralPath (Get-RuntimeExecutablePath)
         $ramBar = Get-MemoryBar -Value $hardware.RamGiB -Maximum 96
         $vramBar = Get-MemoryBar -Value $hardware.MaxAmdVramGiB -Maximum 32
         $budgetBar = Get-MemoryBar -Value $hardware.ModelBudgetGiB -Maximum 32
@@ -5082,7 +5646,7 @@ function Show-Dashboard {
         try {
             switch ($choice) {
                 '1' {
-                    if (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe')) {
+                    if (Test-Path -LiteralPath (Get-RuntimeExecutablePath)) {
                         Write-Info 'llama.cpp is already installed, so setup goes straight to the model. Use [5] to update llama.cpp.'
                         $tag = 'installed'
                     } else {
@@ -5100,7 +5664,7 @@ function Show-Dashboard {
                     $selected = Select-ModelInteractively -Hardware $hardware
                     if ($null -ne $selected) {
                         $ready = $true
-                        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'))) {
+                        if (-not (Test-Path -LiteralPath (Get-RuntimeExecutablePath))) {
                             $ready = $null -ne (Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend)
                         }
                         if (-not $ready) {
@@ -5205,6 +5769,8 @@ function Get-SettingsDocument {
             min = 4
             max = 40
         }
+        active_runtime = if ($null -ne (Get-InstalledRuntime)) { [pscustomobject]@{ backend = [string](Get-InstalledRuntime).backend; tag = [string](Get-InstalledRuntime).tag; path = [string](Get-InstalledRuntime).path } } else { $null }
+        model_backends = Get-ModelBackendMap
     }
 }
 
@@ -5285,6 +5851,30 @@ function Set-SettingsFromDocument {
             $result['rejected'] += @([pscustomobject]@{ field = 'game_pause.gib'; reason = 'The installed llama.cpp is too old for game pause (it needs router mode). Update llama.cpp first.' })
         }
     }
+    # Optional: per-model backend preferences. Auto clears the override; anything else
+    # is a preference the start path may switch to, never a forced lock.
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'model_backends') {
+        $map = $parsed.model_backends
+        if ($null -eq $map) {
+            $result['rejected'] += @([pscustomobject]@{ field = 'model_backends'; reason = 'model_backends must be an object of model id to Auto, Vulkan or ROCm.' })
+        } else {
+            foreach ($property in $map.PSObject.Properties) {
+                $modelId = [string]$property.Name
+                $requested = [string]$property.Value
+                $known = @(Get-ModelCatalog | Where-Object { $_.Id -eq $modelId }).Count -gt 0
+                if (-not $known) {
+                    $result['rejected'] += @([pscustomobject]@{ field = "model_backends.$modelId"; reason = 'Unknown model id.' })
+                    continue
+                }
+                if (@('Auto', 'Vulkan', 'ROCm') -notcontains $requested) {
+                    $result['rejected'] += @([pscustomobject]@{ field = "model_backends.$modelId"; reason = 'Backend must be Auto, Vulkan or ROCm.' })
+                    continue
+                }
+                Set-ModelBackendOverride -ModelId $modelId -Backend $requested
+                $result['applied'] += @([pscustomobject]@{ field = "model_backends.$modelId"; value = $requested; note = 'set'; triple = $null })
+            }
+        }
+    }
     $result['settings'] = Get-SettingsDocument
     return [pscustomobject]$result
 }
@@ -5310,6 +5900,7 @@ function Get-LibraryDocument {
         if ($null -ne $hardware) {
             $assessment = @(Get-ModelAssessment -Hardware $hardware | Where-Object { $_.Model.Id -eq $model.Id } | Select-Object -First 1)
         }
+        $preference = Get-ModelBackendPreference -Model $model -Hardware $hardware
         $models += [pscustomobject]@{
             id = [string]$model.Id
             name = [string]$model.Name
@@ -5323,6 +5914,10 @@ function Get-LibraryDocument {
             runtime_blocker = $blocker
             fit_status = if ($null -ne $assessment) { [string]$assessment[0].Status } else { '' }
             gpu_resident = ($null -ne $assessment -and [bool]$assessment[0].GpuResident)
+            preferred_backend = [string]$preference.backend
+            backend_source = [string]$preference.source
+            backend_reason = [string]$preference.reason
+            backend_override = Get-ModelBackendOverride -ModelId ([string]$model.Id)
         }
     }
     return [pscustomobject]@{
@@ -5331,6 +5926,7 @@ function Get-LibraryDocument {
         command_center_version = [string]$script:CommandCenterVersion
         install_root = [string]$InstallRoot
         active_model_id = $activeId
+        active_backend = if ($null -ne $runtime) { [string]$runtime.backend } else { '' }
         models = $models
         unlocked_models = Get-RuntimeUpdateUnlock -Runtime $runtime
         hardware_error = $hardwareError
@@ -5645,7 +6241,7 @@ try {
         'Models' {
             $model = if ($ModelId -ieq 'auto') { Select-ModelInteractively -Hardware $hardware } else { Get-ModelById -Id $ModelId }
             if ($null -ne $model) {
-                if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe'))) {
+                if (-not (Test-Path -LiteralPath (Get-RuntimeExecutablePath))) {
                     if ($null -eq (Ensure-LlamaCppInstalled -Hardware $hardware -RequestedBackend $Backend)) {
                         Complete-RunLogging -Status 'cancelled'
                         exit 2

@@ -12,6 +12,17 @@
     "checked_on": "2026-10-08",
     "freshness_days": 120
   },
+  "ggml_org_rocm_windows": {
+    "rocm_version": "10.0",
+    "bundled_dlls": ["ggml-hip.dll", "amdhip64_7.dll", "rocm_kpack.dll", "amd_comgr.dll"],
+    "required_external_dlls": ["hipblas.dll", "rocblas.dll", "rocsolver.dll"],
+    "runtime_page": "https://rocm.docs.amd.com/projects/install-on-windows/en/latest/",
+    "min_adrenalin": "26.8.1",
+    "min_adrenalin_source": "https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html",
+    "verified_on": "2026-11-05",
+    "verified_against": "https://github.com/ggml-org/llama.cpp/pull/26973 and https://github.com/ggml-org/llama.cpp/discussions/27047",
+    "notes": "The ggml-org Windows ROCm 10.0 ZIP bundles only ggml-hip.dll, amdhip64_7.dll, rocm_kpack.dll and amd_comgr.dll. hipblas/rocblas/rocsolver and the kernel folders come from a separately installed ROCm runtime. The Adrenalin figure is AMD's ROCm 10.0 matrix for RX 9000; llama.cpp's own release notes do not state a driver minimum."
+  },
   "adapters": [
     {
       "id": "llamacpp",

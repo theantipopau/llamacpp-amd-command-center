@@ -80,10 +80,18 @@ try {
     }
     Assert-True ($badCalls.Count -eq 0) "every named parameter exists$(if ($badCalls.Count) { ': ' + ($badCalls -join ', ') })"
 
+    Write-Host 'GPU architecture overrides'
+    # gfx1200/gfx1201 are native in ROCm 7.2+ and in llama.cpp's ROCm builds. Setting
+    # HSA_OVERRIDE_GFX_VERSION for them is never correct, so any assignment is a regression.
+    $sourceText = Get-Content -LiteralPath $scriptPath -Raw
+    $hsaAssignments = @([regex]::Matches($sourceText, '(?im)(\$env:HSA_OVERRIDE_GFX_VERSION\s*=|set\s+"?HSA_OVERRIDE_GFX_VERSION\s*=)'))
+    Assert-True ($hsaAssignments.Count -eq 0) 'HSA_OVERRIDE_GFX_VERSION is never assigned (gfx1200/gfx1201 are native)'
+
     Write-Host 'Launcher generation (every catalog model)'
     foreach ($model in Get-ModelCatalog) {
         Set-ActiveModel -Model $model -EffectiveContext 32768 -SkipVerification
         $launcher = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
+        Assert-True ($launcher -notmatch 'HSA_OVERRIDE_GFX_VERSION') "$($model.Id): the generated launcher never sets HSA_OVERRIDE_GFX_VERSION"
         $block = [regex]::Match($launcher, '(?s)llama-server\.exe"? \^\r?\n(.*?)\r?\nset "LLAMA_EXIT').Groups[1].Value
         $lines = @($block -split '\r?\n')
         $blank = @($lines | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count
@@ -821,7 +829,7 @@ try {
     $llamaHealth = Get-RuntimeHealth -AdapterId 'llamacpp'
     Assert-True ((@('stopped', 'loading', 'running') -contains $llamaHealth.state) -and ($llamaHealth.confidence -eq 'high')) 'llama.cpp health is a live, direct probe'
     $failedStart = Start-Runtime -AdapterId 'llamacpp' -Hardware $hw16u
-    Assert-True ((@('failed', 'already_running') -contains $failedStart.status) -and (-not [string]::IsNullOrWhiteSpace([string]$failedStart.detail))) 'starting against this temp install fails typed, without launching anything'
+    Assert-True ((@('failed', 'already_running', 'backend_not_installed') -contains $failedStart.status) -and (-not [string]::IsNullOrWhiteSpace([string]$failedStart.detail))) "starting against this temp install fails typed, without launching anything (got $($failedStart.status): $($failedStart.detail))"
 
     Write-Host 'Diagnostics: one typed document (ADR-005)'
     $diag = Get-DiagnosticReport
@@ -1273,6 +1281,30 @@ try {
             $squatter.Stop()
             $Port = $previousPort
         }
+
+        # Regression: a listener owned by a SEPARATE process. The old -State Listen filter
+        # missed exactly this on the target machine (the row's State came back empty), so
+        # the owner and the port were both lost. This exercises the real detection path.
+        $probePort = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+        $probePort.Start()
+        $childPort = ([System.Net.IPEndPoint]$probePort.LocalEndpoint).Port
+        $probePort.Stop()
+        $childScript = "`$listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $childPort); `$listener.Start(); Start-Sleep -Seconds 30"
+        $child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', $childScript) -PassThru -WindowStyle Hidden
+        try {
+            $seen = $null
+            $waitUntil = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $waitUntil) {
+                $seen = Get-PortListener -Port $childPort
+                if ($null -ne $seen) { break }
+                Start-Sleep -Milliseconds 200
+            }
+            Assert-True (($null -ne $seen) -and ($seen.process_id -eq $child.Id)) "a listener in a separate process is seen with its real owner PID (got $(if ($null -ne $seen) { $seen.process_id } else { 'none' }), expected $($child.Id))"
+            $childConflict = Resolve-PortConflict -Port $childPort
+            Assert-True (($childConflict.status -eq 'conflict') -and ($childConflict.process_id -eq $child.Id)) 'the separate listener is a conflict, not a free port'
+        } finally {
+            Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+        }
     } finally {
         $InstallRoot = $previousInstallRoot
         Remove-Item -LiteralPath $unicodeRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -1328,6 +1360,70 @@ try {
     function Get-HardwareProfile { throw 'simulated hardware scan failure' }
     $failedState = Get-ApplicationState
     Assert-True (($null -eq $failedState.hardware) -and ($failedState.hardware_error -eq 'simulated hardware scan failure')) 'a hardware scan failure degrades to null plus hardware_error, never an exception'
+
+    Write-Host 'Side-by-side runtimes and per-model backend'
+    $layoutRoot = Join-Path $work 'layout-install'
+    $previousLayoutRoot = $InstallRoot
+    try {
+        $InstallRoot = $layoutRoot
+        $legacy = Join-Path $layoutRoot 'current'
+        New-Item -ItemType Directory -Path $legacy -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $legacy 'llama-server.exe') -Value 'stub' -Encoding ASCII
+        [ordered]@{ tag = 'rocm-7.2.1-b8407'; backend = 'ROCm'; sha256 = ''; installed_at = '2026-01-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $legacy 'installation.json') -Encoding UTF8
+        $migrated = Initialize-RuntimeLayout
+        $expected = Join-Path $layoutRoot 'runtimes\rocm\rocm-7.2.1-b8407'
+        Assert-True ($migrated -eq $expected) 'migration moves current\ to runtimes\rocm\<tag>'
+        Assert-True (-not (Test-Path -LiteralPath $legacy)) 'migration removes the legacy current\ folder'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $migrated 'llama-server.exe') -Raw).Trim() -eq 'stub') 'migration keeps existing files (no re-download)'
+        Assert-True ((Get-AppSettings)['active_runtime'] -eq 'runtimes/rocm/rocm-7.2.1-b8407') 'migration stores active_runtime in settings'
+        Assert-True ((Get-ActiveRuntimePath) -eq $migrated) 'the resolver prefers active_runtime'
+        Assert-True ((Get-InstalledRuntime).tag -eq 'rocm-7.2.1-b8407') 'the active runtime is the migrated build'
+
+        $vulkan = Join-Path $layoutRoot 'runtimes\vulkan\b9999'
+        New-Item -ItemType Directory -Path $vulkan -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $vulkan 'llama-server.exe') -Value 'stub' -Encoding ASCII
+        [ordered]@{ tag = 'b9999'; backend = 'Vulkan'; sha256 = 'abc'; installed_at = '2026-01-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $vulkan 'installation.json') -Encoding UTF8
+        Assert-True (@(Get-RuntimeInstallations).Count -eq 2) 'both runtimes are visible side by side'
+
+        $hardwareStub = [pscustomobject]@{ HasAmdGpu = $true; RocmRecommended = $true; MaxAmdVramGiB = 15.8; RamGiB = 31.2; ModelBudgetGiB = 24.8 }
+        $dense = Get-ModelById -Id 'qwen3.8-27b'
+        $small = Get-ModelById -Id 'qwen3.5-9b'
+        Assert-True ((Get-DefaultModelBackend -Model $dense -Hardware $hardwareStub).backend -eq 'ROCm') 'dense 18 GiB+ defaults to ROCm'
+        Assert-True ((Get-DefaultModelBackend -Model $small -Hardware $hardwareStub).backend -eq 'Vulkan') 'a 9B model defaults to Vulkan'
+        $moe = [pscustomobject]@{ Id = 'moe-test'; ApproxGiB = 20.0; Moe = $true }
+        Assert-True ((Get-DefaultModelBackend -Model $moe -Hardware $hardwareStub).backend -eq 'Vulkan') 'a MoE model defaults to Vulkan'
+
+        Set-ModelBackendOverride -ModelId 'qwen3.5-9b' -Backend 'ROCm'
+        $preference = Get-ModelBackendPreference -Model $small -Hardware $hardwareStub
+        Assert-True (($preference.backend -eq 'ROCm') -and ($preference.source -eq 'user')) 'a user override wins over the default'
+        $library = Get-LibraryDocument
+        $libraryModel = @($library.models | Where-Object { $_.id -eq 'qwen3.5-9b' })[0]
+        Assert-True ($libraryModel.preferred_backend -eq 'ROCm') 'Library reports the overridden backend'
+
+        $patch = '{"idle_unload":{"minutes":0},"use_case":"chat","model_backends":{"qwen3.5-9b":"Vulkan","not-a-model":"ROCm"}}'
+        $save = Set-SettingsFromDocument -SettingsPatchText $patch
+        Assert-True (@($save.rejected | Where-Object { $_.field -eq 'model_backends.not-a-model' }).Count -eq 1) 'an unknown model id is rejected'
+        Assert-True ((Get-ModelBackendPreference -Model $small -Hardware $hardwareStub).backend -eq 'Vulkan') 'a valid override is applied by the settings patch'
+
+        Assert-True ((Get-AmdRocmAsset).Release.tag_name -eq [string](Get-CatalogJson -Name 'runtimes.json').amd_rocm_package.tag) 'Get-AmdRocmAsset reads its tag from the catalogue'
+        $vulkanDependency = Get-RuntimeDependencyReport -Path $vulkan -Backend 'Vulkan' -SearchPath @()
+        Assert-True (($vulkanDependency.status -eq 'missing_files') -and (@($vulkanDependency.missing_files) -contains 'ggml-vulkan.dll')) 'Diagnose names the missing Vulkan files'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$vulkanDependency.where_to_get)) 'Diagnose says where to get the missing files'
+
+        Set-ActiveRuntime -Path $vulkan
+        $launcherModel = Get-ModelById -Id 'qwen3-4b'
+        Set-ActiveModel -Model $launcherModel -EffectiveContext 8192 -SkipVerification
+        $launcherText = Get-Content -LiteralPath (Join-Path $layoutRoot 'Start-LlamaCpp.cmd') -Raw
+        Assert-True ($launcherText -match [regex]::Escape('%~dp0runtimes\vulkan\b9999\llama-server.exe')) 'the launcher runs the active runtime'
+
+        $hashFile = Join-Path $work 'hash-probe.bin'
+        [IO.File]::WriteAllBytes($hashFile, [byte[]](1, 2, 3, 4))
+        $localHash = Get-ArchiveLocalHash -ArchivePath $hashFile
+        Assert-True ($localHash -eq (Get-FileHash -LiteralPath $hashFile -Algorithm SHA256).Hash.ToLowerInvariant()) 'the recorded local archive hash matches Get-FileHash'
+        Assert-True (Test-Path -LiteralPath "$hashFile.sha256") 'the local hash is written to a sidecar'
+    } finally {
+        $InstallRoot = $previousLayoutRoot
+    }
 
     Write-Host 'Desktop window capture gate: the screenshot is a verified artifact, not a manual step'
     # ADR-006: visual changes are checked with a screenshot of the real window. Capture
