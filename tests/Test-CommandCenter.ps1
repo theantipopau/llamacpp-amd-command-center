@@ -57,6 +57,40 @@ function Assert-True([bool] $Condition, [string] $Message) {
     if ($Condition) { Write-Host "  PASS  $Message" -ForegroundColor Green }
     else { Write-Host "  FAIL  $Message" -ForegroundColor Red; $script:failures++ }
 }
+function Write-TestGguf {
+    # Minimal GGUF v3 header with scalar metadata and no tensors: enough for the header
+    # reader and the KV formula, without shipping a multi-GB model in the harness.
+    param([string] $Path, [hashtable] $Metadata)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('GGUF'))
+        $writer.Write([uint32]3)
+        $writer.Write([uint64]0)
+        $writer.Write([uint64]$Metadata.Count)
+        foreach ($key in $Metadata.Keys) {
+            $keyBytes = [Text.Encoding]::UTF8.GetBytes([string]$key)
+            $writer.Write([uint64]$keyBytes.Length)
+            $writer.Write($keyBytes)
+            $value = $Metadata[$key]
+            if ($value -is [string]) {
+                $writer.Write([uint32]8)
+                $valueBytes = [Text.Encoding]::UTF8.GetBytes($value)
+                $writer.Write([uint64]$valueBytes.Length)
+                $writer.Write($valueBytes)
+            } elseif ($value -is [bool]) {
+                $writer.Write([uint32]7)
+                $writer.Write([bool]$value)
+            } else {
+                $writer.Write([uint32]4)
+                $writer.Write([uint32]$value)
+            }
+        }
+    } finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+}
 
 try {
     Write-Host 'Internal calls use real parameter names'
@@ -216,9 +250,14 @@ try {
     $swapped = @('  Vulkan0: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)', '  Vulkan1: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)')
     Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $swapped)) -eq 'Vulkan1') 'selection follows the name, not the device order'
     $rocmList = @('  ROCm0: AMD Radeon RX 9070 XT (16304 MiB, 16153 MiB free)')
-    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $rocmList)) -eq '') 'a single visible GPU needs no pin'
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $rocmList)) -eq 'ROCm0') 'a single visible ROCm GPU is still pinned explicitly, not left to driver order'
     $apuOnly = @('  Vulkan0: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)', '  Vulkan1: AMD Radeon 780M Graphics (8000 MiB, 7000 MiB free)')
-    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $apuOnly)) -eq '') 'an iGPU-only machine is left to llama.cpp defaults'
+    $apuSelection = Get-GpuDeviceSelection -Devices (ConvertFrom-LlamaDeviceList -Lines $apuOnly)
+    Assert-True (($apuSelection.status -eq 'integrated_only') -and ($apuSelection.device -eq '')) 'an iGPU-only machine is classified integrated_only, never given a device'
+    $oneDiscrete = @('  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)')
+    Assert-True ((Select-PrimaryLlamaDevice -Devices (ConvertFrom-LlamaDeviceList -Lines $oneDiscrete)) -eq 'Vulkan0') 'one discrete Vulkan device is pinned explicitly'
+    Assert-True ((Get-GpuDeviceSelection -Devices (ConvertFrom-LlamaDeviceList -Lines $vkList)).status -eq 'pinned') 'the discrete member of a discrete+iGPU list is selected'
+    Assert-True ((Get-GpuDeviceSelection -Devices (ConvertFrom-LlamaDeviceList -Lines $swapped)).device -eq 'Vulkan1') 'the reordered discrete device is still selected by identity, not index'
     $mixed = ConvertFrom-LlamaDeviceList -Lines @('  ROCm0: AMD Radeon RX 9070 XT (16304 MiB, 16153 MiB free)', '  ROCm1: AMD Radeon(TM) Graphics (16209 MiB, 15398 MiB free)')
     $rocmFound = @($mixed | Where-Object { $_.Id -match '^ROCm' -and -not $_.Integrated })
     Assert-True (($rocmFound.Count -eq 1) -and ($rocmFound[0].Id -eq 'ROCm0')) 'the ROCm (latest) GPU check counts only the dedicated Radeon'
@@ -227,6 +266,20 @@ try {
     Assert-True ($cpuOnly.Count -eq 0) 'a build that lists no GPU fails the ROCm (latest) check'
     $pinned = Get-ServerArguments -ActiveModel (Get-ActiveModel) -EffectiveContext 32768 -Device 'Vulkan0'
     Assert-True (($pinned -join ' ') -match '--device Vulkan0') 'the chosen device reaches the server arguments'
+    $routerFlags = @((Get-CatalogJson -Name 'runtimes.json').llamacpp_capabilities | Where-Object { ($_.PSObject.Properties.Name -contains 'router') -and ($_.router -eq $true) })
+    Assert-True ((@($routerFlags | ForEach-Object { $_.flag }) -contains '--models-preset') -and (@($routerFlags | ForEach-Object { $_.flag }) -contains '--models-max') -and (@($routerFlags | ForEach-Object { $_.flag }) -contains '--metrics')) 'the catalogue declares the router flags that the probe must confirm'
+    $ready = Get-RuntimeCapabilitySummary -Capabilities @(
+        [pscustomobject]@{ flag = '--models-preset'; router = $true; supported = $true },
+        [pscustomobject]@{ flag = '--models-max'; router = $true; supported = $true },
+        [pscustomobject]@{ flag = '--metrics'; router = $true; supported = $true }
+    )
+    Assert-True ($ready.router_ready -and @($ready.router_missing).Count -eq 0) 'a runtime listing every router flag is router-ready'
+    $missingMax = Get-RuntimeCapabilitySummary -Capabilities @(
+        [pscustomobject]@{ flag = '--models-preset'; router = $true; supported = $true },
+        [pscustomobject]@{ flag = '--models-max'; router = $true; supported = $false },
+        [pscustomobject]@{ flag = '--metrics'; router = $true; supported = $true }
+    )
+    Assert-True ((-not $missingMax.router_ready) -and (@($missingMax.router_missing) -contains '--models-max')) 'a missing router flag is named, not assumed supported'
     Set-ActiveModel -Model (Get-ModelById 'qwen3.5-9b') -EffectiveContext 32768 -SkipVerification
     $launcherText = Get-Content -LiteralPath (Join-Path $InstallRoot 'Start-LlamaCpp.cmd') -Raw
     Assert-True ($launcherText -notmatch '--device') 'no device flag when no llama.cpp build is installed to ask'
@@ -311,6 +364,45 @@ try {
     Assert-True ($busyGpu.Low -and $busyGpu.FreeGiB -eq 6.1) 'a game using 9.8 GiB leaves too little room for Qwen3.5 9B and is flagged'
     Assert-True (-not (Get-VramPreflight -Model $qwen -Hardware $hw16 -Context 65536 -UsedGiB 1.2).Low) 'a mostly idle graphics card passes the check'
     Assert-True (-not (Get-VramPreflight -Model (Get-ModelById 'qwen3.8-27b') -Hardware $hw16 -Context 32768 -UsedGiB 1).Low) 'a model meant to spill into RAM never warns on every start'
+
+    Write-Host 'Fit estimate: GGUF metadata, hybrid KV math, split preflight, confidence'
+    $ggufPath = Join-Path $work 'qwen35-hybrid.gguf'
+    Write-TestGguf -Path $ggufPath -Metadata ([ordered]@{
+        'general.architecture' = 'qwen35'
+        'qwen35.block_count' = 32
+        'qwen35.attention.head_count' = 16
+        'qwen35.attention.head_count_kv' = 4
+        'qwen35.attention.key_length' = 256
+        'qwen35.attention.value_length' = 256
+        'qwen35.embedding_length' = 4096
+        'qwen35.full_attention_interval' = 4
+        'qwen35.context_length' = 131072
+    })
+    $ggufMeta = Read-GgufMetadata -Path $ggufPath
+    Assert-True (($ggufMeta['general.architecture'] -eq 'qwen35') -and ([int]$ggufMeta['qwen35.block_count'] -eq 32) -and ([int]$ggufMeta['qwen35.attention.head_count_kv'] -eq 4)) 'the GGUF header reader returns architecture and attention shape'
+    $kvQ8 = Get-KvCacheGiB -FullAttentionLayers 8 -KvHeads 4 -KeyLength 256 -ValueLength 256 -Context 131072 -CacheType 'q8_0'
+    $kvF16 = Get-KvCacheGiB -FullAttentionLayers 8 -KvHeads 4 -KeyLength 256 -ValueLength 256 -Context 131072 -CacheType 'f16'
+    Assert-True ([Math]::Abs($kvQ8 - 2.125) -le 0.01) "q8_0 KV uses 8 full-attention layers once, not 32 blocks or K+V twice ($([Math]::Round($kvQ8, 3)) GiB)"
+    Assert-True ([Math]::Abs($kvF16 - 4.0) -le 0.01) "f16 KV is 2 bytes per element ($([Math]::Round($kvF16, 3)) GiB)"
+    Assert-True ([Math]::Abs(($kvF16 / $kvQ8) - (64 / 34)) -le 0.001) 'q8_0 is 34/32 of f16, so the two cache types cannot be swapped silently'
+    $fakeFit = [pscustomobject]@{ Id = 'gguf-test'; File = 'qwen35-hybrid.gguf'; ApproxGiB = 6.2; model_path = $ggufPath; mmproj_path = ''; Moe = $false; KvGiBPer32k = 0.75 }
+    $hybridEstimate = Get-VramEstimate -Model $fakeFit -Hardware $hw16 -Context 65536
+    Assert-True (($hybridEstimate.hybrid -eq $true) -and ($hybridEstimate.full_attention_layers -eq 8) -and ($hybridEstimate.block_count -eq 32)) 'a full_attention_interval of 4 turns 32 blocks into 8 full-attention layers'
+    Assert-True ([Math]::Abs([double]$hybridEstimate.kv_gib - 2.13) -le 0.03) "the estimate uses the metadata KV figure ($([double]$hybridEstimate.kv_gib) GiB), not the per-32k catalogue lump"
+    Assert-True ($hybridEstimate.confidence -eq 'medium') 'hybrid attention is medium confidence because linear-attention state is not counted'
+    Assert-True ([Math]::Abs(([double]$hybridEstimate.weights_gib + [double]$hybridEstimate.kv_gib + [double]$hybridEstimate.compute_gib + [double]$hybridEstimate.headroom_gib) - [double]$hybridEstimate.needed_gib) -le 0.05) 'weights + KV + compute + headroom add up to the needed total (within two-decimal rounding)'
+    Assert-True (($hybridEstimate.estimate -eq $true) -and (@('fits', 'tight', 'will_not_fit') -contains [string]$hybridEstimate.verdict)) 'the document is labelled an estimate and carries one of the three verdicts'
+    Assert-True (@($hybridEstimate.warnings | Where-Object { $_ -match 'linear-attention state is not counted' }).Count -eq 1) 'the hybrid warning says exactly what the formula leaves out'
+    $fakeMoeFit = [pscustomobject]@{ Id = 'gguf-moe'; File = 'qwen35-hybrid.gguf'; ApproxGiB = 6.2; model_path = $ggufPath; mmproj_path = ''; Moe = $true; KvGiBPer32k = 0.75 }
+    $moeEstimate = Get-VramEstimate -Model $fakeMoeFit -Hardware $hw16 -Context 32768
+    Assert-True ((@($moeEstimate.warnings | Where-Object { $_ -match 'cliff, not a slope' }).Count -eq 1) -and ($moeEstimate.moe -eq $true)) 'a MoE model carries the --n-cpu-moe cliff warning without changing any offload setting'
+    $fallbackEstimate = Get-VramEstimate -Model $qwen -Hardware $hw16 -Context 65536
+    Assert-True (($fallbackEstimate.confidence -eq 'low') -and (@($fallbackEstimate.warnings | Where-Object { $_ -match 'falls back' }).Count -eq 1)) 'missing GGUF metadata falls back to the catalogue and is marked low confidence'
+    $splitPreflight = Get-VramPreflight -Model $qwen -Hardware $hw16 -Context 65536 -UsedGiB 1.2
+    Assert-True (($null -ne $splitPreflight.Estimate) -and ($splitPreflight.WeightsGiB -gt 0) -and ($splitPreflight.KvGiB -gt 0) -and ($splitPreflight.ComputeGiB -gt 0) -and ($splitPreflight.HeadroomGiB -gt 0) -and ($splitPreflight.Verdict -in @('fits', 'tight', 'will_not_fit'))) 'Preflight exposes the four split components and the verdict, not just one lump'
+    Assert-True ($null -eq (Get-VramEstimateDocument -Hardware ([pscustomobject]@{ HasAmdGpu = $false }))) 'State carries no estimate on a machine without a Radeon'
+    $stateWithModel = Get-ApplicationState
+    Assert-True (($stateWithModel.PSObject.Properties.Name -contains 'vram_estimate') -and ($null -ne $stateWithModel.vram_estimate) -and ($stateWithModel.vram_estimate.estimate -eq $true)) 'State exposes the fit estimate as typed JSON for the desktop app'
 
     $desk = Join-Path $work 'desktop'
     New-Item -ItemType Directory -Path $desk -Force | Out-Null
@@ -674,6 +766,8 @@ try {
     $routerArgs = Write-ServerPreset -ActiveModel $routerActive -EffectiveContext 65536
     $routerLine = @($routerArgs) -join ' '
     Assert-True (($routerLine -match '--models-preset') -and ($routerLine -match '--models-max 1') -and ($routerLine -match '--host 127\.0\.0\.1') -and ($routerLine -match '--metrics') -and ($routerLine -notmatch '--model ') -and ($routerLine -notmatch '--jinja')) 'the router command line carries host, port, metrics, the preset and a one-model limit, and no model flags'
+    $modelsMaxHits = @([regex]::Matches($routerLine, '--models-max\s+(\S+)'))
+    Assert-True (($modelsMaxHits.Count -eq 1) -and ($modelsMaxHits[0].Groups[1].Value -eq '1')) 'router safety: exactly one --models-max and it is 1 on this 16 GB card (a higher value would load two models at once)'
     $presetText = Get-Content -LiteralPath (Get-ServerPresetPath) -Raw
     Assert-True (($presetText -match "(?m)^\[$([regex]::Escape($routerActive.alias))\]") -and ($presetText -match '(?m)^load-on-startup = true$') -and ($presetText -notmatch '(?m)^(host|port|metrics) =')) 'the preset has one model section, loads on startup, and holds no router-level keys'
     $presetBytes = [IO.File]::ReadAllBytes((Get-ServerPresetPath))
@@ -1409,6 +1503,76 @@ try {
         $vulkanDependency = Get-RuntimeDependencyReport -Path $vulkan -Backend 'Vulkan' -SearchPath @()
         Assert-True (($vulkanDependency.status -eq 'missing_files') -and (@($vulkanDependency.missing_files) -contains 'ggml-vulkan.dll')) 'Diagnose names the missing Vulkan files'
         Assert-True (-not [string]::IsNullOrWhiteSpace([string]$vulkanDependency.where_to_get)) 'Diagnose says where to get the missing files'
+
+        Write-Host 'Runtime updates: pruning, cache, rollback'
+        # Pruning uses its own backend family so the Vulkan fixtures the launcher test
+        # relies on keep their paths and timestamps.
+        $testFamilyRoot = Join-Path $layoutRoot 'runtimes\testfam'
+        foreach ($i in 1..4) {
+            $familyPath = Join-Path $testFamilyRoot "t$i"
+            New-Item -ItemType Directory -Path $familyPath -Force | Out-Null
+            [ordered]@{ tag = "t$i"; backend = 'testfam'; sha256 = "sha$i"; installed_at = "2026-0$i-01T00:00:00Z" } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $familyPath 'installation.json') -Encoding UTF8
+        }
+        Remove-OldRuntimeBuilds -BackendFamily 'testfam' -Keep 2
+        $keptNames = @(Get-ChildItem -LiteralPath $testFamilyRoot -Directory | Select-Object -ExpandProperty Name)
+        Assert-True (($keptNames.Count -eq 2) -and ($keptNames -contains 't3') -and ($keptNames -contains 't4')) 'pruning keeps exactly the newest two builds for a backend'
+        Set-ActiveRuntime -Path (Join-Path $testFamilyRoot 't3')
+        $familyFive = Join-Path $testFamilyRoot 't5'
+        New-Item -ItemType Directory -Path $familyFive -Force | Out-Null
+        [ordered]@{ tag = 't5'; backend = 'testfam'; sha256 = 'sha5'; installed_at = '2026-05-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $familyFive 'installation.json') -Encoding UTF8
+        Remove-OldRuntimeBuilds -BackendFamily 'testfam' -Keep 1
+        $keptAgain = @(Get-ChildItem -LiteralPath $testFamilyRoot -Directory | Select-Object -ExpandProperty Name)
+        Assert-True (($keptAgain -contains 't3') -and ($keptAgain -contains 't5') -and ($keptAgain -notcontains 't4')) 'the active build survives pruning even when it is older than the keep window'
+        Remove-Item -LiteralPath $testFamilyRoot -Recurse -Force
+
+        Set-RuntimeUpdateCacheEntry -Family 'vulkan' -Entry ([pscustomobject]@{ latest_tag = 'b12110'; channel = 'test'; source = 'test'; checked_at = (Get-Date).ToUniversalTime().ToString('o'); error = '' })
+        $cachedStatus = Get-RuntimeUpdateStatus -Backend 'Vulkan' -InstalledTag 'b9999'
+        Assert-True ($cachedStatus.cached -and (-not $cachedStatus.stale) -and ($cachedStatus.latest_tag -eq 'b12110') -and $cachedStatus.update_available -and [string]::IsNullOrEmpty([string]$cachedStatus.error)) 'a fresh cache answers latest-vs-installed without a download or a GitHub call'
+        Assert-True ((Test-RuntimeTagNewer -Installed 'b8407' -Latest 'b11401') -and (-not (Test-RuntimeTagNewer -Installed 'b11401' -Latest 'b11401'))) 'comparable bNNNN tags are compared numerically'
+        Assert-True (-not (Test-RuntimeTagNewer -Installed 'rocm-7.2.1-b8407' -Latest 'rocm-7.2.1-b8407')) 'the AMD package tag is only compared for inequality, never as a numeric minimum'
+
+        $rollbackOld = Join-Path $layoutRoot 'runtimes\vulkan\b10000'
+        $rollbackNew = Join-Path $layoutRoot 'runtimes\vulkan\b10001'
+        foreach ($build in @(
+            [pscustomobject]@{ path = $rollbackOld; tag = 'b10000'; installed_at = '2026-02-01T00:00:00Z' },
+            [pscustomobject]@{ path = $rollbackNew; tag = 'b10001'; installed_at = '2026-03-01T00:00:00Z' }
+        )) {
+            New-Item -ItemType Directory -Path $build.path -Force | Out-Null
+            foreach ($file in 'llama-server.exe', 'ggml-vulkan.dll') { Set-Content -LiteralPath (Join-Path $build.path $file) -Value 'stub' -Encoding ASCII }
+            [ordered]@{ tag = $build.tag; backend = 'Vulkan'; sha256 = "sha-$($build.tag)"; installed_at = $build.installed_at } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $build.path 'installation.json') -Encoding UTF8
+        }
+        Set-ActiveRuntime -Path $rollbackNew
+        Set-ActiveModel -Model (Get-ModelById 'qwen3-4b') -EffectiveContext 8192 -SkipVerification
+        # A llama-server may be running against the real install while the harness runs;
+        # Get-ServerState finds it machine-wide and rollback would stop it. Pin these two
+        # tests to a stopped server, then restore the real function from its definition.
+        $serverStateDefinition = (Get-Command Get-ServerState).Definition
+        function Get-ServerState { [pscustomobject]@{ state = 'stopped'; port = [int]$Port; base_url = "http://127.0.0.1:$Port"; process_ids = @(); model_state = 'unknown' } }
+        $rollbackPort = $Port
+        $Port = 59987
+        try {
+            $rolledBack = Invoke-RuntimeRollback -Backend 'Vulkan'
+            Assert-True (($rolledBack.status -eq 'rolled_back') -and ($rolledBack.from_tag -eq 'b10001') -and ($rolledBack.to_tag -eq 'b10000') -and (-not $rolledBack.restarted)) 'rollback repoints to the previous build and does not start a server that was stopped'
+            Assert-True ((Get-ActiveRuntimePath) -eq $rollbackOld) 'the active runtime now names the previous build folder'
+            $rolledLauncher = Get-Content -LiteralPath (Join-Path $layoutRoot 'Start-LlamaCpp.cmd') -Raw
+            Assert-True ($rolledLauncher -match [regex]::Escape('runtimes\vulkan\b10000\llama-server.exe')) 'rollback rebuilds the launcher against the previous build'
+
+            $brokenBuild = Join-Path $layoutRoot 'runtimes\vulkan\b10002'
+            $newestBuild = Join-Path $layoutRoot 'runtimes\vulkan\b10003'
+            New-Item -ItemType Directory -Path $brokenBuild -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $brokenBuild 'llama-server.exe') -Value 'stub' -Encoding ASCII
+            [ordered]@{ tag = 'b10002'; backend = 'Vulkan'; sha256 = 'sha-broken'; installed_at = '2026-04-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $brokenBuild 'installation.json') -Encoding UTF8
+            New-Item -ItemType Directory -Path $newestBuild -Force | Out-Null
+            foreach ($file in 'llama-server.exe', 'ggml-vulkan.dll') { Set-Content -LiteralPath (Join-Path $newestBuild $file) -Value 'stub' -Encoding ASCII }
+            [ordered]@{ tag = 'b10003'; backend = 'Vulkan'; sha256 = 'sha-newest'; installed_at = '2026-05-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $newestBuild 'installation.json') -Encoding UTF8
+            Set-ActiveRuntime -Path $newestBuild
+            $refusedRollback = Invoke-RuntimeRollback -Backend 'Vulkan'
+            Assert-True (($refusedRollback.status -eq 'refused_broken') -and (@($refusedRollback.missing_files) -contains 'ggml-vulkan.dll')) 'rollback refuses a target that fails the file check, naming the missing file'
+            Assert-True ((Get-ActiveRuntimePath) -eq $newestBuild) 'a refused rollback leaves the active runtime unchanged'
+        } finally {
+            . ([scriptblock]::Create($serverStateDefinition))
+            $Port = $rollbackPort
+        }
 
         Set-ActiveRuntime -Path $vulkan
         $launcherModel = Get-ModelById -Id 'qwen3-4b'

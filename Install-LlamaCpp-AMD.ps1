@@ -108,7 +108,7 @@ param(
     [int] $Port = 8080,
     [ValidateSet('Auto', 'On', 'Off')]
     [string] $Thinking = 'Auto',
-    [ValidateSet('health', 'start', 'stop', 'update')]
+    [ValidateSet('health', 'start', 'stop', 'update', 'rollback', 'updates')]
     [string] $RuntimeAction = 'health',
     [string] $RuntimeAdapter = 'llamacpp',
     [ValidateRange(0, 1440)]
@@ -1122,7 +1122,8 @@ function Get-RuntimeAdapters {
 function Get-LlamaServerHelpText {
     # One --help invocation shared by capability probing. Empty string when the
     # installed server cannot run (missing exe, spawn failure).
-    $exe = Get-RuntimeExecutablePath
+    param([string] $RuntimePath = '')
+    $exe = if ([string]::IsNullOrWhiteSpace($RuntimePath)) { Get-RuntimeExecutablePath } else { Join-Path $RuntimePath 'llama-server.exe' }
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return '' }
     $previous = $ErrorActionPreference
     $text = ''
@@ -1142,7 +1143,7 @@ function Get-LlamaServerHelpText {
 function Get-RuntimeCapabilities {
     # Task 2: what the installed runtime can do, probed once against the flags the
     # catalogue declares. supported = true/false, or null when unknown (no exe).
-    param([string] $AdapterId = 'llamacpp')
+    param([string] $AdapterId = 'llamacpp', [string] $RuntimePath = '')
     $adapter = Get-RuntimeAdapter -Id $AdapterId
     if ([string]$adapter.status -ne 'active') {
         return [pscustomobject]@{
@@ -1154,9 +1155,9 @@ function Get-RuntimeCapabilities {
         }
     }
     $declared = @((Get-CatalogJson -Name 'runtimes.json').llamacpp_capabilities)
-    $exe = Get-RuntimeExecutablePath
+    $exe = if ([string]::IsNullOrWhiteSpace($RuntimePath)) { Get-RuntimeExecutablePath } else { Join-Path $RuntimePath 'llama-server.exe' }
     $available = Test-Path -LiteralPath $exe -PathType Leaf
-    $help = if ($available) { Get-LlamaServerHelpText } else { '' }
+    $help = if ($available) { Get-LlamaServerHelpText -RuntimePath $RuntimePath } else { '' }
     $confidence = if (-not $available) { 'none' } elseif ($help -eq '') { 'low' } else { 'high' }
     $capabilities = @()
     foreach ($capability in $declared) {
@@ -1165,6 +1166,7 @@ function Get-RuntimeCapabilities {
         $capabilities += [pscustomobject]@{
             flag = [string]$capability.flag
             required = [bool]$capability.required
+            router = (($capability.PSObject.Properties.Name -contains 'router') -and [bool]$capability.router)
             purpose = [string]$capability.purpose
             supported = $supported
         }
@@ -1175,6 +1177,48 @@ function Get-RuntimeCapabilities {
         confidence = $confidence
         capabilities = $capabilities
         unknowns = @()
+    }
+}
+
+function Get-RuntimeCapabilitySummary {
+    # Pure classification of one runtime's probe: the router is only declared ready when
+    # every router flag in the catalogue was positively found in --help. A missing flag is
+    # a warning, never a fabricated capability.
+    param($Capabilities)
+    $list = @($Capabilities)
+    $router = @($list | Where-Object { ($_.PSObject.Properties.Name -contains 'router') -and ($_.router -eq $true) })
+    $routerMissing = @($router | Where-Object { $_.supported -eq $false } | ForEach-Object { [string]$_.flag })
+    $missing = @($list | Where-Object { $_.supported -eq $false } | ForEach-Object { [string]$_.flag })
+    return [pscustomobject]@{
+        router_ready = (($router.Count -gt 0) -and ($routerMissing.Count -eq 0))
+        router_flags = @($router | ForEach-Object { [string]$_.flag })
+        router_missing = @($routerMissing)
+        missing = @($missing)
+    }
+}
+
+function Get-RuntimeCapabilityReport {
+    # `llama-server --help` per installed build, so a warning names the exact runtime and
+    # flag. This is the primary check: build tags differ between channels (the AMD package
+    # is b8407 and prints an internal 2500, so a numeric build comparison is not a gate).
+    param([string] $Path, [string] $Backend)
+    $installation = $null
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
+        $manifest = Join-Path $Path 'installation.json'
+        if (Test-Path -LiteralPath $manifest -PathType Leaf) { try { $installation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json } catch { $installation = $null } }
+    }
+    $probe = Get-RuntimeCapabilities -RuntimePath $Path
+    $summary = Get-RuntimeCapabilitySummary -Capabilities $probe.capabilities
+    return [pscustomobject]@{
+        backend = [string]$Backend
+        tag = if ($null -ne $installation) { [string]$installation.tag } else { '' }
+        available = [bool]$probe.available
+        confidence = [string]$probe.confidence
+        router_ready = [bool]$summary.router_ready
+        router_flags = @($summary.router_flags)
+        router_missing = @($summary.router_missing)
+        missing = @($summary.missing)
+        capabilities = @($probe.capabilities)
     }
 }
 
@@ -1499,6 +1543,8 @@ function Get-DiagnosticReport {
     $hardwareError = $null
     try { $hardware = Get-HardwareProfile } catch { $hardwareError = [string]$_.Exception.Message }
     $gpuDriver = Get-GpuDriverInfo
+    $gpuPinning = $null
+    try { $gpuPinning = Get-GpuPinningReport } catch { $gpuPinning = $null }
 
     # runtime health + validation + capabilities (adapter llamacpp)
     $runtimeHealth = $null
@@ -1614,9 +1660,18 @@ function Get-DiagnosticReport {
 
     # Runtimes side by side: report each installed build's files, not just the active one.
     $runtimes = @()
+    $runtimeCapabilityWarnings = @()
     foreach ($install in @(Get-RuntimeInstallations)) {
-        try { $runtimes += Get-RuntimeDependencyReport -Path ([string]$install.path) -Backend ([string]$install.backend) }
-        catch { $runtimes += [pscustomobject]@{ backend = [string]$install.backend; path = [string]$install.path; installed = [bool]$install.exe_present; status = 'unknown'; missing_files = @(); found_files = @(); where_to_get = ''; driver_min_version = $null; driver_min_source = ''; driver_requirement = '' } }
+        try {
+            $report = Get-RuntimeDependencyReport -Path ([string]$install.path) -Backend ([string]$install.backend)
+            $capability = Get-RuntimeCapabilityReport -Path ([string]$install.path) -Backend ([string]$install.backend)
+            $report | Add-Member -NotePropertyName capabilities -NotePropertyValue $capability -Force
+            if ($capability.available -and -not $capability.router_ready) {
+                $runtimeCapabilityWarnings += "llama.cpp $($install.tag) ($($install.backend)) cannot run router mode: its --help does not list $(@($capability.router_missing) -join ', '). Next step: update llama.cpp, or use a build that lists those flags."
+            }
+            $runtimes += $report
+        }
+        catch { $runtimes += [pscustomobject]@{ backend = [string]$install.backend; path = [string]$install.path; installed = [bool]$install.exe_present; status = 'unknown'; missing_files = @(); found_files = @(); where_to_get = ''; driver_min_version = $null; driver_min_source = ''; driver_requirement = ''; capabilities = $null } }
     }
     foreach ($familyName in @('Vulkan', 'ROCm')) {
         if (@($runtimes | Where-Object { (Get-BackendFamily -Backend $_.backend) -eq (Get-BackendFamily -Backend $familyName) }).Count -eq 0) {
@@ -1642,6 +1697,10 @@ function Get-DiagnosticReport {
         $blockers += @($modelHealth.blockers)
     }
     $warnings += @($editorHealth.warnings)
+    $warnings += @($runtimeCapabilityWarnings)
+    if ($null -ne $gpuPinning -and $gpuPinning.status -eq 'integrated_only') {
+        $warnings += "GPU pinning: $($gpuPinning.reason) The start action refuses to fall back to the iGPU; connect a discrete Radeon or set an explicit --device in server-args.user.json."
+    }
     $overall = if ($blockers.Count -gt 0) { 'broken' } elseif ($warnings.Count -gt 0) { 'degraded' } else { 'ok' }
     $overallConfidence = if ($null -ne $hardware) { [string]$hardware.detection.confidence } else { 'low' }
     if ($null -eq $runtimeHealth -or $null -eq $core) { $overallConfidence = 'low' }
@@ -1653,6 +1712,7 @@ function Get-DiagnosticReport {
         install_root = [string]$InstallRoot
         runtime_health = $runtimeHealth
         runtimes = @($runtimes)
+        gpu_pinning = $gpuPinning
         gpu_driver = $gpuDriver
         hardware_health = $hardwareHealth
         model_health = $modelHealth
@@ -2179,6 +2239,8 @@ function Ensure-LlamaCppInstalled {
         Remove-UserPathEntry -Directory (Join-Path $InstallRoot 'current')
     }
     Set-ActiveRuntime -Path $target
+    $pruned = Remove-OldRuntimeBuilds -BackendFamily (Get-BackendFamily -Backend $backendChoice) -ActivePath $target
+    if (@($pruned).Count -gt 0) { Write-Info "Kept the newest two $backendChoice builds; removed $($pruned -join ', ')." }
     Write-Success "llama.cpp $tag ($backendChoice) is installed at $target and is the active runtime."
     # Device names differ between builds (ROCm0 vs Vulkan0), so rebuild the launcher
     # for the new build instead of leaving one that names a device it cannot find.
@@ -2271,19 +2333,60 @@ function ConvertFrom-LlamaDeviceList {
     return ,@($devices)
 }
 
+function Get-GpuDeviceSelection {
+    param($Devices)
+    # Choose the dedicated Radeon by name heuristic and largest dedicated VRAM, never a
+    # fixed Vulkan0/ROCm0 index: driver updates can reorder devices. The typed result lets
+    # the start path refuse an iGPU-only machine instead of silently falling back to it.
+    $all = @($Devices)
+    if ($all.Count -eq 0) {
+        return [pscustomobject]@{ status = 'no_devices'; device = ''; reason = 'llama-server listed no GPU devices.'; devices = @() }
+    }
+    $dedicated = @($all | Where-Object { -not [bool]$_.Integrated } | Sort-Object MiB -Descending)
+    if ($dedicated.Count -eq 0) {
+        $names = @($all | ForEach-Object { [string]$_.Name }) -join ', '
+        return [pscustomobject]@{ status = 'integrated_only'; device = ''; reason = "Only AMD integrated graphics were listed ($names); the discrete Radeon was not found."; devices = @($all) }
+    }
+    $chosen = $dedicated[0]
+    return [pscustomobject]@{
+        status = 'pinned'
+        device = [string]$chosen.Id
+        reason = "Pinned $($chosen.Name) ($($chosen.MiB) MiB) as $($chosen.Id)."
+        devices = @($all)
+    }
+}
+
 function Select-PrimaryLlamaDevice {
     param($Devices)
-    # Only the dedicated Radeon. A Ryzen iGPU also appears under Vulkan with a large
-    # shared-memory figure; letting llama.cpp split layers onto it is slow, and its long
-    # kernels can trip the Windows 2 s GPU timeout (bugcheck 0x116 on a test PC).
-    $all = @($Devices)
-    $dedicated = @($all | Where-Object { -not $_.Integrated } | Sort-Object MiB -Descending)
-    if ($all.Count -le 1 -or $dedicated.Count -eq 0) { return '' }
-    return [string]$dedicated[0].Id
+    return [string](Get-GpuDeviceSelection -Devices $Devices).device
 }
 
 function Get-PrimaryLlamaDevice {
-    return Select-PrimaryLlamaDevice -Devices (Get-LlamaDeviceList -Directory (Split-Path -Parent (Get-RuntimeExecutablePath)))
+    return [string](Get-GpuPinningReport).device
+}
+
+function Get-GpuPinningReport {
+    # The device inventory of the active build, as a typed selection. No runtime is not an
+    # error: the caller (launcher generation) simply has no device to pin yet.
+    param([string] $RuntimePath = '')
+    if ([string]::IsNullOrWhiteSpace($RuntimePath)) { $RuntimePath = Split-Path -Parent (Get-RuntimeExecutablePath) }
+    if ([string]::IsNullOrWhiteSpace($RuntimePath) -or -not (Test-Path -LiteralPath (Join-Path $RuntimePath 'llama-server.exe') -PathType Leaf)) {
+        return [pscustomobject]@{ status = 'no_runtime'; device = ''; reason = 'No llama.cpp build is installed to ask for its devices.'; devices = @() }
+    }
+    return Get-GpuDeviceSelection -Devices (Get-LlamaDeviceList -Directory $RuntimePath)
+}
+
+function Assert-DiscreteGpuForStart {
+    # Start guard: an iGPU-only machine must not silently run on the Ryzen iGPU. A user who
+    # explicitly passes --device in server-args.user.json has made that choice, so the
+    # override is honoured instead of blocked.
+    $overrides = Get-UserServerArgOverrides
+    if (@($overrides | Where-Object { [string]$_ -eq '--device' }).Count -gt 0) { return $null }
+    $selection = Get-GpuPinningReport
+    if ($selection.status -eq 'integrated_only') {
+        throw "Only AMD integrated graphics were found. This tool will not silently start on the iGPU; connect a discrete Radeon or add an explicit --device to server-args.user.json."
+    }
+    return $selection
 }
 
 function Get-LlamaDeviceList {
@@ -2425,10 +2528,11 @@ function Write-ServerPreset {
     # Writes server-preset.ini and returns the router's own command line. Launchers and the
     # direct start both come through here, so the preset and the command line always come
     # from the same Get-ServerArguments list (single source of truth, as before).
-    param($ActiveModel, [int] $EffectiveContext)
+    param($ActiveModel, [int] $EffectiveContext, $Device = $null)
     # Assigned, not wrapped in @(): Get-ServerArguments returns its list through ,(...), and @()
     # would wrap that once more, so the whole list would arrive as a single item.
-    $all = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device (Get-PrimaryLlamaDevice)
+    if ($null -eq $Device) { $Device = (Get-GpuPinningReport).device }
+    $all = Get-ServerArguments -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device ([string]$Device)
     $split = Split-ServerArguments -Arguments ([string[]]$all)
     $text = ConvertTo-ServerPresetText -Alias ([string]$ActiveModel.alias) -ModelArguments $split.Model
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
@@ -2643,7 +2747,8 @@ function New-Launchers {
     # Get-ServerArguments returns its list through the ,@() idiom, so a pipeline would see
     # it as one object; iterate it with foreach instead of piping it.
     # The router's command line; the model's own flags go to server-preset.ini (Write-ServerPreset).
-    $rawArgs = Write-ServerPreset -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext
+    $gpuSelection = Get-GpuPinningReport
+    $rawArgs = Write-ServerPreset -ActiveModel $ActiveModel -EffectiveContext $EffectiveContext -Device $gpuSelection.device
     $serverArgs = @()
     foreach ($arg in $rawArgs) { $serverArgs += ConvertTo-LauncherArgument -Value ([string]$arg) }
 
@@ -2671,6 +2776,10 @@ function New-Launchers {
         Copy-WatcherTools | Out-Null
         $gameWatchLine = 'if exist "%~dp0tools\Install-LlamaCpp-AMD.ps1" start "llama.cpp game watch" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Install-LlamaCpp-AMD.ps1" -Action GameWatch -InstallRoot "%~dp0."'
     }
+    $gpuWarningLine = ''
+    if ($gpuSelection.status -eq 'integrated_only') {
+        $gpuWarningLine = 'echo WARNING: only AMD integrated graphics were detected. The command center refuses to start on the iGPU unless --device is set in server-args.user.json.'
+    }
 
     $runtimePath = Get-ActiveRuntimePath
     $serverTarget = if (-not [string]::IsNullOrWhiteSpace($runtimePath)) { Join-Path $runtimePath 'llama-server.exe' } else { Join-Path (Join-Path $InstallRoot 'current') 'llama-server.exe' }
@@ -2682,6 +2791,7 @@ function New-Launchers {
 setlocal
 title llama.cpp - $($ActiveModel.name) - AMD backend
 $gameWatchLine
+$gpuWarningLine
 pushd "%~dp0"
 "$serverLauncher" ^
 $argumentBlock
@@ -3013,6 +3123,263 @@ function Get-InstalledRuntime {
         }
         return $runtime
     } catch { return $null }
+}
+
+function Get-RuntimeUpdateCachePath {
+    return (Join-Path $InstallRoot 'runtime-update-cache.json')
+}
+
+function Get-RuntimeUpdateCache {
+    $cache = @{}
+    $path = Get-RuntimeUpdateCachePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $cache }
+    try {
+        $parsed = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        foreach ($property in $parsed.PSObject.Properties) { $cache[$property.Name] = $property.Value }
+    } catch { $cache = @{} }
+    return $cache
+}
+
+function Set-RuntimeUpdateCacheEntry {
+    param([string] $Family, $Entry)
+    try {
+        $cache = Get-RuntimeUpdateCache
+        $cache[$Family] = $Entry
+        $json = ConvertTo-Json -InputObject ([pscustomobject]$cache) -Depth 6
+        [IO.File]::WriteAllText((Get-RuntimeUpdateCachePath), $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Get-RuntimeCacheAgeMinutes {
+    param($CheckedAt)
+    if ([string]::IsNullOrWhiteSpace([string]$CheckedAt)) { return [double]::MaxValue }
+    try { return ((Get-Date).ToUniversalTime() - ([datetime]$CheckedAt).ToUniversalTime()).TotalMinutes } catch { return [double]::MaxValue }
+}
+
+function Test-RuntimeTagNewer {
+    # Only one tag scheme is actually comparable: ggml-org's bNNNN builds. AMD's package tag
+    # (rocm-7.2.1-b8407) is a packaging label, so it is compared as an opaque string only.
+    param([string] $Installed, [string] $Latest)
+    if ([string]::IsNullOrWhiteSpace($Installed) -or [string]::IsNullOrWhiteSpace($Latest)) { return $false }
+    $a = [regex]::Match([string]$Installed, '^b([0-9]+)$')
+    $b = [regex]::Match([string]$Latest, '^b([0-9]+)$')
+    if ($a.Success -and $b.Success) { return ([long]$b.Groups[1].Value -gt [long]$a.Groups[1].Value) }
+    return ([string]$Installed -ne [string]$Latest)
+}
+
+function Get-RuntimeLatestReleaseInfo {
+    param([string] $Backend, [string] $InstalledTag)
+    $family = Get-BackendFamily -Backend $Backend
+    if ($family -eq 'vulkan') {
+        $selected = Get-LatestLlamaCppVulkanAsset
+        return [pscustomobject]@{ tag = [string]$selected.Release.tag_name; channel = 'ggml-org Vulkan'; source = ($script:GitHubApi + '/latest') }
+    }
+    if ($family -eq 'rocm') {
+        if ([string]$InstalledTag -match '^b[0-9]+$') {
+            $selected = Get-LatestLlamaCppRocmAsset
+            return [pscustomobject]@{ tag = [string]$selected.Release.tag_name; channel = 'ggml-org ROCm'; source = ($script:GitHubApi + '/latest') }
+        }
+        $amd = (Get-CatalogJson -Name 'runtimes.json').amd_rocm_package
+        return [pscustomobject]@{ tag = [string]$amd.tag; channel = 'AMD validated ROCm'; source = [string]$amd.page }
+    }
+    throw "Unknown runtime backend '$Backend'."
+}
+
+function Get-RuntimeUpdateStatus {
+    # Read-only newest-available check. Cached for six hours; a failed GitHub call is cached
+    # for ten minutes so an offline machine keeps working and does not hammer the API.
+    param([string] $Backend = 'Vulkan', [string] $InstalledTag = '', [switch] $ForceRefresh)
+    $family = Get-BackendFamily -Backend $Backend
+    $cache = Get-RuntimeUpdateCache
+    $entry = if ($cache.ContainsKey($family)) { $cache[$family] } else { $null }
+    $age = if ($null -ne $entry) { Get-RuntimeCacheAgeMinutes -CheckedAt $entry.checked_at } else { [double]::MaxValue }
+    $hasError = ($null -ne $entry) -and (-not [string]::IsNullOrWhiteSpace([string]$entry.error))
+    if (-not $ForceRefresh -and $null -ne $entry) {
+        if ((-not $hasError -and $age -lt 360) -or ($hasError -and $age -lt 10)) {
+            $latest = [string]$entry.latest_tag
+            return [pscustomobject]@{
+                backend = [string]$Backend; family = $family; installed_tag = [string]$InstalledTag
+                latest_tag = $latest; channel = [string]$entry.channel; source = [string]$entry.source
+                checked_at = [string]$entry.checked_at; cached = $true; stale = ($age -ge 360)
+                update_available = (Test-RuntimeTagNewer -Installed $InstalledTag -Latest $latest)
+                error = [string]$entry.error
+            }
+        }
+    }
+    $previousQuiet = $script:JsonDocumentsOnly
+    $script:JsonDocumentsOnly = $true
+    try {
+        try {
+            $info = Get-RuntimeLatestReleaseInfo -Backend $Backend -InstalledTag $InstalledTag
+            $newEntry = [pscustomobject]@{
+                latest_tag = [string]$info.tag; channel = [string]$info.channel; source = [string]$info.source
+                checked_at = (Get-Date).ToUniversalTime().ToString('o'); error = ''
+            }
+            Set-RuntimeUpdateCacheEntry -Family $family -Entry $newEntry
+            return [pscustomobject]@{
+                backend = [string]$Backend; family = $family; installed_tag = [string]$InstalledTag
+                latest_tag = [string]$info.tag; channel = [string]$info.channel; source = [string]$info.source
+                checked_at = [string]$newEntry.checked_at; cached = $false; stale = $false
+                update_available = (Test-RuntimeTagNewer -Installed $InstalledTag -Latest ([string]$info.tag))
+                error = ''
+            }
+        } catch {
+            $message = [string]$_.Exception.Message
+            $newEntry = [pscustomobject]@{
+                latest_tag = if ($null -ne $entry) { [string]$entry.latest_tag } else { '' }
+                channel = if ($null -ne $entry) { [string]$entry.channel } else { '' }
+                source = if ($null -ne $entry) { [string]$entry.source } else { '' }
+                checked_at = (Get-Date).ToUniversalTime().ToString('o'); error = $message
+            }
+            Set-RuntimeUpdateCacheEntry -Family $family -Entry $newEntry
+            return [pscustomobject]@{
+                backend = [string]$Backend; family = $family; installed_tag = [string]$InstalledTag
+                latest_tag = [string]$newEntry.latest_tag; channel = [string]$newEntry.channel; source = [string]$newEntry.source
+                checked_at = [string]$newEntry.checked_at; cached = ($null -ne $entry); stale = $true
+                update_available = (Test-RuntimeTagNewer -Installed $InstalledTag -Latest ([string]$newEntry.latest_tag))
+                error = $message
+            }
+        }
+    } finally {
+        $script:JsonDocumentsOnly = $previousQuiet
+    }
+}
+
+function Get-RuntimeUpdateReport {
+    # One entry per installed backend family: the active build for that family, else its newest.
+    param([switch] $ForceRefresh)
+    $chosen = @{}
+    $active = Get-InstalledRuntime
+    if ($null -ne $active) {
+        $family = Get-BackendFamily -Backend ([string]$active.backend)
+        $chosen[$family] = [pscustomobject]@{ backend = [string]$active.backend; tag = [string]$active.tag }
+    }
+    foreach ($install in @(Get-RuntimeInstallations)) {
+        $family = Get-BackendFamily -Backend ([string]$install.backend)
+        if ($chosen.ContainsKey($family)) { continue }
+        $chosen[$family] = [pscustomobject]@{ backend = [string]$install.backend; tag = [string]$install.tag }
+    }
+    $updates = @()
+    foreach ($family in @($chosen.Keys | Sort-Object)) {
+        $item = $chosen[$family]
+        $updates += Get-RuntimeUpdateStatus -Backend $item.backend -InstalledTag $item.tag -ForceRefresh:$ForceRefresh
+    }
+    return [pscustomobject]@{
+        schema_version = 1
+        generated_at = (Get-Date).ToUniversalTime().ToString('o')
+        updates = @($updates)
+    }
+}
+
+function Remove-OldRuntimeBuilds {
+    # Keep the newest N builds per backend family (default 2). The active build is never
+    # deleted even if its installed_at is older, so a manual switch cannot strand you.
+    param([string] $BackendFamily, [int] $Keep = 2, [string] $ActivePath = '')
+    if ($Keep -lt 1) { $Keep = 1 }
+    if ([string]::IsNullOrWhiteSpace($ActivePath)) { $ActivePath = [string](Get-ActiveRuntimePath) }
+    $installs = @(Get-RuntimeInstallations | Where-Object {
+        ((Get-BackendFamily -Backend ([string]$_.backend)) -eq $BackendFamily) -and ([string]$_.relative_path -ne 'current')
+    })
+    $sorted = @($installs | Sort-Object -Property @{ Expression = {
+        $stamp = [string](Get-StateProperty -Object $_.installation -Name 'installed_at' -Default '')
+        try { [datetime]$stamp } catch { [datetime]::MinValue }
+    } } -Descending)
+    $keepPaths = @($sorted | Select-Object -First $Keep | ForEach-Object { [string]$_.path })
+    if (-not [string]::IsNullOrWhiteSpace($ActivePath) -and ($keepPaths -notcontains $ActivePath)) { $keepPaths += $ActivePath }
+    $removed = @()
+    foreach ($install in $sorted) {
+        if ($keepPaths -contains [string]$install.path) { continue }
+        try {
+            Remove-Item -LiteralPath ([string]$install.path) -Recurse -Force
+            $removed += [string]$install.tag
+        } catch {
+            Write-WarnLine "Could not remove the old runtime $($install.tag): $($_.Exception.Message)"
+        }
+    }
+    return ,@($removed)
+}
+
+function Get-RuntimeRollbackTarget {
+    param([string] $BackendFamily)
+    $activePath = Get-ActiveRuntimePath
+    if ([string]::IsNullOrWhiteSpace($activePath)) { return $null }
+    $candidates = @(Get-RuntimeInstallations | Where-Object {
+        ((Get-BackendFamily -Backend ([string]$_.backend)) -eq $BackendFamily) -and ([string]$_.relative_path -ne 'current') -and ([string]$_.path -ne $activePath)
+    })
+    $sorted = @($candidates | Sort-Object -Property @{ Expression = {
+        $stamp = [string](Get-StateProperty -Object $_.installation -Name 'installed_at' -Default '')
+        try { [datetime]$stamp } catch { [datetime]::MinValue }
+    } } -Descending)
+    if ($sorted.Count -eq 0) { return $null }
+    return $sorted[0]
+}
+
+function Invoke-RuntimeRollback {
+    # Repoint the active runtime to the previous build for its backend, rebuild launchers,
+    # and restart only if a server was running. A missing or broken target is refused before
+    # settings change. Typed result; never throws.
+    param([string] $Backend = 'Auto')
+    try {
+        $active = Get-InstalledRuntime
+        if ($null -eq $active) {
+            return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'no_runtime'; detail = 'No active llama.cpp runtime is installed.'; backend = ''; from_tag = ''; to_tag = ''; restarted = $false }
+        }
+        $family = if ([string]::IsNullOrWhiteSpace($Backend) -or $Backend -eq 'Auto') { Get-BackendFamily -Backend ([string]$active.backend) } else { Get-BackendFamily -Backend $Backend }
+        if ((Get-BackendFamily -Backend ([string]$active.backend)) -ne $family) {
+            return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'wrong_backend'; detail = "The active runtime is $($active.backend); select the $Backend runtime before rolling it back."; backend = $family; from_tag = [string]$active.tag; to_tag = ''; restarted = $false }
+        }
+        $target = Get-RuntimeRollbackTarget -BackendFamily $family
+        if ($null -eq $target) {
+            return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'no_previous'; detail = 'No previous build is installed for this backend; two builds are needed to roll back.'; backend = $family; from_tag = [string]$active.tag; to_tag = ''; restarted = $false }
+        }
+        if (-not (Test-Path -LiteralPath ([string]$target.path) -PathType Container)) {
+            return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'refused_missing'; detail = "The previous build folder is missing: $($target.path). Nothing was changed."; backend = $family; from_tag = [string]$active.tag; to_tag = [string]$target.tag; restarted = $false }
+        }
+        $dependency = Get-RuntimeDependencyReport -Path ([string]$target.path) -Backend ([string]$target.backend)
+        if (-not $dependency.installed -or [string]$dependency.status -ne 'ok') {
+            $missing = @($dependency.missing_files) -join ', '
+            return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'refused_broken'; detail = "The previous build fails the file check ($missing). Nothing was changed."; backend = $family; from_tag = [string]$active.tag; to_tag = [string]$target.tag; missing_files = @($dependency.missing_files); restarted = $false }
+        }
+        $server = Get-ServerState
+        $wasRunning = (@('running', 'loading') -contains [string]$server.state) -or (@($server.process_ids).Count -gt 0)
+        if ($wasRunning) {
+            foreach ($processId in @($server.process_ids)) { Stop-Process -Id ([int]$processId) -Force -ErrorAction SilentlyContinue }
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline -and $null -ne (Get-PortListener -Port $Port)) { Start-Sleep -Milliseconds 200 }
+        }
+        Set-ActiveRuntime -Path ([string]$target.path)
+        $model = Get-ActiveModel
+        if ($null -ne $model -and (Test-Path -LiteralPath (Get-RuntimeExecutablePath) -PathType Leaf)) {
+            New-Launchers -ActiveModel $model -EffectiveContext ([int]$model.context_size)
+        }
+        $restarted = $false
+        $restartError = ''
+        if ($wasRunning) {
+            $launcher = Join-Path $InstallRoot 'Start-LlamaCpp.cmd'
+            if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+                try {
+                    Start-Process -FilePath $launcher -WorkingDirectory $InstallRoot -WindowStyle Minimized
+                    $deadline = (Get-Date).AddSeconds(90)
+                    while ((Get-Date) -lt $deadline) {
+                        try {
+                            if ((Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2).status -eq 'ok') { $restarted = $true; break }
+                        } catch { }
+                        Start-Sleep -Seconds 2
+                    }
+                } catch { $restartError = [string]$_.Exception.Message }
+            } else { $restartError = 'Start-LlamaCpp.cmd was not found, so the server was not restarted.' }
+        }
+        $detail = "Rolled back from $($active.tag) to $($target.tag)."
+        if ($wasRunning -and $restarted) { $detail = "$detail The server was restarted." }
+        elseif ($wasRunning -and -not $restarted) { $detail = "$detail The server did not answer after the restart; start it from the window." }
+        return [pscustomobject]@{
+            schema_version = 1; action = 'rollback'; status = 'rolled_back'; detail = $detail; backend = $family
+            from_tag = [string]$active.tag; to_tag = [string]$target.tag; path = [string]$target.path
+            was_running = $wasRunning; restarted = $restarted; restart_error = $restartError
+        }
+    } catch {
+        return [pscustomobject]@{ schema_version = 1; action = 'rollback'; status = 'failed'; detail = [string]$_.Exception.Message; backend = ''; from_tag = ''; to_tag = ''; restarted = $false }
+    }
 }
 
 function Get-ModelRuntimeBlocker {
@@ -3628,6 +3995,9 @@ function Start-ActiveServer {
     $active = Get-ActiveModel
     if ($null -eq $active) { throw 'No model is active. Use the model browser to install and activate one.' }
     if (-not (Test-Path -LiteralPath ([string]$active.model_path) -PathType Leaf)) { throw 'The active model file is missing. Reinstall it from the model browser.' }
+    # Pin the discrete Radeon before doing any work; an iGPU-only machine is refused here
+    # unless the user explicitly passed --device in server-args.user.json.
+    $gpuSelection = Assert-DiscreteGpuForStart
 
     # Never start a second server on a port someone already holds.
     $serverState = Get-ServerState
@@ -3649,7 +4019,7 @@ function Start-ActiveServer {
     }
 
     $context = if ($ContextSize -gt 0) { $ContextSize } else { [int]$active.context_size }
-    $arguments = Write-ServerPreset -ActiveModel $active -EffectiveContext $context
+    $arguments = Write-ServerPreset -ActiveModel $active -EffectiveContext $context -Device $(if ($null -ne $gpuSelection) { $gpuSelection.device } else { $null })
 
     Clear-Screen
     Show-Banner
@@ -3827,9 +4197,11 @@ function Get-ApplicationState {
         schema_version = 1
         generated_at = (Get-Date).ToUniversalTime().ToString('o')
     }
-    foreach ($property in $core.PSObject.Properties) { $document[$property.Name] = $property.Value }
+    foreach ($property in $core.PSObject.Properties) {        $document[$property.Name] = $property.Value
+    }
     $document['hardware'] = $hardware
     $document['hardware_error'] = $hardwareError
+    $document['vram_estimate'] = Get-VramEstimateDocument -Hardware $hardware
     return [pscustomobject]$document
 }
 
@@ -4017,13 +4389,226 @@ function Get-GpuMemoryUsage {
     return [pscustomobject]@{ UsedGiB = [Math]::Round($used, 1); Apps = $apps }
 }
 
-function Get-VramPreflight {
-    param($Model, $Hardware, [int] $Context, [double] $UsedGiB)
-    $kvPer32k = if ($Model.PSObject.Properties.Name -contains 'KvGiBPer32k') { [double]$Model.KvGiBPer32k } else { 2.5 }
-    # Weights, the shared KV pool for all slots, and the 1 GiB the launcher leaves free.
-    $needed = [double]$Model.ApproxGiB + ($kvPer32k * ($Context * $script:ServerSlots) / 32768.0) + 1.0
+function Read-GgufStringValue {
+    param([IO.BinaryReader] $Reader, [int] $Version)
+    $length = if ($Version -eq 1) { [long]$Reader.ReadUInt32() } else { [long]$Reader.ReadUInt64() }
+    if ($length -lt 0 -or $length -gt 104857600) { throw "Invalid GGUF string length $length." }
+    $bytes = $Reader.ReadBytes([int]$length)
+    return [Text.Encoding]::UTF8.GetString($bytes)
+}
+
+function Read-GgufScalarValue {
+    param([IO.BinaryReader] $Reader, [int] $Type, [int] $Version)
+    switch ($Type) {
+        0 { return [int]$Reader.ReadByte() }
+        1 { return [int]$Reader.ReadSByte() }
+        2 { return [int]$Reader.ReadUInt16() }
+        3 { return [int]$Reader.ReadInt16() }
+        4 { return [long]$Reader.ReadUInt32() }
+        5 { return [int]$Reader.ReadInt32() }
+        6 { return [double]$Reader.ReadSingle() }
+        7 { return [bool]$Reader.ReadBoolean() }
+        8 { return (Read-GgufStringValue -Reader $Reader -Version $Version) }
+        10 { return [long]$Reader.ReadUInt64() }
+        11 { return [long]$Reader.ReadInt64() }
+        12 { return [double]$Reader.ReadDouble() }
+        default { throw "Unsupported GGUF value type $Type." }
+    }
+}
+
+function Skip-GgufScalarValue {
+    param([IO.BinaryReader] $Reader, [int] $Type, [int] $Version)
+    switch ($Type) {
+        0 { [void]$Reader.ReadByte() }
+        1 { [void]$Reader.ReadSByte() }
+        2 { [void]$Reader.ReadUInt16() }
+        3 { [void]$Reader.ReadInt16() }
+        4 { [void]$Reader.ReadUInt32() }
+        5 { [void]$Reader.ReadInt32() }
+        6 { [void]$Reader.ReadSingle() }
+        7 { [void]$Reader.ReadBoolean() }
+        8 { [void](Read-GgufStringValue -Reader $Reader -Version $Version) }
+        10 { [void]$Reader.ReadUInt64() }
+        11 { [void]$Reader.ReadInt64() }
+        12 { [void]$Reader.ReadDouble() }
+        default { throw "Unsupported GGUF value type $Type." }
+    }
+}
+
+function Skip-GgufArrayValue {
+    param([IO.BinaryReader] $Reader, [int] $ItemType, [long] $Count, [int] $Version)
+    $fixed = @{ 0 = 1; 1 = 1; 2 = 2; 3 = 2; 4 = 4; 5 = 4; 6 = 4; 7 = 1; 10 = 8; 11 = 8; 12 = 8 }
+    if ($fixed.ContainsKey($ItemType)) {
+        $bytes = [long]$Count * [long]$fixed[$ItemType]
+        if ($bytes -gt 0) { [void]$Reader.BaseStream.Seek($bytes, [IO.SeekOrigin]::Current) }
+        return
+    }
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($ItemType -eq 8) { [void](Read-GgufStringValue -Reader $Reader -Version $Version) }
+        elseif ($ItemType -eq 9) {
+            $nestedType = [int]$Reader.ReadUInt32()
+            $nestedCount = if ($Version -eq 1) { [long]$Reader.ReadUInt32() } else { [long]$Reader.ReadUInt64() }
+            Skip-GgufArrayValue -Reader $Reader -ItemType $nestedType -Count $nestedCount -Version $Version
+        } else { throw "Unsupported GGUF array item type $ItemType." }
+    }
+}
+
+function Read-GgufMetadata {
+    # Header-only reader: tensor data is never touched, so a 30 GB GGUF costs milliseconds.
+    # Only the keys the fit estimate needs are materialised; tokenizer arrays are skipped.
+    param([string] $Path)
+    $meta = @{}
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $meta }
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $reader = New-Object IO.BinaryReader($stream)
+        $magic = [Text.Encoding]::ASCII.GetString($reader.ReadBytes(4))
+        if ($magic -ne 'GGUF') { return $meta }
+        $version = [int]$reader.ReadUInt32()
+        [void]$reader.ReadUInt64()
+        $kvCount = [long]$reader.ReadUInt64()
+        $wanted = '(?i)(architecture|block_count|attention|expert|embedding_length|context_length|full_attention|recurrent|head_count|key_length|value_length|rope\.dimension_count|ssm\.)'
+        for ($i = 0; $i -lt $kvCount; $i++) {
+            $key = Read-GgufStringValue -Reader $reader -Version $version
+            $type = [int]$reader.ReadUInt32()
+            $keep = $key -match $wanted
+            if ($type -eq 9) {
+                $itemType = [int]$reader.ReadUInt32()
+                $count = if ($version -eq 1) { [long]$reader.ReadUInt32() } else { [long]$reader.ReadUInt64() }
+                if ($keep -and $count -le 512 -and $itemType -ne 8 -and $itemType -ne 9) {
+                    $values = @()
+                    for ($j = 0; $j -lt $count; $j++) { $values += Read-GgufScalarValue -Reader $reader -Type $itemType -Version $version }
+                    $meta[$key] = @($values)
+                } else {
+                    Skip-GgufArrayValue -Reader $reader -ItemType $itemType -Count $count -Version $version
+                }
+            } elseif ($keep) {
+                $meta[$key] = Read-GgufScalarValue -Reader $reader -Type $type -Version $version
+            } else {
+                Skip-GgufScalarValue -Reader $reader -Type $type -Version $version
+            }
+        }
+    } catch {
+        return $meta
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    return $meta
+}
+
+function Get-GgufNumber {
+    param($Metadata, [string] $Key, [double] $Default = 0)
+    if ($null -eq $Metadata -or -not $Metadata.ContainsKey($Key)) { return $Default }
+    $value = $Metadata[$Key]
+    if ($value -is [array]) {
+        if (@($value).Count -eq 0) { return $Default }
+        $value = @($value)[0]
+    }
+    try { return [double]$value } catch { return $Default }
+}
+
+function Get-KvCacheGiB {
+    # KV bytes per token = layers x KV heads x (K dim + V dim) x bytes per element.
+    # q8_0 stores 32 values in 34 bytes (one 2-byte scale per block); f16 is 2 bytes.
+    param([int] $FullAttentionLayers, [int] $KvHeads, [int] $KeyLength, [int] $ValueLength, [long] $Context, [string] $CacheType = 'q8_0')
+    if ($FullAttentionLayers -le 0 -or $KvHeads -le 0 -or $KeyLength -le 0 -or $ValueLength -le 0 -or $Context -le 0) { return 0.0 }
+    $bytesPer = if ($CacheType -eq 'f16') { 2.0 } elseif ($CacheType -eq 'q8_0') { 34.0 / 32.0 } else { 2.0 }
+    return ([double]$FullAttentionLayers * $KvHeads * ($KeyLength + $ValueLength) * $bytesPer * $Context) / 1GB
+}
+
+function Get-VramEstimate {
+    # Estimate only: weights (real file sizes), KV cache (GGUF metadata), compute buffers and
+    # headroom. Hybrid architectures use full_attention_interval; the linear-attention state
+    # is deliberately not counted, which is why hybrid estimates are medium confidence.
+    param($Model, $Hardware, [int] $Context, [double] $UsedGiB = 0, [string] $CacheType = 'q8_0')
+    $slots = [Math]::Max(1, [int]$script:ServerSlots)
+    $contextTokens = [long]([Math]::Max(1, $Context) * $slots)
+    $modelPath = if ($Model.PSObject.Properties.Name -contains 'model_path') { [string]$Model.model_path } else { Join-Path (Join-Path $InstallRoot 'models') ([string]$Model.File) }
+    $projectorPath = ''
+    if ($Model.PSObject.Properties.Name -contains 'mmproj_path') { $projectorPath = [string]$Model.mmproj_path }
+    elseif (($Model.PSObject.Properties.Name -contains 'Projector') -and -not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
+        $projectorPath = Join-Path (Join-Path $InstallRoot 'models') (Get-ProjectorLocalName -Model $Model)
+    }
+    $meta = Read-GgufMetadata -Path $modelPath
+    $weights = 0.0
+    foreach ($file in @($modelPath, $projectorPath)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$file) -and (Test-Path -LiteralPath ([string]$file) -PathType Leaf)) {
+            try { $weights += ([double](Get-Item -LiteralPath ([string]$file)).Length / 1GB) } catch { }
+        }
+    }
+    if ($weights -le 0) { $weights = [double]$Model.ApproxGiB }
+    $arch = if ($meta.ContainsKey('general.architecture')) { [string]$meta['general.architecture'] } else { '' }
+    $block = [int](Get-GgufNumber -Metadata $meta -Key "$arch.block_count" -Default 0)
+    $embedding = [int](Get-GgufNumber -Metadata $meta -Key "$arch.embedding_length" -Default 0)
+    $heads = [int](Get-GgufNumber -Metadata $meta -Key "$arch.attention.head_count" -Default 0)
+    $kvHeads = [int](Get-GgufNumber -Metadata $meta -Key "$arch.attention.head_count_kv" -Default 0)
+    $keyLength = [int](Get-GgufNumber -Metadata $meta -Key "$arch.attention.key_length" -Default 0)
+    $valueLength = [int](Get-GgufNumber -Metadata $meta -Key "$arch.attention.value_length" -Default 0)
+    if ($keyLength -le 0 -and $heads -gt 0) { $keyLength = [int][Math]::Round($embedding / $heads) }
+    if ($valueLength -le 0) { $valueLength = $keyLength }
+    $interval = [int](Get-GgufNumber -Metadata $meta -Key "$arch.full_attention_interval" -Default 0)
+    $hybrid = ($interval -gt 1)
+    $fullLayers = if ($hybrid -and $block -gt 0) { [int][Math]::Ceiling($block / $interval) } else { $block }
+    $kv = Get-KvCacheGiB -FullAttentionLayers $fullLayers -KvHeads $kvHeads -KeyLength $keyLength -ValueLength $valueLength -Context $contextTokens -CacheType $CacheType
+    $kvFromMetadata = ($kv -gt 0)
+    if (-not $kvFromMetadata -and ($Model.PSObject.Properties.Name -contains 'KvGiBPer32k')) {
+        $kv = [double]$Model.KvGiBPer32k * ($contextTokens / 32768.0)
+    }
+    # Calibrated on this machine (2026-11-04): Qwen3.5 9B at 131072 total context used
+    # 8.36 GiB above idle; weights + KV account for 8.27 GiB, leaving ~0.09 GiB of
+    # compute buffers. Keep a 0.2 GiB allowance plus the intentional 1 GiB headroom.
+    $compute = 0.2
+    $headroom = 1.0
+    $needed = $weights + $kv + $compute + $headroom
     $total = [double]$Hardware.MaxAmdVramGiB
     $free = [Math]::Max(0.0, $total - $UsedGiB)
+    $verdict = if ($needed -gt $total) { 'will_not_fit' } elseif ($needed -gt ($total * 0.9)) { 'tight' } else { 'fits' }
+    $confidence = if (-not $kvFromMetadata -or $block -le 0) { 'low' } elseif ($hybrid) { 'medium' } else { 'high' }
+    $expertCount = [int](Get-GgufNumber -Metadata $meta -Key "$arch.expert_count" -Default 0)
+    $moe = ($expertCount -gt 1) -or (($Model.PSObject.Properties.Name -contains 'Moe') -and [bool]$Model.Moe)
+    $warnings = @()
+    if (-not $kvFromMetadata) { $warnings += 'GGUF metadata could not supply the attention shape; the KV figure falls back to the catalogue per-32k estimate.' }
+    if ($hybrid) { $warnings += "Hybrid attention: only $fullLayers of $block layers hold a full KV cache; linear-attention state is not counted, so the KV figure is an estimate." }
+    if ($moe) { $warnings += 'MoE: partial expert offload (--n-cpu-moe) is a cliff, not a slope. Removing one expert layer from the GPU can collapse prompt speed several times over; no offload setting was changed.' }
+    $overrides = Get-UserServerArgOverrides
+    if (@($overrides | Where-Object { [string]$_ -eq '--n-cpu-moe' }).Count -gt 0) {
+        $warnings += 'server-args.user.json sets --n-cpu-moe; treat that offload as experimental and re-check prompt speed against a fully resident run.'
+    }
+    return [pscustomobject]@{
+        estimate = $true
+        architecture = $arch
+        block_count = $block
+        full_attention_layers = $fullLayers
+        kv_heads = $kvHeads
+        key_length = $keyLength
+        value_length = $valueLength
+        hybrid = $hybrid
+        moe = $moe
+        context_tokens = $contextTokens
+        cache_type = $CacheType
+        weights_gib = [Math]::Round($weights, 2)
+        kv_gib = [Math]::Round($kv, 2)
+        compute_gib = [Math]::Round($compute, 2)
+        headroom_gib = [Math]::Round($headroom, 2)
+        needed_gib = [Math]::Round($needed, 2)
+        total_gib = [Math]::Round($total, 2)
+        used_gib = [Math]::Round($UsedGiB, 2)
+        free_gib = [Math]::Round($free, 2)
+        verdict = $verdict
+        confidence = $confidence
+        warnings = @($warnings)
+    }
+}
+
+function Get-VramPreflight {
+    param($Model, $Hardware, [int] $Context, [double] $UsedGiB)
+    $estimate = Get-VramEstimate -Model $Model -Hardware $Hardware -Context $Context -UsedGiB $UsedGiB
+    $total = [double]$estimate.total_gib
+    $needed = [double]$estimate.needed_gib
+    $free = [double]$estimate.free_gib
     # Only warn when the model would fit on an empty card: a model that is meant to spill
     # into system RAM would otherwise warn on every start.
     return [pscustomobject]@{
@@ -4031,7 +4616,36 @@ function Get-VramPreflight {
         UsedGiB = $UsedGiB
         FreeGiB = [Math]::Round($free, 1)
         NeededGiB = [Math]::Round($needed, 1)
+        WeightsGiB = [double]$estimate.weights_gib
+        KvGiB = [double]$estimate.kv_gib
+        ComputeGiB = [double]$estimate.compute_gib
+        HeadroomGiB = [double]$estimate.headroom_gib
+        Verdict = [string]$estimate.verdict
+        Confidence = [string]$estimate.confidence
+        Hybrid = [bool]$estimate.hybrid
+        Moe = [bool]$estimate.moe
+        Warnings = @($estimate.warnings)
+        Estimate = $estimate
         Low = (($needed -le $total) -and ($free -lt $needed))
+    }
+}
+
+function Get-VramEstimateDocument {
+    # State's typed fit estimate for the active model. Null when there is no active model or
+    # no Radeon; always labelled an estimate. The same math feeds Get-VramPreflight, so the
+    # warning and the document cannot disagree.
+    param($Hardware)
+    if ($null -eq $Hardware -or -not [bool]$Hardware.HasAmdGpu) { return $null }
+    try {
+        $active = Get-ActiveModel
+        if ($null -eq $active) { return $null }
+        $model = @(Get-ModelCatalog | Where-Object { $_.Id -ieq [string]$active.id }) | Select-Object -First 1
+        if ($null -eq $model) { return $null }
+        $usage = Get-GpuMemoryUsage -TotalGiB ([double]$Hardware.MaxAmdVramGiB)
+        $used = if ($null -ne $usage) { [double]$usage.UsedGiB } else { 0.0 }
+        return (Get-VramEstimate -Model $model -Hardware $Hardware -Context ([int]$active.context_size) -UsedGiB $used)
+    } catch {
+        return [pscustomobject]@{ estimate = $true; available = $false; confidence = 'none'; error = [string]$_.Exception.Message }
     }
 }
 
@@ -6089,6 +6703,8 @@ try {
             'start' { Start-Runtime -AdapterId $RuntimeAdapter }
             'stop' { Stop-Runtime -AdapterId $RuntimeAdapter -Force:$Force }
             'update' { Update-Runtime -AdapterId $RuntimeAdapter -Backend $Backend -Force:$Force }
+            'rollback' { Invoke-RuntimeRollback -Backend $Backend }
+            'updates' { Get-RuntimeUpdateReport }
             default { Get-RuntimeHealth -AdapterId $RuntimeAdapter }
         }
         Write-JsonStdout -Document $runtimeResult
