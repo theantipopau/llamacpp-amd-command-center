@@ -2745,7 +2745,7 @@ function Start-GameWatchIfEnabled {
     # launchers start the same copy with a line of their own.
     if ((Get-GamePauseGiB) -le 0) { return }
     $toolsScript = Copy-WatcherTools
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Minimized -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $toolsScript, '-Action', 'GameWatch', '-InstallRoot', $InstallRoot) | Out-Null
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $toolsScript, '-Action', 'GameWatch', '-InstallRoot', $InstallRoot) | Out-Null
 }
 
 function Invoke-GameWatch {

@@ -13,12 +13,34 @@
 //! diagnostics. The webview never reads files or parses strings: everything it shows
 //! came out of one of these documents.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const SCRIPT_NAME: &str = "Install-LlamaCpp-AMD.ps1";
+/// Suppress the console window that Windows would otherwise allocate for every
+/// `powershell.exe` child of this GUI process. This is deliberately applied only to
+/// background backend commands; the server, chat and download launchers use `cmd start`
+/// and keep their visible consoles.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TRAY_ID: &str = "main-tray";
+/// Loopback channel used to hand a second launch to the process that already owns the
+/// tray. It is not a public API: it listens only on 127.0.0.1 and accepts a single word.
+const SINGLE_INSTANCE_PORT: u16 = 47821;
+const DESKTOP_SETTINGS_FILE: &str = "desktop-settings.json";
 /// How many parent folders to search for the backend script when running from a build tree.
 const SEARCH_DEPTH: usize = 6;
 
@@ -103,7 +125,15 @@ fn powershell_command(script: &Path, action: &str, extra: &[String], install_roo
         .args(extra)
         .arg("-InstallRoot")
         .arg(install_root);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+/// Only tray Quit sets this flag; every other exit request (including the one produced by
+/// destroying the last webview) must keep the process and tray alive.
+fn should_prevent_exit(quitting: bool) -> bool {
+    !quitting
 }
 
 fn describe(script: &Path, action: &str, extra: &[String], install_root: &Path) -> String {
@@ -221,9 +251,355 @@ fn run_backend(action: &str, label: &str, extra: &[String]) -> BackendResult {
 }
 
 /// Read-only backend state (`-Action State`): the single source for every displayed value.
-#[tauri::command]
-fn get_state() -> BackendResult {
+fn get_state_inner() -> BackendResult {
     run_backend("State", "state", &[])
+}
+
+/// Desktop-only preferences. The backend remains the single source for server and model
+/// settings; this file only controls how the frame itself behaves at launch.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DesktopSettings {
+    #[serde(default)]
+    start_minimised_to_tray: bool,
+}
+
+/// The PowerShell process that owns the deliberate server console. Keeping the child
+/// handle lets a forced Stop close that console after the server process is gone; the
+/// console must not be closed while the server is still running.
+static LAUNCHER: Mutex<Option<Child>> = Mutex::new(None);
+
+fn stop_launcher_console() {
+    if let Ok(mut slot) = LAUNCHER.lock() {
+        if let Some(mut child) = slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[derive(Default)]
+struct TrayMemory {
+    last_state: Mutex<Option<Value>>,
+}
+
+/// The health worker only runs while the window is visible and the server is running or
+/// loading. This is deliberately separate from `TrayMemory`: hiding the window must stop
+/// the probe immediately, even if the server keeps running.
+#[derive(Default)]
+struct HealthPoll {
+    window_visible: AtomicBool,
+    window_destroyed: AtomicBool,
+    server_active: AtomicBool,
+}
+
+#[derive(Default)]
+struct QuitRequested(AtomicBool);
+
+const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+const HEALTH_IDLE: Duration = Duration::from_millis(250);
+const HEALTH_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn desktop_settings_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|directory| directory.join(DESKTOP_SETTINGS_FILE))
+}
+
+fn parse_desktop_settings(text: &str) -> DesktopSettings {
+    // A settings file edited in Notepad can start with a UTF-8 BOM; serde rejects it.
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_default()
+}
+
+fn read_desktop_settings(app: &AppHandle) -> DesktopSettings {
+    let Some(path) = desktop_settings_path(app) else {
+        return DesktopSettings::default();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return DesktopSettings::default();
+    };
+    parse_desktop_settings(&text)
+}
+
+fn write_desktop_settings(app: &AppHandle, settings: &DesktopSettings) -> Result<(), String> {
+    let path = desktop_settings_path(app).ok_or_else(|| "The app config folder is unavailable.".to_string())?;
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory).map_err(|error| format!("Could not create the app config folder: {error}"))?;
+    }
+    let text = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| format!("Could not save desktop settings: {error}"))
+}
+
+fn tooltip_for_state(document: Option<&Value>) -> String {
+    let state = document
+        .and_then(|document| document.get("server"))
+        .and_then(|server| server.get("state"))
+        .and_then(Value::as_str)
+        .filter(|state| !state.is_empty())
+        .unwrap_or("unknown");
+    let model = document
+        .and_then(|document| document.get("model"))
+        .and_then(|model| model.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("no active model");
+    format!("llama.cpp Command Center\nServer: {state}\nModel: {model}")
+}
+
+fn remember_state(app: &AppHandle, document: &Value) {
+    if let Some(memory) = app.try_state::<TrayMemory>() {
+        if let Ok(mut last) = memory.last_state.lock() {
+            *last = Some(document.clone());
+        }
+    }
+    if let Some(poll) = app.try_state::<HealthPoll>() {
+        let active = document
+            .get("server")
+            .and_then(|server| server.get("state"))
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "running" || state == "loading");
+        poll.server_active.store(active, Ordering::SeqCst);
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip_for_state(Some(document))));
+    }
+}
+
+fn health_window_changed(app: &AppHandle, visible: bool, destroyed: bool) {
+    if let Some(poll) = app.try_state::<HealthPoll>() {
+        poll.window_visible.store(visible, Ordering::SeqCst);
+        poll.window_destroyed.store(destroyed, Ordering::SeqCst);
+    }
+}
+
+/// Pure predicate for the health worker. A hidden, minimised or destroyed window never
+/// probes; neither does a stopped server. While the server is starting, probing is
+/// allowed so the tray can show when it becomes ready.
+fn should_poll_health(visible: bool, minimised: bool, destroyed: bool, server_state: &str) -> bool {
+    visible && !minimised && !destroyed && (server_state == "running" || server_state == "loading")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HealthOutcome {
+    Ok,
+    Non200(u16),
+    Timeout,
+    Unreachable,
+    Malformed,
+}
+
+/// Parse a complete HTTP response. The split is intentionally strict: a timeout after a
+/// partial header is `Malformed`, not a successful probe.
+fn parse_health_response(bytes: &[u8]) -> HealthOutcome {
+    let text = String::from_utf8_lossy(bytes);
+    let Some((head, body)) = text.split_once("\r\n\r\n").or_else(|| text.split_once("\n\n")) else {
+        return HealthOutcome::Malformed;
+    };
+    let status_line = head.lines().next().unwrap_or("").trim();
+    let mut parts = status_line.split_whitespace();
+    if !parts.next().is_some_and(|version| version.starts_with("HTTP/")) {
+        return HealthOutcome::Malformed;
+    }
+    let Some(code) = parts.next().and_then(|value| value.parse::<u16>().ok()) else {
+        return HealthOutcome::Malformed;
+    };
+    if code != 200 {
+        return HealthOutcome::Non200(code);
+    }
+    if body.trim().is_empty() {
+        return HealthOutcome::Malformed;
+    }
+    match serde_json::from_str::<Value>(body.trim()) {
+        Ok(_) => HealthOutcome::Ok,
+        Err(_) => HealthOutcome::Malformed,
+    }
+}
+
+fn probe_health(port: u16) -> HealthOutcome {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, HEALTH_TIMEOUT) else {
+        return HealthOutcome::Unreachable;
+    };
+    let _ = stream.set_read_timeout(Some(HEALTH_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(HEALTH_TIMEOUT));
+    let request = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return HealthOutcome::Unreachable;
+    }
+    let mut bytes = Vec::new();
+    match stream.read_to_end(&mut bytes) {
+        Ok(_) => parse_health_response(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::TimedOut => {
+            if bytes.is_empty() { HealthOutcome::Timeout } else { parse_health_response(&bytes) }
+        }
+        Err(_) => HealthOutcome::Unreachable,
+    }
+}
+
+fn health_tooltip(state: Option<&Value>, outcome: &HealthOutcome) -> String {
+    let status = match outcome {
+        HealthOutcome::Ok => "OK",
+        HealthOutcome::Non200(code) => return format!("{}\nHealth: HTTP {code}", tooltip_for_state(state)),
+        HealthOutcome::Timeout => "timeout",
+        HealthOutcome::Unreachable => "not answering",
+        HealthOutcome::Malformed => "bad response",
+    };
+    format!("{}\nHealth: {status}", tooltip_for_state(state))
+}
+
+fn start_health_monitor(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last: Option<HealthOutcome> = None;
+        loop {
+            let Some(poll) = app.try_state::<HealthPoll>() else {
+                std::thread::sleep(HEALTH_IDLE);
+                continue;
+            };
+            let visible = poll.window_visible.load(Ordering::SeqCst);
+            let destroyed = poll.window_destroyed.load(Ordering::SeqCst);
+            // The window's minimised state is folded into `visible` by the window event.
+            let state = app
+                .try_state::<TrayMemory>()
+                .and_then(|memory| memory.last_state.lock().ok().and_then(|last| last.clone()));
+            let server_state = state
+                .as_ref()
+                .and_then(|document| document.get("server"))
+                .and_then(|server| server.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let port = state
+                .as_ref()
+                .and_then(|document| document.get("server"))
+                .and_then(|server| server.get("port"))
+                .and_then(Value::as_u64)
+                .unwrap_or(8080) as u16;
+            if should_poll_health(visible, false, destroyed, &server_state) {
+                let outcome = probe_health(port);
+                let changed = last.as_ref() != Some(&outcome);
+                if changed {
+                    last = Some(outcome);
+                    let last_outcome = last.clone().unwrap_or(HealthOutcome::Unreachable);
+                    let tooltip = health_tooltip(state.as_ref(), &last_outcome);
+                    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                        let _ = tray.set_tooltip(Some(tooltip));
+                    }
+                }
+                let started = Instant::now();
+                while started.elapsed() < HEALTH_INTERVAL {
+                    std::thread::sleep(HEALTH_IDLE);
+                    if !poll.window_visible.load(Ordering::SeqCst)
+                        || poll.window_destroyed.load(Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                }
+            } else {
+                last = None;
+                std::thread::sleep(HEALTH_IDLE);
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn get_state(app: AppHandle) -> BackendResult {
+    let result = get_state_inner();
+    if let Some(document) = result.document.as_ref() {
+        remember_state(&app, document);
+    }
+    result
+}
+
+#[tauri::command]
+fn get_desktop_settings(app: AppHandle) -> DesktopSettings {
+    read_desktop_settings(&app)
+}
+
+#[tauri::command]
+fn save_desktop_settings(app: AppHandle, start_minimised_to_tray: bool) -> Result<DesktopSettings, String> {
+    let settings = DesktopSettings { start_minimised_to_tray };
+    write_desktop_settings(&app, &settings)?;
+    Ok(settings)
+}
+
+fn show_main_window(app: &AppHandle) {
+    health_window_changed(app, true, false);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("llama.cpp Command Center")
+        .inner_size(1000.0, 780.0)
+        .min_inner_size(720.0, 560.0)
+        .center()
+        .build();
+}
+
+fn refresh_tray_state(app: &AppHandle) {
+    let result = get_state_inner();
+    if let Some(document) = result.document.as_ref() {
+        remember_state(app, document);
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", "Start server", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "Stop server", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &start, &stop, &separator, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip(tooltip_for_state(None))
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "start" => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = start_server();
+                    refresh_tray_state(&app);
+                });
+            }
+            "stop" => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = stop_server(true);
+                    refresh_tray_state(&app);
+                });
+            }
+            "quit" => {
+                if let Some(flag) = app.try_state::<QuitRequested>() {
+                    flag.0.store(true, Ordering::SeqCst);
+                }
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -291,58 +667,50 @@ fn start_server() -> BackendResult {
     }
 
     let console_command = format!(
-        "cmd.exe /C start \"llama.cpp AI server\" /D \"{}\" powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" -Action Runtime -RuntimeAction start -InstallRoot \"{}\"",
-        root.display(),
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" -Action Runtime -RuntimeAction start -InstallRoot \"{}\"",
         script.display(),
         root.display()
     );
-    let spawned = Command::new("cmd.exe")
-        .args(["/C", "start", "llama.cpp AI server", "/D"])
-        .arg(&root)
-        .arg("powershell.exe")
+    // CREATE_NEW_CONSOLE gives the server its deliberate, visible console in one step.
+    // The previous `cmd.exe /C start` added a transient cmd console before PowerShell's
+    // console, which read as a second unwanted window in the four-phase console audit.
+    let spawned = Command::new("powershell.exe")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
         .args(["-Action", "Runtime", "-RuntimeAction", "start"])
         .arg("-InstallRoot")
         .arg(&root)
-        .status();
+        .creation_flags(0x00000010)
+        .spawn();
 
     let candidates = script_candidates()
         .iter()
         .map(|path| path.display().to_string())
         .collect();
     match spawned {
-        Ok(status) if status.success() => BackendResult {
+        Ok(child) => {
+            let launcher_pid = child.id();
+            if let Ok(mut slot) = LAUNCHER.lock() {
+                *slot = Some(child);
+            }
+            BackendResult {
             ok: true,
             action: "runtime:start".to_string(),
             document: Some(json!({
                 "spawned": true,
+                "launcher_pid": launcher_pid,
                 "launcher_console": console_command,
                 "health_before_start": health.document,
             })),
             error: None,
             command: console_command,
-            exit_code: status.code(),
+            exit_code: None,
             stderr: String::new(),
             install_root: root_text,
             script: Some(script.display().to_string()),
             candidates,
-        },
-        Ok(status) => BackendResult {
-            ok: false,
-            action: "runtime:start".to_string(),
-            document: None,
-            error: Some(format!(
-                "The server window did not open (cmd.exe exit code {}).",
-                status.code().unwrap_or(-1)
-            )),
-            command: console_command,
-            exit_code: status.code(),
-            stderr: String::new(),
-            install_root: root_text,
-            script: Some(script.display().to_string()),
-            candidates,
-        },
+        }
+        }
         Err(spawn_error) => BackendResult {
             ok: false,
             action: "runtime:start".to_string(),
@@ -366,7 +734,11 @@ fn stop_server(force: bool) -> BackendResult {
     if force {
         extra.push("-Force".to_string());
     }
-    run_backend("Runtime", if force { "runtime:stop:force" } else { "runtime:stop" }, &extra)
+    let result = run_backend("Runtime", if force { "runtime:stop:force" } else { "runtime:stop" }, &extra);
+    if force && result.ok {
+        stop_launcher_console();
+    }
+    result
 }
 
 /// The runtime update entry (`-RuntimeAction update`): two-step like stop. The first
@@ -637,7 +1009,7 @@ mod tests {
     fn state_returns_the_typed_document_for_the_requested_install_root() {
         let root = temp_root("state");
         point_at_test_backend(&root);
-        let result = get_state();
+        let result = get_state_inner();
         assert!(result.ok, "state failed: {:?} ({})", result.error, result.stderr);
         let document = result.document.expect("a state document");
         assert_eq!(document["schema_version"], 1);
@@ -688,12 +1060,96 @@ mod tests {
         let odd_root = temp_root("odd-root-file").join("not-a-folder");
         std::fs::write(&odd_root, b"x").expect("write the decoy file");
         point_at_test_backend(&odd_root);
-        let result = get_state();
+        let result = get_state_inner();
         assert!(result.ok, "state must degrade, not fail: {:?}", result.error);
         let document = result.document.expect("a state document");
         assert_eq!(document["install_root"], odd_root.to_string_lossy().as_ref());
         assert!(document["model"].is_null(), "no model can be active in an empty install");
         point_at_test_backend(&root);
+    }
+
+    #[test]
+    fn desktop_settings_tolerate_a_utf8_bom() {
+        let settings = parse_desktop_settings("\u{feff}{\"start_minimised_to_tray\":true}");
+        assert!(settings.start_minimised_to_tray);
+        assert!(parse_desktop_settings("not-json").start_minimised_to_tray == false);
+    }
+
+    #[test]
+    fn tray_tooltip_is_built_from_the_last_state_document() {
+        let document = json!({
+            "server": { "state": "running" },
+            "model": { "name": "Qwen3-4B" }
+        });
+        let tooltip = tooltip_for_state(Some(&document));
+        assert!(tooltip.contains("Server: running"));
+        assert!(tooltip.contains("Model: Qwen3-4B"));
+        assert_eq!(tooltip_for_state(None), "llama.cpp Command Center\nServer: unknown\nModel: no active model");
+    }
+
+    #[test]
+    fn health_poll_requires_a_visible_live_window_and_an_active_server() {
+        assert!(should_poll_health(true, false, false, "running"));
+        assert!(should_poll_health(true, false, false, "loading"));
+        assert!(!should_poll_health(false, false, false, "running"));
+        assert!(!should_poll_health(true, true, false, "running"));
+        assert!(!should_poll_health(true, false, true, "running"));
+        assert!(!should_poll_health(true, false, false, "stopped"));
+        assert!(!should_poll_health(true, false, false, "unknown"));
+    }
+
+    #[test]
+    fn health_parser_handles_success_non_200_timeout_and_partial_responses() {
+        assert_eq!(parse_health_response(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}"), HealthOutcome::Ok);
+        assert_eq!(parse_health_response(b"HTTP/1.1 503 Busy\r\n\r\n{}"), HealthOutcome::Non200(503));
+        assert_eq!(parse_health_response(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{"), HealthOutcome::Malformed);
+        assert_eq!(parse_health_response(b"HTTP/1.1 200 OK"), HealthOutcome::Malformed);
+        assert_eq!(parse_health_response(b""), HealthOutcome::Malformed);
+        assert_eq!(parse_health_response(b"not-http\r\n\r\n{}"), HealthOutcome::Malformed);
+    }
+
+    #[test]
+    fn only_tray_quit_lets_the_process_exit() {
+        assert!(should_prevent_exit(false), "a close-to-tray exit request must be refused");
+        assert!(!should_prevent_exit(true), "tray Quit must be allowed to exit");
+    }
+
+    #[test]
+    fn the_no_window_flag_is_applied_only_by_the_background_command_builder() {
+        // The intentional console launchers are built with cmd.exe, not this helper.
+        // Including the pieces through concat! keeps this assertion from matching itself.
+        let flag_call = concat!(".creation_flags(", "CREATE_NO_WINDOW)");
+        assert_eq!(include_str!("main.rs").matches(flag_call).count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_powershell_has_no_console_window() {
+        let root = temp_root("no-window");
+        let marker = root.join("console-window.txt");
+        let script = root.join("console-probe.ps1");
+        let script_text = format!(
+            r#"param([string]$Action,[string]$InstallRoot)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleProbe {{ [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }}
+'@
+[IO.File]::WriteAllText('{}', [ConsoleProbe]::GetConsoleWindow().ToString())
+"#,
+            marker.display()
+        );
+        std::fs::write(&script, script_text).expect("write the console probe script");
+        let output = powershell_command(&script, "Probe", &[], &root)
+            .output()
+            .expect("run the console probe");
+        assert!(
+            output.status.success(),
+            "console probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let handle = std::fs::read_to_string(&marker).expect("read the console handle");
+        assert_eq!(handle.trim(), "0", "background PowerShell must not own a console window");
     }
 
     #[test]
@@ -796,11 +1252,46 @@ mod tests {
     }
 }
 
+fn forward_to_running_instance() -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.write_all(b"show");
+    true
+}
+
+fn start_instance_listener(app: AppHandle) {
+    match TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+        Ok(listener) => {
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stream.is_ok() {
+                        show_main_window(&app);
+                    }
+                }
+            });
+        }
+        Err(_) => {
+            let _ = forward_to_running_instance();
+            std::process::exit(0);
+        }
+    }
+}
+
 fn main() {
-    tauri::Builder::default()
+    // Before Tauri (and WebView2) starts, hand a second launch to the live app. The
+    // listener is created in setup, so two simultaneous cold starts still race safely:
+    // the later bind fails and exits.
+    if forward_to_running_instance() {
+        return;
+    }
+    let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             backend_info,
             get_state,
+            get_desktop_settings,
+            save_desktop_settings,
             get_recommendations,
             get_diagnostics,
             runtime_health,
@@ -814,6 +1305,68 @@ fn main() {
             download_model,
             open_chat
         ])
-        .run(tauri::generate_context!())
+        .setup(|app| {
+            start_instance_listener(app.handle().clone());
+            app.manage(TrayMemory::default());
+            app.manage(HealthPoll::default());
+            app.manage(QuitRequested::default());
+            build_tray(app.handle())?;
+            let settings = read_desktop_settings(app.handle());
+            let visible = !settings.start_minimised_to_tray;
+            if let Some(window) = app.get_webview_window("main") {
+                if settings.start_minimised_to_tray {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            health_window_changed(app.handle(), visible, false);
+            start_health_monitor(app.handle().clone());
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    // Keep the process and tray alive; the webview is destroyed so its
+                    // WebView2 children are released. Open recreates it. Destroy from a
+                    // short-lived worker rather than re-entering the event loop from the
+                    // close callback: destroying the last window immediately emits
+                    // ExitRequested, and doing that inside this callback raced the close
+                    // prevention on a rapid close/open/close cycle.
+                    health_window_changed(window.app_handle(), false, false);
+                    api.prevent_close();
+                    let window = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(50));
+                        let _ = window.destroy();
+                    });
+                }
+                if let WindowEvent::Destroyed = event {
+                    health_window_changed(window.app_handle(), false, true);
+                }
+                if let WindowEvent::Resized(_) = event {
+                    let visible = window.is_visible().unwrap_or(false)
+                        && !window.is_minimized().unwrap_or(false);
+                    health_window_changed(window.app_handle(), visible, false);
+                }
+                if let WindowEvent::Focused(true) = event {
+                    health_window_changed(window.app_handle(), true, false);
+                }
+            }
+        })
+        .build(tauri::generate_context!())
         .expect("the command center window failed to start");
+
+    app.run(|app, event| {
+        if let RunEvent::ExitRequested { api, .. } = event {
+            let quitting = app
+                .try_state::<QuitRequested>()
+                .map(|flag| flag.0.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if should_prevent_exit(quitting) {
+                api.prevent_exit();
+            }
+        }
+    });
 }

@@ -121,6 +121,8 @@ try {
     $sourceText = Get-Content -LiteralPath $scriptPath -Raw
     $hsaAssignments = @([regex]::Matches($sourceText, '(?im)(\$env:HSA_OVERRIDE_GFX_VERSION\s*=|set\s+"?HSA_OVERRIDE_GFX_VERSION\s*=)'))
     Assert-True ($hsaAssignments.Count -eq 0) 'HSA_OVERRIDE_GFX_VERSION is never assigned (gfx1200/gfx1201 are native)'
+    $gameWatchLaunch = @($sourceText -split "`n" | Where-Object { $_ -match "Action', 'GameWatch'" })
+    Assert-True ($gameWatchLaunch.Count -eq 1 -and $gameWatchLaunch[0] -match '-WindowStyle Hidden') 'the background game watcher starts hidden (no console window)'
 
     Write-Host 'Launcher generation (every catalog model)'
     foreach ($model in Get-ModelCatalog) {

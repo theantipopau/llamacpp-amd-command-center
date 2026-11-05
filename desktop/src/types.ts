@@ -173,6 +173,11 @@ export interface RuntimeAdapterResult {
   killed?: number;
 }
 
+/** Desktop-only preferences stored next to the app, not in the backend settings.json. */
+export interface DesktopSettings {
+  start_minimised_to_tray: boolean;
+}
+
 /** The settings document the backend prints for `-Action Settings` (read). */
 export interface SettingsDocument {
   schema_version: number;

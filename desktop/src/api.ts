@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackendResult } from "./types";
+import type { BackendResult, DesktopSettings } from "./types";
 
 // Every call is one backend action. The Rust supervisor runs the PowerShell script,
 // captures its UTF-8 JSON document and returns it with the raw call detail. Nothing in
@@ -35,6 +35,14 @@ export function stopServer(force: boolean): Promise<BackendResult> {
 
 export function updateRuntime(force: boolean): Promise<BackendResult> {
   return invoke<BackendResult>("update_runtime", { force });
+}
+
+export function getDesktopSettings(): Promise<DesktopSettings> {
+  return invoke<DesktopSettings>("get_desktop_settings");
+}
+
+export function saveDesktopSettings(startMinimisedToTray: boolean): Promise<DesktopSettings> {
+  return invoke<DesktopSettings>("save_desktop_settings", { startMinimisedToTray });
 }
 
 export function getSettings(): Promise<BackendResult> {

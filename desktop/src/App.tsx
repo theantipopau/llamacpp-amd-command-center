@@ -34,6 +34,7 @@ import {
 import { asDocument as narrow } from "./types";
 import type {
   BackendResult,
+  DesktopSettings,
   DiagnosticDocument,
   LibraryDocument,
   LibraryModel,
@@ -126,6 +127,7 @@ export default function App() {
   const [diagnosticResult, setDiagnosticResult] = useState<BackendResult | null>(null);
   const [failure, setFailure] = useState<BackendResult | null>(null);
   const [settings, setSettings] = useState<SettingsDocument | null>(null);
+  const [desktopSettings, setDesktopSettings] = useState<DesktopSettings | null>(null);
   // Kept as text so a cleared box stays empty while the user types a new number.
   const [settingsDraftMinutes, setSettingsDraftMinutes] = useState<string>("");
   const [settingsDraftUseCase, setSettingsDraftUseCase] = useState<string | null>(null);
@@ -387,6 +389,22 @@ export default function App() {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    void api.getDesktopSettings().then(setDesktopSettings).catch(() => setDesktopSettings({ start_minimised_to_tray: false }));
+  }, []);
+
+  async function onToggleStartMinimised(checked: boolean) {
+    setDesktopSettings({ start_minimised_to_tray: checked });
+    try {
+      const saved = await api.saveDesktopSettings(checked);
+      setDesktopSettings(saved);
+      setSettingsSave({ message: "Tray start setting saved.", ok: true });
+    } catch {
+      setDesktopSettings({ start_minimised_to_tray: !checked });
+      setSettingsSave({ message: "The tray start setting could not be saved.", ok: false });
+    }
+  }
 
   async function onSaveSettings() {
     if (busyRef.current !== null || !settings) {
@@ -828,8 +846,20 @@ export default function App() {
                       ))}
                     </select>
                   </dd>
-                  <dt>{" "}</dt>
+                  <dt>{" "}</dt>
                   <dd className="muted">The suggestion engine uses this when you ask for a model.</dd>
+                  <dt>Window</dt>
+                  <dd>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={desktopSettings?.start_minimised_to_tray ?? false}
+                        onChange={(event) => void onToggleStartMinimised(event.target.checked)}
+                      />{" "}
+                      Start minimised to the system tray
+                    </label>
+                    <p className="muted">Closing the window keeps the app in the tray; Open restores it.</p>
+                  </dd>
                 </dl>
                 {settingsSave ? (
                   <p className={settingsSave.ok ? "verdict" : "warning"} role="status" aria-live="polite">
