@@ -28,6 +28,7 @@ $env:USERPROFILE = Join-Path $work 'userprofile'
 $InstallRoot = Join-Path $work 'install'
 $Port = 8080
 $Force = $true
+$TuneSmoke = $false
 $Thinking = 'Auto'
 $ContextSize = 0
 $script:ServerSlots = 2
@@ -848,6 +849,236 @@ try {
     Assert-True (@($specOff | Where-Object { $_ -eq '--spec-type' }).Count -eq 1) 'the override replaces the default flag instead of duplicating it'
     Assert-True ((Get-SuggestedContext -Model (Get-ModelById 'qwen3.8-27b') -Hardware ([pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 32; RamGiB = 64; ModelBudgetGiB = 30 })) -eq 65536) 'hybrid Qwen3.8 gets 64k on a card with room (measured 1.1 GiB KV per 32k, not the dense 2.5 GiB default)'
 
+    Write-Host 'Tune: fixture parsing, variance, both-tests rule, opt-in presets'
+    $tuneJson = @'
+[
+  {"n_prompt":2048,"n_gen":0,"avg_ts":1000.0,"stddev_ts":80.0,"build_commit":"abc123","build_number":12110,"backends":"Vulkan","devices":"Vulkan1","n_batch":2048,"n_ubatch":512,"n_gpu_layers":99,"flash_attn":true},
+  {"n_prompt":8192,"n_gen":0,"avg_ts":900.0,"stddev_ts":20.0,"build_commit":"abc123","build_number":12110,"backends":"Vulkan","devices":"Vulkan1","n_batch":2048,"n_ubatch":512,"n_gpu_layers":99,"flash_attn":true},
+  {"n_prompt":0,"n_gen":128,"avg_ts":50.0,"stddev_ts":1.0,"build_commit":"abc123","build_number":12110,"backends":"Vulkan","devices":"Vulkan1","n_batch":2048,"n_ubatch":512,"n_gpu_layers":99,"flash_attn":true}
+]
+'@
+    $tuneRows = @(ConvertFrom-TuneBenchJson -Text $tuneJson)
+    Assert-True ($tuneRows.Count -eq 3) 'llama-bench JSON parses into one row per measurement'
+    Assert-True (($tuneRows[0].kind -eq 'prompt') -and ($tuneRows[0].n -eq 2048) -and ($tuneRows[2].kind -eq 'decode') -and ($tuneRows[2].n -eq 128)) 'prompt and decode rows are classified by n_prompt and n_gen'
+    Assert-True (($tuneRows[0].noisy -eq $false) -and ($tuneRows[1].noisy -eq $false)) 'stddev below 10 percent of the mean is not flagged as noisy'
+    Assert-True (($tuneRows[0].build_commit -eq 'abc123') -and ($tuneRows[0].n_batch -eq 2048) -and ($tuneRows[0].n_ubatch -eq 512)) 'the receipt keeps build and batch facts from the JSON'
+    $noisyFixture = $tuneJson.Replace('"stddev_ts":80.0', '"stddev_ts":180.0')
+    $noisyRows = @(ConvertFrom-TuneBenchJson -Text $noisyFixture)
+    Assert-True ($noisyRows[0].noisy) 'stddev over 10 percent of the mean is flagged'
+
+    $combos = @(Get-TuneBatchCombinations)
+    Assert-True (($combos.Count -eq 9) -and (@($combos | Where-Object { $_.ubatch_size -gt $_.batch_size }).Count -eq 0)) 'the default sweep has nine combinations and never exceeds the batch size'
+    $skippedCombos = @(Get-TuneBatchCombinations -BatchSizes @(128, 256) -UbatchSizes @(256, 512))
+    Assert-True (($skippedCombos.Count -eq 1) -and ($skippedCombos[0].batch_size -eq 256) -and ($skippedCombos[0].ubatch_size -eq 256)) 'combinations where ubatch exceeds batch are skipped'
+
+    $tuneRoot = Join-Path $work 'tune-install'
+    New-Item -ItemType Directory -Path (Join-Path $tuneRoot 'models') -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $tuneRoot 'models\dummy.gguf') -Force | Out-Null
+    $previousTuneRoot = $InstallRoot
+    $InstallRoot = $tuneRoot
+    $tuneJob = 'tune-20261104-000000'
+    New-Item -ItemType Directory -Path (Join-Path $tuneRoot "benchmarks\$tuneJob\raw") -Force | Out-Null
+    $tuneModel = [pscustomobject]@{ id = 'qwen3-4b'; name = 'Qwen3 4B'; file = 'dummy.gguf' }
+    $tuneHardware = [pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 15.8; RamGiB = 31.2; ModelBudgetGiB = 24.8 }
+    $tuneRuntime = [pscustomobject]@{ tag = 'b12110'; backend = 'Vulkan'; device = 'Vulkan1'; flash_arg = 'on'; path = $tuneRoot; bench_exe = (Join-Path $tuneRoot 'llama-bench.exe'); label = 'Vulkan b12110' }
+
+    # Tune must estimate the benchmark context, not the two-slot server context, and
+    # must not count a vision projector that llama-bench never loads.
+    $originalTuneEstimate = (Get-Command Get-VramEstimate).ScriptBlock
+    try {
+        $script:fitCall = $null
+        function Get-VramEstimate {
+            param($Model, $Hardware, [int] $Context, [double] $UsedGiB = 0, [string] $CacheType = 'q8_0', [int] $Slots = 0, [switch] $BenchmarkOnly)
+            $script:fitCall = [pscustomobject]@{ context = $Context; used = $UsedGiB; slots = $Slots; benchmark_only = [bool]$BenchmarkOnly }
+            return [pscustomobject]@{ verdict = 'fits'; needed_gib = 4.13; total_gib = 15.8; confidence = 'high'; context_tokens = 8320; slots = $Slots; weights_gib = 2.33; kv_gib = 0.61; compute_gib = 0.2; headroom_gib = 1.0; benchmark_only = [bool]$BenchmarkOnly }
+        }
+        $fitProbe = Get-TuneFit -Model $tuneModel -Hardware $tuneHardware
+        Assert-True (($script:fitCall.context -eq 8320) -and ($script:fitCall.slots -eq 1) -and $script:fitCall.benchmark_only) 'Tune fit uses 8192 prompt + 128 decode at one slot and excludes the projector'
+        Assert-True (($fitProbe.context_tokens -eq 8320) -and ($fitProbe.weights_gib -eq 2.33)) 'Tune fit exposes the benchmark-context components'
+    } finally {
+        Set-Item -Path Function:\Get-VramEstimate -Value $originalTuneEstimate
+    }
+
+    # stderr-only help fixture: PowerShell turns native stderr into NativeCommandError
+    # when ErrorActionPreference is Stop, which used to make every flag look absent.
+    $stderrBench = Join-Path $work 'llama-bench-stderr.cmd'
+    @(
+        '@echo off',
+        'echo Usage: llama-bench [options] 1>&2',
+        'echo   -dev, --device 1>&2',
+        'echo   -ngl, --n-gpu-layers 1>&2',
+        'echo   -fa, --flash-attn 1>&2',
+        'echo   -ctk, --cache-type-k 1>&2',
+        'echo   -ctv, --cache-type-v 1>&2',
+        'echo   -b, --batch-size 1>&2',
+        'echo   -ub, --ubatch-size 1>&2',
+        'echo   -p, --n-prompt 1>&2',
+        'echo   -n, --n-gen 1>&2',
+        'echo   -r, --repetitions 1>&2',
+        'echo   -o, --output 1>&2',
+        'exit /b 1'
+    ) | Set-Content -LiteralPath $stderrBench -Encoding ASCII
+    $previousEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Stop'
+        $stderrSupport = Get-TuneBenchSupport -ExePath $stderrBench
+    } finally { $ErrorActionPreference = $previousEap }
+    Assert-True ($stderrSupport.available -and @($stderrSupport.missing).Count -eq 0 -and $stderrSupport.text -match '-dev') 'llama-bench help written only to stderr is parsed under ErrorActionPreference Stop'
+
+    # The benchmark's own device list has the iGPU first and the discrete GPU second.
+    $fixtureRoot = Join-Path $work 'fixture-runtime'
+    New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+    $fixtureBench = Join-Path $fixtureRoot 'llama-bench.exe'
+    New-Item -ItemType File -Path $fixtureBench -Force | Out-Null
+    $script:fixtureDevices = @(
+        [pscustomobject]@{ Id = 'Vulkan0'; Name = 'AMD Radeon(TM) Graphics'; MiB = 512; Integrated = $true },
+        [pscustomobject]@{ Id = 'Vulkan1'; Name = 'AMD Radeon RX 9070 XT'; MiB = 16304; Integrated = $false }
+    )
+    $originalRuntimeInstalls = (Get-Command Get-RuntimeInstallations).ScriptBlock
+    $originalDeviceList = (Get-Command Get-LlamaDeviceList).ScriptBlock
+    try {
+        function Get-RuntimeInstallations {
+            return [pscustomobject]@{ relative_path = 'runtimes/vulkan/fixture'; exe_present = $true; backend = 'Vulkan'; tag = 'fixture'; path = $fixtureRoot; installation = [pscustomobject]@{ installed_at = '2026-11-05T00:00:00Z' } }
+        }
+        function Get-LlamaDeviceList {
+            param([string] $Directory, [string] $Executable = 'llama-server.exe')
+            if ($Executable -ne 'llama-bench.exe') { throw "unexpected executable $Executable" }
+            return ,$script:fixtureDevices
+        }
+        $fixtureCandidates = @(Get-TuneRuntimeCandidates)
+        Assert-True (($fixtureCandidates.Count -eq 1) -and (@($fixtureCandidates[0].devices).Count -eq 2) -and ($fixtureCandidates[0].device -eq 'Vulkan1') -and $fixtureCandidates[0].pinnable) 'Tune reads the benchmark device list and pins the discrete GPU when it is second'
+        Assert-True (($fixtureCandidates[0].device_arg -eq '-dev Vulkan1') -and ($fixtureCandidates[0].devices_source -eq 'llama-bench --list-devices')) 'Tune records the exact llama-bench device argument and its source'
+    } finally {
+        Set-Item -Path Function:\Get-RuntimeInstallations -Value $originalRuntimeInstalls
+        Set-Item -Path Function:\Get-LlamaDeviceList -Value $originalDeviceList
+    }
+
+    $cleanJson = $tuneJson
+    $alwaysNoisyJson = $tuneJson.Replace('"stddev_ts":80.0', '"stddev_ts":180.0')
+    $originalBenchProcess = (Get-Command Invoke-TuneBenchProcess).ScriptBlock
+    try {
+        $script:tuneBenchCalls = 0
+        $script:tuneAlwaysNoisy = $false
+        $script:tuneCleanJson = $cleanJson
+        $script:tuneAlwaysNoisyJson = $alwaysNoisyJson
+        function Invoke-TuneBenchProcess {
+            param([string] $FilePath, [string] $Arguments, [string] $WorkingDirectory, [string] $StdoutPath, [string] $StderrPath, [string] $JobId = '')
+            $script:tuneBenchCalls++
+            $payload = if ($script:tuneAlwaysNoisy -or $script:tuneBenchCalls -eq 1) { $script:tuneAlwaysNoisyJson } else { $script:tuneCleanJson }
+            return [pscustomobject]@{ exit_code = 0; stdout = $payload; stderr = ''; process_id = 0 }
+        }
+        $retry = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-retry' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048, 8192) -Gen 128 -Reps 3
+        Assert-True (($script:tuneBenchCalls -eq 2) -and $retry.rerun -and (-not $retry.unreliable)) 'a noisy first run is rerun once and a clean rerun clears the flag'
+        $script:tuneBenchCalls = 0
+        $script:tuneAlwaysNoisy = $true
+        $stillNoisy = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-noisy' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048, 8192) -Gen 128 -Reps 3
+        Assert-True (($script:tuneBenchCalls -eq 2) -and $stillNoisy.unreliable -and $stillNoisy.rows[0].noisy) 'a row still noisy after the rerun is marked unreliable'
+        $script:tuneBenchCalls = 0
+        $script:tuneAlwaysNoisy = $false
+        $script:tuneAlwaysNoisyJson = $tuneJson.Replace('"devices":"Vulkan1"', '"devices":"Vulkan0"')
+        $deviceMismatch = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-device-mismatch' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048, 8192) -Gen 128 -Reps 3
+        Assert-True (($deviceMismatch.status -eq 'device_mismatch') -and (-not $deviceMismatch.device_verified) -and (@($deviceMismatch.observed_devices) -contains 'Vulkan0')) 'a benchmark JSON naming a different device is rejected even when the argument was correct'
+    } finally {
+        Set-Item -Path Function:\Invoke-TuneBenchProcess -Value $originalBenchProcess
+    }
+
+    function New-TuneTestResult {
+        param([int] $Batch, [int] $Ubatch, [double] $P1, [double] $P2, [double] $Tg, [bool] $Unreliable = $false)
+        $rows = @(
+            [pscustomobject]@{ kind = 'prompt'; n = 2048; mean = $P1; stddev = 0; noisy = $false; n_batch = $Batch; n_ubatch = $Ubatch },
+            [pscustomobject]@{ kind = 'prompt'; n = 8192; mean = $P2; stddev = 0; noisy = $false; n_batch = $Batch; n_ubatch = $Ubatch },
+            [pscustomobject]@{ kind = 'decode'; n = 128; mean = $Tg; stddev = 0; noisy = $false; n_batch = $Batch; n_ubatch = $Ubatch }
+        )
+        return [pscustomobject]@{ model_id = 'qwen3-4b'; status = 'ok'; runtime_tag = 'b12110'; backend = 'Vulkan'; unreliable = $Unreliable; command = 'llama-bench test'; rows = $rows }
+    }
+    $baseline = New-TuneTestResult -Batch 2048 -Ubatch 512 -P1 100 -P2 90 -Tg 50
+    $shortOnly = New-TuneTestResult -Batch 1024 -Ubatch 256 -P1 120 -P2 80 -Tg 90
+    $both = New-TuneTestResult -Batch 512 -Ubatch 128 -P1 110 -P2 100 -Tg 60
+    $presetSet = New-TunePresetSet -Model $tuneModel -Stage2 @($baseline, $shortOnly, $both) -Hardware $tuneHardware -JobId $tuneJob
+    Assert-True ($null -ne $presetSet) 'a setting that wins both prompt tests produces presets'
+    if ($null -ne $presetSet) {
+        Assert-True (($presetSet.Fast.batch_size -eq 512) -and ($presetSet.Fast.ubatch_size -eq 128)) 'Fast comes from the eligible setting, not the short-test-only setting'
+        Assert-True (($presetSet.Balanced.batch_size -eq 512) -and ($presetSet.'Long context'.batch_size -eq 512)) 'Balanced and Long context stay inside the both-tests-eligible set'
+        Assert-True (@($presetSet.PSObject.Properties | Where-Object { $_.Value.batch_size -eq 1024 }).Count -eq 0) 'the short-test-only setting is never recommended'
+        Assert-True ($presetSet.Fast.receipt.eligible_both_prompts) 'the preset receipt records the both-prompt eligibility rule'
+    }
+    $noEligible = New-TunePresetSet -Model $tuneModel -Stage2 @($baseline, $shortOnly) -Hardware $tuneHardware -JobId $tuneJob
+    Assert-True ($null -eq $noEligible) 'with no setting that wins both prompt tests, no preset is recommended'
+
+    $checkpointDoc = [pscustomobject]@{
+        schema_version = 1; job_id = $tuneJob; plan_generated_at = 'fixture'
+        reference_before = [pscustomobject]@{ status = 'ok' }
+        reference_before_stage2 = $null
+        stage1 = @([pscustomobject]@{ model_id = 'qwen3-4b'; runtime_tag = 'b12110'; status = 'ok' })
+        stage2 = @([pscustomobject]@{ model_id = 'qwen3-4b'; batch_size = 2048; ubatch_size = 512; status = 'ok' })
+    }
+    Write-TuneCheckpoint -JobId $tuneJob -Checkpoint $checkpointDoc
+    $checkpointRead = Read-TuneCheckpoint -JobId $tuneJob
+    Assert-True ((@($checkpointRead.stage1).Count -eq 1) -and (@($checkpointRead.stage2).Count -eq 1) -and ((Get-TuneCompletedCount -Checkpoint $checkpointRead) -eq 3)) 'Tune writes and reads per-row checkpoints for resuming'
+    $skipCheckpoint = [pscustomobject]@{ stage1 = @([pscustomobject]@{ status = 'skipped_fit' }); stage2 = @(); reference_before = $null; reference_before_stage2 = $null }
+    Assert-True ((Get-TuneCompletedCount -Checkpoint $skipCheckpoint) -eq 0) 'a skipped did-not-fit row is not counted as a completed benchmark'
+
+    Set-AppSetting -Name 'tune_presets' -Value ([pscustomobject]@{ 'qwen3-4b' = [pscustomobject]@{ 'Fast' = [pscustomobject]@{ batch_size = 512; ubatch_size = 128; context_size = 16384; selected = $false; receipt = [pscustomobject]@{ job_id = $tuneJob; model_id = 'qwen3-4b' } } } })
+    $tuneActive = [pscustomobject]@{ id = 'qwen3-4b'; model_path = (Join-Path $tuneRoot 'models\dummy.gguf'); mmproj_path = ''; alias = 'qwen3:4b'; reasoning = $false; tool_calling = $false; thinking = $false }
+    $beforePreset = Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768
+    Assert-True ((($beforePreset -join ' ') -notmatch '--batch-size') -and (($beforePreset -join ' ') -notmatch '--ubatch-size')) 'selecting no preset leaves the launch arguments unchanged'
+    Set-TunePresetSelection -ModelId 'qwen3-4b' -Preset 'Fast'
+    $afterPreset = Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768
+    Assert-True (($afterPreset -join ' ') -match '--batch-size 512 --ubatch-size 128') 'a selected preset maps batch and ubatch to the server flags'
+    Assert-True (($afterPreset -join ' ') -match '--ctx-size 32768') 'a selected preset can set the per-slot context (two slots)'
+    Set-TunePresetSelection -ModelId 'qwen3-4b' -Preset 'none'
+    $clearedPreset = Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768
+    Assert-True (($clearedPreset -join ' ') -eq ($beforePreset -join ' ')) 'clearing the selection restores the exact previous command line'
+    $tuneSettingsDoc = Get-SettingsDocument
+    Assert-True (($tuneSettingsDoc.PSObject.Properties.Name -contains 'tune_presets') -and ($null -ne $tuneSettingsDoc.tune_presets.models)) 'the settings document exposes Tune presets and the opt-in selection'
+
+    $originalServerState = (Get-Command Get-ServerState).ScriptBlock
+    $originalGpuReport = (Get-Command Get-GpuPinningReport).ScriptBlock
+    $originalRuntimes = (Get-Command Get-TuneRuntimeCandidates).ScriptBlock
+    $originalHardwareProfile = (Get-Command Get-HardwareProfile).ScriptBlock
+    $originalGamePause = (Get-Command Get-GamePauseGiB).ScriptBlock
+    $originalTuneModels = (Get-Command Get-TuneModelCandidates).ScriptBlock
+    try {
+        function Get-ServerState { [pscustomobject]@{ process_ids = @(4242) } }
+        function Get-GpuPinningReport { [pscustomobject]@{ status = 'integrated_only'; reason = 'Only an integrated GPU was found.' } }
+        function Get-TuneRuntimeCandidates { return @() }
+        function Get-HardwareProfile { [pscustomobject]@{ MaxAmdVramGiB = 15.8 } }
+        function Get-GamePauseGiB { return 0 }
+        function Get-TuneModelCandidates { return @() }
+        $refused = Start-TuneJob
+        $codes = @($refused.blockers | ForEach-Object { [string]$_.code })
+        Assert-True (($refused.status -eq 'blocked') -and ($codes -contains 'server_running') -and ($codes -contains 'gpu_not_pinned')) 'Tune refuses a running server and an unpinned GPU with typed blockers'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $tuneRoot 'benchmarks\tune-20261104-999999'))) 'a refused Tune start creates no job directory'
+    } finally {
+        Set-Item -Path Function:\Get-ServerState -Value $originalServerState
+        Set-Item -Path Function:\Get-GpuPinningReport -Value $originalGpuReport
+        Set-Item -Path Function:\Get-TuneRuntimeCandidates -Value $originalRuntimes
+        Set-Item -Path Function:\Get-HardwareProfile -Value $originalHardwareProfile
+        Set-Item -Path Function:\Get-GamePauseGiB -Value $originalGamePause
+        Set-Item -Path Function:\Get-TuneModelCandidates -Value $originalTuneModels
+    }
+
+    $cancelJob = 'tune-20261104-000001'
+    $cancelDir = Join-Path $tuneRoot "benchmarks\$cancelJob"
+    New-Item -ItemType Directory -Path $cancelDir -Force | Out-Null
+    $cancelWorker = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60') -PassThru -WindowStyle Hidden
+    $cancelBench = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60') -PassThru -WindowStyle Hidden
+    try {
+        $cancelJobDoc = [pscustomobject]@{ schema_version = 1; job_id = $cancelJob; state = 'running'; worker_pid = [int]$cancelWorker.Id; total_runs = 10 }
+        Write-TuneJson -Path (Join-Path $cancelDir 'job.json') -Document $cancelJobDoc
+        Write-TuneProgress -JobId $cancelJob -Fields @{ state = 'running'; stage = 'stage1'; current_bench_pid = [int]$cancelBench.Id; completed_runs = 1; total_runs = 10 }
+        $cancel = Stop-TuneJob -JobId $cancelJob
+        Start-Sleep -Milliseconds 250
+        Assert-True (($cancel.status -eq 'cancelled') -and $cancel.stopped_worker -and $cancel.stopped_bench) 'Cancel stops the worker and the current benchmark process'
+        Assert-True (($null -eq (Get-Process -Id $cancelWorker.Id -ErrorAction SilentlyContinue)) -and ($null -eq (Get-Process -Id $cancelBench.Id -ErrorAction SilentlyContinue))) 'Cancel leaves no worker or benchmark process behind'
+        $cancelProgress = Read-TuneJson -Path (Join-Path $cancelDir 'progress.json')
+        Assert-True (($cancelProgress.state -eq 'cancelled') -and ([int]$cancelProgress.current_bench_pid -eq 0)) 'Cancel records the cancelled state and clears the benchmark PID'
+    } finally {
+        Stop-Process -Id $cancelWorker.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $cancelBench.Id -Force -ErrorAction SilentlyContinue
+        $InstallRoot = $previousTuneRoot
+    }
+
     Write-Host 'Benchmark history (append, read back, tolerate junk)'
     $benchPath = Join-Path $work 'bench-history.jsonl'
     Add-BenchmarkRecord -Path $benchPath -Record ([pscustomobject]@{ at = '2026-10-01T00:00:00.0000000Z'; model_id = 'qwen3.5-9b'; alias = 'qwen3.5:9b'; prompt_tps = 900.0; gen_tps = 82.4 })
@@ -938,6 +1169,7 @@ try {
     Assert-True ($diag.overall.status -eq 'broken') 'a missing runtime makes the install broken'
     $sectionConfidences = @($diag.runtime_health.confidence, $diag.hardware_health.confidence, $diag.model_health.confidence, $diag.editor_health.confidence)
     Assert-True (@($sectionConfidences | Where-Object { [string]::IsNullOrEmpty([string]$_) }).Count -eq 0) 'every section carries a confidence'
+    Assert-True (($null -ne $diag.rocm_latest) -and ($diag.rocm_latest.verified_usable_on_this_machine -eq $false) -and (@($diag.rocm_latest.missing_external_dlls) -contains 'hipblas.dll') -and ($diag.rocm_latest.finding -match 'no hipblas')) 'diagnostics reports the ROCm 10 entry as not verified usable with the exact missing external DLL finding'
     $diagRound = ConvertTo-Json -InputObject $diag -Depth 8 | ConvertFrom-Json
     Assert-True (($diagRound.schema_version -eq 1) -and ($diagRound.runtime_health.state -eq $diag.runtime_health.state) -and ($diagRound.overall.status -eq $diag.overall.status)) 'diagnostics survive a JSON round trip'
 

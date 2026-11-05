@@ -21,6 +21,17 @@
     "min_adrenalin_source": "https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html",
     "verified_on": "2026-11-05",
     "verified_against": "https://github.com/ggml-org/llama.cpp/pull/26973 and https://github.com/ggml-org/llama.cpp/discussions/27047",
+    "machine_verification": {
+      "checked_on": "2026-11-05",
+      "machine": "Radeon RX 9070 XT, driver 32.0.32015.7029, 32 GB RAM",
+      "verified_usable": false,
+      "finding": "Not verified usable on this machine: the b12110 ROCm 10.0 ZIP bundles ggml-hip.dll, amdhip64_7.dll, rocm_kpack.dll and amd_comgr.dll but no hipblas.dll, rocblas.dll or rocsolver.dll; no separate ROCm 10 runtime is installed, and the extracted llama-bench --list-devices returned (none). Adrenalin 26.8.1 is AMD's matrix guidance, not a supply of those libraries.",
+      "archive_name": "llama-b12110-bin-win-rocm-10.0-x64.zip",
+      "archive_sha256": "097f408356dbaaa318c1b4be75f5d524bdab01541203adf16bf6e486b75deae4",
+      "external_dlls_missing": ["hipblas.dll", "rocblas.dll", "rocsolver.dll"],
+      "list_devices_result": "(none)",
+      "source": "Local archive inspection and the extracted llama-bench command; release notes are https://github.com/ggml-org/llama.cpp/releases/tag/b12110 and the runtime page is https://rocm.docs.amd.com/projects/install-on-windows/en/latest/"
+    },
     "notes": "The ggml-org Windows ROCm 10.0 ZIP bundles only ggml-hip.dll, amdhip64_7.dll, rocm_kpack.dll and amd_comgr.dll. hipblas/rocblas/rocsolver and the kernel folders come from a separately installed ROCm runtime. The Adrenalin figure is AMD's ROCm 10.0 matrix for RX 9000; llama.cpp's own release notes do not state a driver minimum."
   },
   "adapters": [
@@ -74,6 +85,8 @@
     { "flag": "--gpu-layers", "required": false, "purpose": "Automatic layer placement on the GPU." },
     { "flag": "--fit-target", "required": false, "purpose": "The 1 GiB headroom target for automatic placement." },
     { "flag": "--ctx-size", "required": false, "purpose": "The shared context pool for all slots." },
+    { "flag": "--batch-size", "required": false, "purpose": "Opt-in Tune preset: logical batch size." },
+    { "flag": "--ubatch-size", "required": false, "purpose": "Opt-in Tune preset: physical micro-batch size." },
     { "flag": "--cache-type-k", "required": false, "purpose": "Quantised K cache (q8_0)." },
     { "flag": "--cache-type-v", "required": false, "purpose": "Quantised V cache (q8_0)." },
     { "flag": "--spec-type", "required": false, "purpose": "N-gram speculative drafting; replies are unchanged." },

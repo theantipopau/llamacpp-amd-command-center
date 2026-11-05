@@ -94,7 +94,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui', 'GameWatch', 'Benchmark')]
+    [ValidateSet('Dashboard', 'Install', 'Advisor', 'Models', 'Launch', 'Update', 'Diagnostics', 'VSCodeChat', 'Uninstall', 'ViewLog', 'Status', 'State', 'Snapshot', 'Recommend', 'Diagnose', 'Runtime', 'Tune', 'SelfTest', 'Monitor', 'CheckUpdate', 'ContinueConfig', 'LlamaVscodeConfig', 'ListInstalled', 'Activate', 'RemoveModel', 'Easy', 'Preflight', 'IdleSleep', 'Shortcuts', 'RemoveShortcuts', 'Settings', 'Library', 'Gui', 'GameWatch', 'Benchmark')]
     [string] $Action = 'Dashboard',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\llama.cpp'),
     [string] $SettingsPatch = '',
@@ -111,6 +111,10 @@ param(
     [ValidateSet('health', 'start', 'stop', 'update', 'rollback', 'updates')]
     [string] $RuntimeAction = 'health',
     [string] $RuntimeAdapter = 'llamacpp',
+    [ValidateSet('Plan', 'Start', 'Status', 'Cancel', 'Results', 'Resume', 'Worker')]
+    [string] $TuneAction = 'Plan',
+    [switch] $TuneSmoke,
+    [string] $TuneJobId = '',
     [ValidateRange(0, 1440)]
     [int] $IdleMinutes = 0,
     [ValidateSet('', 'chat', 'coding', 'images', 'fast', 'quality')]
@@ -1346,9 +1350,24 @@ function Stop-Runtime {
     if (-not $Force) {
         return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'requires_confirmation'; detail = "$(@($processes).Count) llama-server process is running; pass -Force to stop it. Nothing was stopped."; killed = 0 }
     }
-    $killed = @($processes).Count
-    @($processes) | Stop-Process -Force
-    return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'stopped'; detail = "Stopped $killed llama-server process(es)."; killed = $killed }
+    # Router mode can publish a child process while the first snapshot is being stopped.
+    # Keep taking snapshots briefly and verify the result instead of reporting success from
+    # a one-shot kill list.
+    $killed = 0
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        $remaining = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) { break }
+        foreach ($serverProcess in $remaining) {
+            try { Stop-Process -Id $serverProcess.Id -Force -ErrorAction Stop; $killed++ } catch { }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $left = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+    if ($left.Count -eq 0) {
+        return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'stopped'; detail = "Stopped $killed llama-server process(es)."; killed = $killed; remaining = 0 }
+    }
+    return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'stop_incomplete'; detail = "$($left.Count) llama-server process(es) could not be stopped."; killed = $killed; remaining = $left.Count; process_ids = @($left | ForEach-Object { $_.Id }) }
 }
 
 function Get-RuntimeHealth {
@@ -1466,8 +1485,11 @@ function Get-RuntimeDependencyReport {
     $family = Get-BackendFamily -Backend $Backend
     $required = @()
     if ($family -eq 'vulkan') {
+        # ggml-vulkan.dll is runtime-local. Never accept a copy from an unrelated
+        # runtime on PATH: that would let a broken build pass its rollback check.
+        # vulkan-1.dll is the system loader, supplied by the driver in System32.
         $required = @('llama-server.exe', 'ggml-vulkan.dll', 'vulkan-1.dll')
-        $SearchPath = @($SearchPath) + @((Join-Path $env:SystemRoot 'System32'))
+        $SearchPath = @((Join-Path $env:SystemRoot 'System32'))
     } elseif ($family -eq 'rocm') {
         $required = @('llama-server.exe', 'ggml-hip.dll', 'amdhip64*.dll')
         try {
@@ -1498,11 +1520,22 @@ function Get-RuntimeDependencyReport {
     }
     $driverMinimum = $null
     $driverSource = ''
-    if ($family -eq 'rocm' -and $asset -match 'rocm-10\.0') {
+    $verifiedUsable = $null
+    $verificationFinding = ''
+    $requiredExternal = @()
+    if ($family -eq 'rocm') {
         try {
             $info = Get-CatalogJson -Name 'runtimes.json'
-            $driverMinimum = [string]$info.ggml_org_rocm_windows.min_adrenalin
-            $driverSource = [string]$info.ggml_org_rocm_windows.min_adrenalin_source
+            $requiredExternal = @($info.ggml_org_rocm_windows.required_external_dlls)
+            if ($asset -match 'rocm-10\.0') {
+                $driverMinimum = [string]$info.ggml_org_rocm_windows.min_adrenalin
+                $driverSource = [string]$info.ggml_org_rocm_windows.min_adrenalin_source
+                $machine = $info.ggml_org_rocm_windows.machine_verification
+                if ($null -ne $machine) {
+                    $verifiedUsable = [bool]$machine.verified_usable
+                    $verificationFinding = [string]$machine.finding
+                }
+            }
         } catch { }
     }
     return [pscustomobject]@{
@@ -1512,6 +1545,9 @@ function Get-RuntimeDependencyReport {
         status = if ($missing.Count -eq 0) { 'ok' } else { 'missing_files' }
         missing_files = @($missing)
         found_files = @($found)
+        required_external_dlls = @($requiredExternal)
+        verified_usable = $verifiedUsable
+        verification_finding = $verificationFinding
         where_to_get = $where
         driver_min_version = $driverMinimum
         driver_min_source = $driverSource
@@ -1682,6 +1718,43 @@ function Get-DiagnosticReport {
         }
     }
 
+    # ROCm 10: the catalogue carries the checked machine finding. Report it explicitly
+    # even when no ROCmLatest runtime is installed, and do not call the entry usable
+    # merely because the driver is recent enough.
+    $rocmLatest = $null
+    try {
+        $rocmCatalog = Get-CatalogJson -Name 'runtimes.json'
+        $rocmInfo = $rocmCatalog.ggml_org_rocm_windows
+        $machine = $rocmInfo.machine_verification
+        $required = @($rocmInfo.required_external_dlls)
+        $search = @($env:PATH -split ';')
+        $present = @()
+        $missingExternal = @()
+        foreach ($name in $required) {
+            $resolved = Find-RuntimeDependency -Directory '' -Name $name -SearchPath $search
+            if ([string]::IsNullOrWhiteSpace($resolved)) { $missingExternal += $name } else { $present += [pscustomobject]@{ name = $name; path = $resolved } }
+        }
+        $installedRocm10 = @($runtimes | Where-Object { [string]$_.backend -eq 'ROCmLatest' })
+        $rocmLatest = [pscustomobject]@{
+            entry = 'ggml_org_rocm_windows'
+            rocm_version = [string]$rocmInfo.rocm_version
+            min_adrenalin = [string]$rocmInfo.min_adrenalin
+            min_adrenalin_source = [string]$rocmInfo.min_adrenalin_source
+            required_external_dlls = @($required)
+            present_external_dlls = @($present)
+            missing_external_dlls = @($missingExternal)
+            installed = ($installedRocm10.Count -gt 0)
+            installed_paths = @($installedRocm10 | ForEach-Object { [string]$_.path })
+            verified_usable_on_this_machine = if ($null -ne $machine) { [bool]$machine.verified_usable } else { $false }
+            finding = if ($null -ne $machine) { [string]$machine.finding } else { 'No machine verification is recorded for this catalogue entry.' }
+            checked_on = if ($null -ne $machine) { [string]$machine.checked_on } else { '' }
+            source = if ($null -ne $machine) { [string]$machine.source } else { '' }
+        }
+        if ($installedRocm10.Count -gt 0 -and $missingExternal.Count -gt 0) {
+            $warnings += "ROCm 10 is installed but not usable on this machine: missing $($missingExternal -join ', '). $($rocmLatest.finding)"
+        }
+    } catch { $rocmLatest = [pscustomobject]@{ verified_usable_on_this_machine = $false; finding = 'ROCm 10 verification could not be read from the catalogue.' } }
+
     # roll-up: any blocker -> broken, else any warning -> degraded, else ok
     $blockers = @()
     $warnings = @()
@@ -1712,6 +1785,7 @@ function Get-DiagnosticReport {
         install_root = [string]$InstallRoot
         runtime_health = $runtimeHealth
         runtimes = @($runtimes)
+        rocm_latest = $rocmLatest
         gpu_pinning = $gpuPinning
         gpu_driver = $gpuDriver
         hardware_health = $hardwareHealth
@@ -2390,8 +2464,8 @@ function Assert-DiscreteGpuForStart {
 }
 
 function Get-LlamaDeviceList {
-    param([string] $Directory)
-    $exe = Join-Path $Directory 'llama-server.exe'
+    param([string] $Directory, [ValidateSet('llama-server.exe', 'llama-bench.exe')] [string] $Executable = 'llama-server.exe')
+    $exe = Join-Path $Directory $Executable
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return ,@() }
     $previous = $ErrorActionPreference
     $lines = @()
@@ -2411,6 +2485,12 @@ function Get-LlamaDeviceList {
 function Get-ServerArguments {
     param($ActiveModel, [int] $EffectiveContext, [string] $Device = '')
     # Single source of truth for both the generated launcher and Start-ActiveServer.
+    # A selected Tune preset is opt-in: with no selection this function is byte-for-byte
+    # the same argument list as before. The preset may also raise the per-slot context
+    # for the Long context tier; it is still bounded by the fit estimate that produced it.
+    $serverContext = [int]$EffectiveContext
+    $tunePreset = Get-TunePresetForModel -ModelId ([string]$ActiveModel.id)
+    if ($null -ne $tunePreset -and [int]$tunePreset.context_size -gt 0) { $serverContext = [int]$tunePreset.context_size }
     $arguments = @(
         '--model', [string]$ActiveModel.model_path
     )
@@ -2425,7 +2505,7 @@ function Get-ServerArguments {
         '--fit', 'on',
         '--fit-target', '1024',
         '--parallel', [string]$script:ServerSlots,
-        '--ctx-size', [string]($EffectiveContext * $script:ServerSlots),
+        '--ctx-size', [string]($serverContext * $script:ServerSlots),
         '--flash-attn', 'on',
         '--cache-type-k', 'q8_0',
         '--cache-type-v', 'q8_0',
@@ -2439,6 +2519,9 @@ function Get-ServerArguments {
         # way). Opt out with server-args.user.json: ["--spec-type", "none"].
         '--spec-type', 'ngram-mod'
     )
+    if ($null -ne $tunePreset) {
+        $arguments += @('--batch-size', [string]$tunePreset.batch_size, '--ubatch-size', [string]$tunePreset.ubatch_size)
+    }
     if (-not [string]::IsNullOrWhiteSpace($Device)) { $arguments += @('--device', $Device) }
     if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
         $arguments += @('--reasoning', 'on', '--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
@@ -4110,7 +4193,9 @@ function Get-StateProperty {
     # older versions may lack newer fields, so read them defensively.
     param($Object, [string] $Name, $Default = $null)
     if ($null -eq $Object) { return $Default }
-    if (@($Object.PSObject.Properties.Name) -contains $Name) { return $Object.$Name }
+    $names = @()
+    if ($null -ne $Object.PSObject.Properties) { foreach ($property in $Object.PSObject.Properties) { $names += [string]$property.Name } }
+    if ($names -contains $Name) { return $Object.$Name }
     return $Default
 }
 
@@ -4286,7 +4371,9 @@ function Set-AppSetting {
     $settings = Get-AppSettings
     $settings[$Name] = $Value
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    $json = ConvertTo-Json -InputObject ([pscustomobject]$settings) -Depth 4
+    # Tune presets carry a receipt one level deeper than the simple settings; keep the
+    # whole document instead of truncating the evidence that justified a preset.
+    $json = ConvertTo-Json -InputObject ([pscustomobject]$settings) -Depth 12
     [IO.File]::WriteAllText((Get-AppSettingsPath), $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
@@ -4523,8 +4610,11 @@ function Get-VramEstimate {
     # Estimate only: weights (real file sizes), KV cache (GGUF metadata), compute buffers and
     # headroom. Hybrid architectures use full_attention_interval; the linear-attention state
     # is deliberately not counted, which is why hybrid estimates are medium confidence.
-    param($Model, $Hardware, [int] $Context, [double] $UsedGiB = 0, [string] $CacheType = 'q8_0')
-    $slots = [Math]::Max(1, [int]$script:ServerSlots)
+    param($Model, $Hardware, [int] $Context, [double] $UsedGiB = 0, [string] $CacheType = 'q8_0', [int] $Slots = 0, [switch] $BenchmarkOnly)
+    # The server estimator multiplies per-slot context by the number of conversation
+    # slots. llama-bench has no slots: callers that estimate a benchmark pass Slots 1
+    # and BenchmarkOnly, which also leaves the vision projector out of the weight total.
+    $slots = if ($Slots -gt 0) { $Slots } else { [Math]::Max(1, [int]$script:ServerSlots) }
     $contextTokens = [long]([Math]::Max(1, $Context) * $slots)
     $modelPath = if ($Model.PSObject.Properties.Name -contains 'model_path') { [string]$Model.model_path } else { Join-Path (Join-Path $InstallRoot 'models') ([string]$Model.File) }
     $projectorPath = ''
@@ -4534,7 +4624,9 @@ function Get-VramEstimate {
     }
     $meta = Read-GgufMetadata -Path $modelPath
     $weights = 0.0
-    foreach ($file in @($modelPath, $projectorPath)) {
+    $weightFiles = @($modelPath)
+    if (-not $BenchmarkOnly) { $weightFiles += $projectorPath }
+    foreach ($file in $weightFiles) {
         if (-not [string]::IsNullOrWhiteSpace([string]$file) -and (Test-Path -LiteralPath ([string]$file) -PathType Leaf)) {
             try { $weights += ([double](Get-Item -LiteralPath ([string]$file)).Length / 1GB) } catch { }
         }
@@ -4588,6 +4680,8 @@ function Get-VramEstimate {
         hybrid = $hybrid
         moe = $moe
         context_tokens = $contextTokens
+        slots = $slots
+        benchmark_only = [bool]$BenchmarkOnly
         cache_type = $CacheType
         weights_gib = [Math]::Round($weights, 2)
         kv_gib = [Math]::Round($kv, 2)
@@ -6384,6 +6478,11 @@ function Get-SettingsDocument {
             max = 40
         }
         active_runtime = if ($null -ne (Get-InstalledRuntime)) { [pscustomobject]@{ backend = [string](Get-InstalledRuntime).backend; tag = [string](Get-InstalledRuntime).tag; path = [string](Get-InstalledRuntime).path } } else { $null }
+        tune_presets = [pscustomobject]@{
+            models = if ($settings.ContainsKey('tune_presets')) { $settings['tune_presets'] } else { [pscustomobject]@{} }
+            selection = if ($settings.ContainsKey('tune_preset_selection')) { $settings['tune_preset_selection'] } else { [pscustomobject]@{} }
+            note = 'Tune presets are opt-in. An empty selection leaves the launch arguments unchanged.'
+        }
         model_backends = Get-ModelBackendMap
     }
 }
@@ -6486,6 +6585,25 @@ function Set-SettingsFromDocument {
                 }
                 Set-ModelBackendOverride -ModelId $modelId -Backend $requested
                 $result['applied'] += @([pscustomobject]@{ field = "model_backends.$modelId"; value = $requested; note = 'set'; triple = $null })
+            }
+        }
+    }
+    # Optional: opt-in Tune preset selection. 'none' clears that model's selection; an
+    # unknown model or preset is rejected without changing anything else in the patch.
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'tune_preset_selection') {
+        $selection = $parsed.tune_preset_selection
+        if ($null -eq $selection) {
+            $result['rejected'] += @([pscustomobject]@{ field = 'tune_preset_selection'; reason = 'tune_preset_selection must be an object of model id to preset name or none.' })
+        } else {
+            foreach ($property in $selection.PSObject.Properties) {
+                $modelId = [string]$property.Name
+                $presetName = [string]$property.Value
+                try {
+                    Set-TunePresetSelection -ModelId $modelId -Preset $presetName
+                    $result['applied'] += @([pscustomobject]@{ field = "tune_preset_selection.$modelId"; value = $presetName; note = 'set'; triple = $null })
+                } catch {
+                    $result['rejected'] += @([pscustomobject]@{ field = "tune_preset_selection.$modelId"; reason = [string]$_.Exception.Message })
+                }
             }
         }
     }
@@ -6613,6 +6731,912 @@ function Invoke-LibraryAction {
     return [pscustomobject]$result
 }
 
+# ---------------------------------------------------------------------
+# Tune: measured llama-bench runs, opt-in presets, and local receipts
+# ---------------------------------------------------------------------
+# All measurements are local evidence. No number is invented: a failed or skipped
+# row carries its reason, and a preset is only data until the user selects it.
+
+function Get-TuneValue {
+    param($Object, [string] $Name, $Default = $null)
+    if ($null -eq $Object) { return $Default }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $Default
+    }
+    $names = @()
+    if ($null -ne $Object.PSObject.Properties) { foreach ($property in $Object.PSObject.Properties) { $names += [string]$property.Name } }
+    if ($names -contains $Name) { return $Object.$Name }
+    return $Default
+}
+
+function Get-TuneJobRoot { return (Join-Path $InstallRoot 'benchmarks') }
+function Get-TuneJobDirectory {
+    param([string] $JobId)
+    if ([string]::IsNullOrWhiteSpace($JobId)) { return $null }
+    if ($JobId -notmatch '^tune-[0-9]{8}-[0-9]{6}$') { throw "Invalid Tune job id '$JobId'." }
+    return (Join-Path (Get-TuneJobRoot) $JobId)
+}
+function Get-TuneJobFile { param([string] $JobId, [string] $Name); return (Join-Path (Get-TuneJobDirectory -JobId $JobId) $Name) }
+function Read-TuneJson {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try { return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) } catch { return $null }
+}
+function Write-TuneJson {
+    param([string] $Path, $Document)
+    $dir = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $json = ConvertTo-Json -InputObject $Document -Depth 14
+    [IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+function Read-TuneCheckpoint {
+    param([string] $JobId)
+    $path = Join-Path (Get-TuneJobDirectory -JobId $JobId) 'checkpoint.json'
+    $doc = Read-TuneJson -Path $path
+    if ($null -eq $doc) { return $null }
+    return $doc
+}
+
+function Write-TuneCheckpoint {
+    param([string] $JobId, $Checkpoint)
+    if ($null -eq $Checkpoint) { return }
+    $Checkpoint | Add-Member -NotePropertyName updated_at -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    Write-TuneJson -Path (Join-Path (Get-TuneJobDirectory -JobId $JobId) 'checkpoint.json') -Document $Checkpoint
+}
+
+function Get-TuneCompletedCount {
+    param($Checkpoint)
+    if ($null -eq $Checkpoint) { return 0 }
+    # A skipped_fit row is a recorded decision, not a completed benchmark; counting it
+    # made a 24-run plan report 26/24 when the 27B rows were skipped.
+    $count = @($Checkpoint.stage1 | Where-Object { [string]$_.status -ne 'skipped_fit' }).Count + @($Checkpoint.stage2).Count
+    if ($null -ne $Checkpoint.reference_before) { $count++ }
+    if ($null -ne $Checkpoint.reference_before_stage2) { $count++ }
+    return [int]$count
+}
+
+function Get-TuneLatestJobId {
+    $root = Get-TuneJobRoot
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return '' }
+    $dir = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'tune-*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1)
+    if ($dir.Count -eq 0) { return '' }
+    return [string]$dir[0].Name
+}
+function Get-TuneComparisonCaveat {
+    param($Runtimes = $null)
+    $list = if ($null -ne $Runtimes) { @($Runtimes) } else { @(Get-TuneRuntimeCandidates) }
+    $latest = @($list | Where-Object { [string]$_.backend -eq 'ROCmLatest' } | Select-Object -First 1)
+    $vulkan = @($list | Where-Object { [string]$_.backend -eq 'Vulkan' } | Select-Object -First 1)
+    $amd = @($list | Where-Object { [string]$_.backend -eq 'ROCm' } | Select-Object -First 1)
+    if ($latest.Count -gt 0) {
+        $vTag = if ($vulkan.Count -gt 0) { [string]$vulkan[0].tag } else { 'unknown' }
+        $sameBuild = ([string]$latest[0].tag -eq $vTag)
+        $buildText = if ($sameBuild) { "the same upstream build ($($latest[0].tag))" } else { "upstream $($latest[0].tag); Vulkan is $vTag" }
+        $amdText = if ($amd.Count -gt 0) { " The AMD ROCm 7.2.1 package is older (upstream $($amd[0].tag), March)." } else { '' }
+        return "ROCm is the ggml-org ROCm 10 build $($latest[0].tag), $buildText.${amdText} Results apply only to these builds on this machine; this is not a general backend ranking."
+    }
+    return 'ROCm is AMD ROCm 7.2.1 / upstream b8407 (2026-03-18); Vulkan is upstream b12110 (2026-11-04). A backend difference also mixes llama.cpp versions. Results apply only to these builds on this machine, not as a general backend ranking.'
+}
+
+function Get-TuneRuntimeCandidates {
+    # One newest build per backend channel. The older b12109 is deliberately excluded
+    # because it is a rollback copy, not a comparison runtime. A side-by-side
+    # ggml-org ROCm 10 build has its own backend label (ROCmLatest).
+    $installs = @(Get-RuntimeInstallations | Where-Object { [string]$_.relative_path -ne 'current' -and [bool]$_.exe_present })
+    $groups = @{}
+    foreach ($item in $installs) {
+        $key = [string]$item.backend
+        if (-not $groups.ContainsKey($key)) { $groups[$key] = @() }
+        $groups[$key] += $item
+    }
+    $result = @()
+    foreach ($backend in @('Vulkan', 'ROCm', 'ROCmLatest')) {
+        if (-not $groups.ContainsKey($backend)) { continue }
+        $candidates = @($groups[$backend] | Sort-Object -Property @{ Expression = { $stamp = [string](Get-TuneValue -Object $_.installation -Name 'installed_at' -Default ''); try { [datetime]$stamp } catch { [datetime]::MinValue } } } -Descending)
+        $item = $candidates[0]
+        $path = [string]$item.path
+        $device = ''
+        $pinnable = $false
+        $devices = @()
+        try {
+            # Ask the benchmark executable itself, not only the server, so the value passed
+            # to -dev is one llama-bench accepts. Get-LlamaDeviceList returns its array
+            # through the unary-comma idiom; wrapping it in @() would make the array itself
+            # one 'device', which silently looks like an iGPU-only machine.
+            $devices = Get-LlamaDeviceList -Directory $path -Executable 'llama-bench.exe'
+            $selection = Get-GpuDeviceSelection -Devices $devices
+            $device = [string]$selection.device
+            $pinnable = ([string]$selection.status -eq 'pinned')
+        } catch { }
+        $bench = Join-Path $path 'llama-bench.exe'
+        $label = if ($backend -eq 'Vulkan') { "Vulkan $($item.tag)" } elseif ($backend -eq 'ROCmLatest') { "ggml-org ROCm 10 / $($item.tag)" } else { "AMD ROCm 7.2.1 / $($item.tag)" }
+        $result += [pscustomobject]@{
+            backend = $backend
+            tag = [string]$item.tag
+            path = $path
+            label = $label
+            device = $device
+            device_arg = $(if ([string]::IsNullOrWhiteSpace($device)) { '' } else { "-dev $device" })
+            devices_source = 'llama-bench --list-devices'
+            pinnable = $pinnable
+            devices = @($devices)
+            bench_exe = $bench
+            bench_present = (Test-Path -LiteralPath $bench -PathType Leaf)
+            flash_arg = if ($backend -eq 'Vulkan') { 'on' } else { '1' }
+            upstream = if ($backend -eq 'ROCm') { [string](Get-TuneValue -Object $item.installation -Name 'sha256' -Default '') } else { [string]$item.tag }
+        }
+    }
+    return @($result)
+}
+
+function Get-TuneBenchSupport {
+    param([string] $ExePath)
+    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { return [pscustomobject]@{ available = $false; missing = @('llama-bench.exe'); text = '' } }
+    $text = ''
+    $previous = $ErrorActionPreference
+    try {
+        # Native help writes its banner to stderr. With ErrorActionPreference=Stop that
+        # becomes a terminating NativeCommandError and would look like every flag is
+        # missing, so keep the probe non-terminating while it reads both streams.
+        $ErrorActionPreference = 'Continue'
+        $text = (@(& $ExePath --help 2>&1 | ForEach-Object { [string]$_ }) -join "`n")
+    } catch { $text = '' } finally { $ErrorActionPreference = $previous }
+    $missing = @()
+    foreach ($flag in @('-dev', '-ngl', '-fa', '-ctk', '-ctv', '-b', '-ub', '-p', '-n', '-r', '-o')) {
+        if (-not $text.Contains($flag)) { $missing += $flag }
+    }
+    return [pscustomobject]@{ available = ($text.Length -gt 0 -and $missing.Count -eq 0); missing = @($missing); text = $text }
+}
+
+function Get-TuneFit {
+    param($Model, $Hardware)
+    # A llama-bench row allocates for the tested prompt plus the generated tokens, not
+    # for the server's multi-slot context. 8192 + 128 = 8320 at one slot is the basis;
+    # the projector is not loaded by llama-bench, so it is excluded as well.
+    try {
+        $estimate = Get-VramEstimate -Model $Model -Hardware $Hardware -Context 8320 -UsedGiB 0 -Slots 1 -BenchmarkOnly
+        return [pscustomobject]@{ verdict = [string]$estimate.verdict; needed_gib = [double]$estimate.needed_gib; total_gib = [double]$estimate.total_gib; confidence = [string]$estimate.confidence; context_tokens = [int]$estimate.context_tokens; slots = [int]$estimate.slots; weights_gib = [double]$estimate.weights_gib; kv_gib = [double]$estimate.kv_gib; compute_gib = [double]$estimate.compute_gib; headroom_gib = [double]$estimate.headroom_gib; benchmark_only = [bool]$estimate.benchmark_only; skip = ([string]$estimate.verdict -eq 'will_not_fit') }
+    } catch {
+        return [pscustomobject]@{ verdict = 'unknown'; needed_gib = 0; total_gib = 0; confidence = 'none'; context_tokens = 8320; slots = 1; weights_gib = 0; kv_gib = 0; compute_gib = 0; headroom_gib = 0; benchmark_only = $true; skip = $false; error = [string]$_.Exception.Message }
+    }
+}
+
+function Get-TuneModelCandidates {
+    param($Hardware)
+    $installed = @(Get-InstalledModels | ForEach-Object { [string]$_.Id })
+    $result = @()
+    foreach ($id in @('qwen3-4b', 'qwen3.5-9b', 'qwen3.8-27b')) {
+        try {
+            $model = Get-ModelById -Id $id
+            $fit = Get-TuneFit -Model $model -Hardware $Hardware
+            $result += [pscustomobject]@{ id = [string]$model.Id; name = [string]$model.Name; file = [string]$model.File; installed = ($installed -contains [string]$model.Id); fit = $fit }
+        } catch { }
+    }
+    return @($result)
+}
+
+function Get-TunePreconditions {
+    $hardware = Get-HardwareProfile
+    $server = Get-ServerState
+    $blockers = @()
+    if (@($server.process_ids).Count -gt 0) {
+        $blockers += [pscustomobject]@{ code = 'server_running'; detail = 'A llama-server process is running. Tune will not stop it silently.'; remediation = 'Stop it explicitly with -Action Runtime -RuntimeAction stop, then run Tune again.' }
+    }
+    $gpu = Get-GpuPinningReport
+    if ([string]$gpu.status -ne 'pinned') {
+        $blockers += [pscustomobject]@{ code = 'gpu_not_pinned'; detail = [string]$gpu.reason; remediation = 'Connect a discrete Radeon and run Diagnose; a benchmark on the iGPU is not allowed.' }
+    }
+    $runtimes = @(Get-TuneRuntimeCandidates)
+    if ($runtimes.Count -eq 0) {
+        $blockers += [pscustomobject]@{ code = 'runtime_missing'; detail = 'No installed llama.cpp runtime with llama-server.exe was found.'; remediation = 'Install a runtime first.' }
+    }
+    foreach ($runtime in $runtimes) {
+        if (-not $runtime.bench_present) {
+            $blockers += [pscustomobject]@{ code = 'bench_missing'; detail = "llama-bench.exe is missing from $($runtime.path)."; remediation = 'Reinstall that runtime or choose another build.' }
+            continue
+        }
+        if (-not $runtime.pinnable) {
+            $blockers += [pscustomobject]@{ code = 'runtime_not_pinned'; detail = "$($runtime.label) did not identify a discrete device."; remediation = 'Check the runtime device list before benchmarking.' }
+        }
+        $support = Get-TuneBenchSupport -ExePath $runtime.bench_exe
+        if (-not $support.available) {
+            $blockers += [pscustomobject]@{ code = 'bench_flags'; detail = "$($runtime.label) is missing llama-bench options: $($support.missing -join ', ')."; remediation = 'Use a build whose llama-bench exposes the required options.' }
+        }
+    }
+    $gameThreshold = [double](Get-GamePauseGiB)
+    $game = [pscustomobject]@{ threshold_gib = $gameThreshold; used_gib = $null; active = $false; state = 'off' }
+    if ($gameThreshold -gt 0) {
+        $usage = Get-GpuMemoryUsage -TotalGiB ([double]$hardware.MaxAmdVramGiB)
+        if ($null -ne $usage) {
+            $game.used_gib = [double]$usage.UsedGiB
+            $game.active = ([double]$usage.UsedGiB -ge $gameThreshold)
+            $game.state = if ($game.active) { 'flagged' } else { 'clear' }
+            if ($game.active) {
+                $blockers += [pscustomobject]@{ code = 'game_active'; detail = "Another program holds $($usage.UsedGiB) GiB of graphics memory (game-pause threshold $gameThreshold GiB)."; remediation = 'Close the game or fullscreen app, then run Tune again.' }
+            }
+        } else { $game.state = 'unknown' }
+    }
+    $models = @(Get-TuneModelCandidates -Hardware $hardware)
+    return [pscustomobject]@{ hardware = $hardware; server = $server; gpu = $gpu; game = $game; runtimes = @($runtimes); models = @($models); blockers = @($blockers) }
+}
+
+function Get-TuneBatchCombinations {
+    param([int[]] $BatchSizes = @(512, 1024, 2048), [int[]] $UbatchSizes = @(128, 256, 512))
+    $rows = @()
+    foreach ($batch in $BatchSizes) {
+        foreach ($ubatch in $UbatchSizes) {
+            if ($ubatch -le $batch) { $rows += [pscustomobject]@{ batch_size = [int]$batch; ubatch_size = [int]$ubatch } }
+        }
+    }
+    return @($rows)
+}
+
+function Get-TuneAlternatingOrder {
+    param($Runtimes, [int] $Index)
+    $list = @($Runtimes)
+    if ($list.Count -le 1) { return @($list) }
+    $start = [Math]::Abs($Index) % $list.Count
+    $out = @()
+    for ($i = 0; $i -lt $list.Count; $i++) { $out += $list[($start + $i) % $list.Count] }
+    return @($out)
+}
+
+function Get-TunePlanDocument {
+    $pre = Get-TunePreconditions
+    $stage1 = @()
+    $stage2 = @()
+    $modelIndex = 0
+    foreach ($model in @($pre.models)) {
+        $order = @(Get-TuneAlternatingOrder -Runtimes @($pre.runtimes) -Index $modelIndex)
+        foreach ($runtime in $order) {
+            $status = 'planned'
+            $reason = ''
+            if (-not $model.installed) { $status = 'model_missing'; $reason = 'The model file is not installed.' }
+            elseif ($model.fit.skip) { $status = 'skipped_fit'; $reason = "Fit estimate says $($model.fit.verdict) at the benchmark context (8320 tokens, one slot: $($model.fit.needed_gib) GiB needed)." }
+            $stage1 += [pscustomobject]@{ model_id = $model.id; model = $model.name; runtime = $runtime.label; runtime_tag = $runtime.tag; backend = $runtime.backend; device = $runtime.device; device_arg = [string]$runtime.device_arg; status = $status; reason = $reason; fit = $model.fit }
+        }
+        if ($model.installed -and -not $model.fit.skip) {
+            foreach ($combo in @(Get-TuneBatchCombinations)) {
+                $stage2 += [pscustomobject]@{ model_id = $model.id; model = $model.name; runtime = ''; batch_size = $combo.batch_size; ubatch_size = $combo.ubatch_size; status = 'planned' }
+            }
+        }
+        $modelIndex++
+    }
+    $status = if (@($pre.blockers).Count -eq 0) { 'ready' } else { 'blocked' }
+    return [pscustomobject]@{
+        schema_version = 1
+        action = 'tune'
+        tune_action = 'plan'
+        generated_at = (Get-Date).ToUniversalTime().ToString('o')
+        status = $status
+        comparison_caveat = Get-TuneComparisonCaveat -Runtimes @($pre.runtimes)
+        preconditions = $pre
+        blockers = @($pre.blockers)
+        runtimes = @($pre.runtimes)
+        models = @($pre.models)
+        stage1 = @($stage1)
+        stage2 = @($stage2)
+        planned_runs = (@($stage1 | Where-Object { $_.status -eq 'planned' }).Count + @($stage2).Count + 2)
+        reference = [pscustomobject]@{ model_id = 'qwen3-4b'; prompts = @(2048); gen = 128; repetitions = 3 }
+        note = 'A preset is opt-in data. Selecting none leaves the generated command line unchanged.'
+    }
+}
+
+function Get-TuneStatusDocument {
+    param([string] $JobId = '')
+    if ([string]::IsNullOrWhiteSpace($JobId)) { $JobId = Get-TuneLatestJobId }
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    if ($null -eq $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) {
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'status'; status = 'not_found'; job_id = $JobId }
+    }
+    $job = Read-TuneJson -Path (Join-Path $dir 'job.json')
+    $progress = Read-TuneJson -Path (Join-Path $dir 'progress.json')
+    if ($null -eq $job) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'status'; status = 'invalid_job'; job_id = $JobId } }
+    $state = [string](Get-TuneValue -Object $progress -Name 'state' -Default (Get-TuneValue -Object $job -Name 'state' -Default 'unknown'))
+    $workerPid = [int](Get-TuneValue -Object $job -Name 'worker_pid' -Default 0)
+    if ($state -eq 'running' -and $workerPid -gt 0 -and $null -eq (Get-Process -Id $workerPid -ErrorAction SilentlyContinue)) { $state = 'interrupted' }
+    $total = [int](Get-TuneValue -Object $job -Name 'total_runs' -Default 0)
+    $completed = [int](Get-TuneValue -Object $progress -Name 'completed_runs' -Default 0)
+    $percent = if ($total -gt 0) { [Math]::Round(($completed / $total) * 100, 1) } else { 0 }
+    $started = [string](Get-TuneValue -Object $job -Name 'started_at' -Default '')
+    $elapsed = 0
+    if ($started) { try { $elapsed = [Math]::Round(((Get-Date).ToUniversalTime() - ([datetime]$started).ToUniversalTime()).TotalSeconds, 1) } catch { } }
+    return [pscustomobject]@{
+        schema_version = 1; action = 'tune'; tune_action = 'status'; status = $state; job_id = $JobId
+        worker_pid = $workerPid; started_at = $started; elapsed_seconds = $elapsed
+        stage = [string](Get-TuneValue -Object $progress -Name 'stage' -Default '')
+        current_model = [string](Get-TuneValue -Object $progress -Name 'current_model' -Default '')
+        current_runtime = [string](Get-TuneValue -Object $progress -Name 'current_runtime' -Default '')
+        completed_runs = $completed; total_runs = $total; percent = $percent
+        current_bench_pid = [int](Get-TuneValue -Object $progress -Name 'current_bench_pid' -Default 0)
+        cancel_requested = (Test-Path -LiteralPath (Join-Path $dir 'cancel.json') -PathType Leaf)
+        warnings = @(Get-TuneValue -Object $progress -Name 'warnings' -Default @())
+        last_error = [string](Get-TuneValue -Object $progress -Name 'last_error' -Default '')
+        results_available = (Test-Path -LiteralPath (Join-Path $dir 'results.json') -PathType Leaf)
+    }
+}
+
+function Get-TuneResultsDocument {
+    param([string] $JobId = '')
+    if ([string]::IsNullOrWhiteSpace($JobId)) { $JobId = Get-TuneLatestJobId }
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    if ($null -eq $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'results'; status = 'not_found'; job_id = $JobId } }
+    $results = Read-TuneJson -Path (Join-Path $dir 'results.json')
+    if ($null -eq $results) {
+        $status = Get-TuneStatusDocument -JobId $JobId
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'results'; status = 'not_ready'; job_id = $JobId; available = $false; run_status = $status }
+    }
+    return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'results'; status = 'completed'; job_id = $JobId; available = $true; results = $results }
+}
+
+function Write-TuneProgress {
+    param([string] $JobId, [hashtable] $Fields)
+    $path = Get-TuneJobFile -JobId $JobId -Name 'progress.json'
+    $doc = Read-TuneJson -Path $path
+    if ($null -eq $doc) { $doc = [ordered]@{} }
+    $copy = [ordered]@{}
+    foreach ($property in $doc.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+    foreach ($key in $Fields.Keys) { $copy[$key] = $Fields[$key] }
+    $copy['updated_at'] = (Get-Date).ToUniversalTime().ToString('o')
+    Write-TuneJson -Path $path -Document ([pscustomobject]$copy)
+}
+
+function Stop-TuneProcessTree {
+    param([int] $ProcessId)
+    if ($ProcessId -le 0) { return }
+    try {
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue)
+        foreach ($child in $children) { Stop-TuneProcessTree -ProcessId ([int]$child.ProcessId) }
+    } catch { }
+    if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Stop-TuneJob {
+    param([string] $JobId = '')
+    if ([string]::IsNullOrWhiteSpace($JobId)) { $JobId = Get-TuneLatestJobId }
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    if ($null -eq $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'cancel'; status = 'not_found'; job_id = $JobId } }
+    $job = Read-TuneJson -Path (Join-Path $dir 'job.json')
+    $progress = Read-TuneJson -Path (Join-Path $dir 'progress.json')
+    $state = [string](Get-TuneValue -Object $progress -Name 'state' -Default (Get-TuneValue -Object $job -Name 'state' -Default 'unknown'))
+    if (@('completed', 'cancelled', 'failed', 'interrupted') -contains $state) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'cancel'; status = 'already_finished'; job_id = $JobId; state = $state } }
+    Write-TuneJson -Path (Join-Path $dir 'cancel.json') -Document ([pscustomobject]@{ requested_at = (Get-Date).ToUniversalTime().ToString('o') })
+    $benchPid = [int](Get-TuneValue -Object $progress -Name 'current_bench_pid' -Default 0)
+    if ($benchPid -gt 0) { Stop-TuneProcessTree -ProcessId $benchPid }
+    $workerPid = [int](Get-TuneValue -Object $job -Name 'worker_pid' -Default 0)
+    if ($workerPid -gt 0) { Stop-TuneProcessTree -ProcessId $workerPid }
+    Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }
+    $job | Add-Member -NotePropertyName state -NotePropertyValue 'cancelled' -Force
+    Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job
+    return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'cancel'; status = 'cancelled'; job_id = $JobId; stopped_worker = ($workerPid -gt 0); stopped_bench = ($benchPid -gt 0) }
+}
+
+function Start-TuneWorkerProcess {
+    param([string] $JobId)
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    $dquote = [string][char]34
+    $quotedScript = $dquote + $PSCommandPath + $dquote
+    $quotedRoot = $dquote + $InstallRoot + $dquote
+    $argString = "-NoProfile -ExecutionPolicy Bypass -File $quotedScript -Action Tune -TuneAction Worker -TuneJobId $JobId -InstallRoot $quotedRoot"
+    $worker = Start-Process -FilePath 'powershell.exe' -ArgumentList $argString -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $dir 'worker.log') -RedirectStandardError (Join-Path $dir 'worker.err.log')
+    return [int]$worker.Id
+}
+
+function Start-TuneJob {
+    $plan = Get-TunePlanDocument
+    if ($TuneSmoke) {
+        # A deliberately tiny, single-runtime run for install/smoke checks. It is not a
+        # comparison and never writes presets: one 4B prompt at 512 tokens, 64 generated.
+        $smokeRuntime = @($plan.runtimes | Where-Object { [string]$_.backend -eq 'Vulkan' } | Select-Object -First 1)
+        $smokeModel = @($plan.models | Where-Object { [string]$_.id -eq 'qwen3-4b' } | Select-Object -First 1)
+        if ($smokeRuntime.Count -eq 0 -or $smokeModel.Count -eq 0 -or -not $smokeModel[0].installed) {
+            $plan.blockers = @([pscustomobject]@{ code = 'smoke_unavailable'; detail = 'The smoke test needs an installed Vulkan runtime and the 4B model.'; remediation = 'Install Vulkan b12110 and the 4B model first.' })
+            $plan.status = 'blocked'
+            $plan.planned_runs = 0
+        } else {
+            $plan.runtimes = @($smokeRuntime[0])
+            $plan.models = @($smokeModel[0])
+            $plan.stage1 = @([pscustomobject]@{ model_id = 'qwen3-4b'; model = $smokeModel[0].name; runtime = $smokeRuntime[0].label; runtime_tag = $smokeRuntime[0].tag; backend = $smokeRuntime[0].backend; device = $smokeRuntime[0].device; device_arg = [string]$smokeRuntime[0].device_arg; status = 'planned'; reason = ''; fit = $smokeModel[0].fit })
+            $plan.stage2 = @()
+            $plan.planned_runs = 1
+            $plan | Add-Member -NotePropertyName smoke -NotePropertyValue $true -Force
+            $plan.reference = [pscustomobject]@{ model_id = 'qwen3-4b'; prompts = @(512); gen = 64; repetitions = 1 }
+            $plan.comparison_caveat = Get-TuneComparisonCaveat -Runtimes @($plan.runtimes)
+        }
+    }
+    if (@($plan.blockers).Count -gt 0) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'start'; status = 'blocked'; job_id = ''; detail = 'Tune refused: preconditions are not met. Nothing was started.'; plan = $plan; blockers = @($plan.blockers) } }
+    $jobId = 'tune-' + (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $dir = Get-TuneJobDirectory -JobId $jobId
+    if (Test-Path -LiteralPath $dir) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'start'; status = 'failed'; detail = 'A Tune job with this timestamp already exists.' } }
+    New-Item -ItemType Directory -Path (Join-Path $dir 'raw') -Force | Out-Null
+    $total = [int]$plan.planned_runs
+    $job = [ordered]@{ schema_version = 1; job_id = $jobId; state = 'running'; started_at = (Get-Date).ToUniversalTime().ToString('o'); worker_pid = 0; total_runs = $total; plan = $plan }
+    Write-TuneJson -Path (Join-Path $dir 'job.json') -Document ([pscustomobject]$job)
+    Write-TuneProgress -JobId $jobId -Fields @{ state = 'starting'; stage = 'starting'; completed_runs = 0; current_bench_pid = 0; warnings = @(); last_error = '' }
+    try {
+        $workerPid = Start-TuneWorkerProcess -JobId $jobId
+        $job.worker_pid = [int]$workerPid
+        Write-TuneJson -Path (Join-Path $dir 'job.json') -Document ([pscustomobject]$job)
+        Write-TuneProgress -JobId $jobId -Fields @{ state = 'running'; stage = 'starting'; worker_pid = [int]$workerPid }
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'start'; status = 'started'; job_id = $jobId; worker_pid = [int]$workerPid; plan = $plan }
+    } catch {
+        $job.state = 'failed'
+        Write-TuneJson -Path (Join-Path $dir 'job.json') -Document ([pscustomobject]$job)
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'start'; status = 'failed'; job_id = $jobId; detail = [string]$_.Exception.Message }
+    }
+}
+
+function Resume-TuneJob {
+    param([string] $JobId = '')
+    if ([string]::IsNullOrWhiteSpace($JobId)) { $JobId = Get-TuneLatestJobId }
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    if ($null -eq $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'not_found'; job_id = $JobId } }
+    $job = Read-TuneJson -Path (Join-Path $dir 'job.json')
+    $progress = Read-TuneJson -Path (Join-Path $dir 'progress.json')
+    if ($null -eq $job) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'invalid_job'; job_id = $JobId } }
+    $state = [string](Get-TuneValue -Object $progress -Name 'state' -Default (Get-TuneValue -Object $job -Name 'state' -Default 'unknown'))
+    if (@('completed', 'cancelled') -contains $state) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'not_resumable'; job_id = $JobId; state = $state } }
+    $workerPid = [int](Get-TuneValue -Object $job -Name 'worker_pid' -Default 0)
+    if ($workerPid -gt 0 -and $null -ne (Get-Process -Id $workerPid -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'already_running'; job_id = $JobId; worker_pid = $workerPid } }
+    $checkpoint = Read-TuneCheckpoint -JobId $JobId
+    if ($null -eq $checkpoint) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'no_checkpoint'; job_id = $JobId } }
+    $pre = Get-TunePreconditions
+    if (@($pre.blockers).Count -gt 0) { return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'blocked'; job_id = $JobId; blockers = @($pre.blockers) } }
+    $cancelPath = Join-Path $dir 'cancel.json'
+    if (Test-Path -LiteralPath $cancelPath -PathType Leaf) { Remove-Item -LiteralPath $cancelPath -Force }
+    $job | Add-Member -NotePropertyName state -NotePropertyValue 'running' -Force
+    $job | Add-Member -NotePropertyName worker_pid -NotePropertyValue 0 -Force
+    Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job
+    try {
+        $newPid = Start-TuneWorkerProcess -JobId $JobId
+        $job.worker_pid = [int]$newPid
+        Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job
+        Write-TuneProgress -JobId $JobId -Fields @{ state = 'running'; stage = 'resumed'; worker_pid = [int]$newPid; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint) }
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'resumed'; job_id = $JobId; worker_pid = [int]$newPid; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint) }
+    } catch {
+        return [pscustomobject]@{ schema_version = 1; action = 'tune'; tune_action = 'resume'; status = 'failed'; job_id = $JobId; detail = [string]$_.Exception.Message }
+    }
+}
+
+function Quote-TuneArg {
+    param([string] $Value)
+    if ($null -eq $Value) { return '""' }
+    if ($Value -match '[\s"]') { return ('"' + ($Value -replace '"', '\"') + '"') }
+    return $Value
+}
+
+function ConvertFrom-TuneBenchJson {
+    param([string] $Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { throw 'llama-bench returned no JSON.' }
+    $start = $Text.IndexOf('[')
+    $end = $Text.LastIndexOf(']')
+    if ($start -lt 0 -or $end -le $start) { throw 'llama-bench output did not contain a JSON array.' }
+    $parsed = $Text.Substring($start, $end - $start + 1) | ConvertFrom-Json
+    $rows = @()
+    foreach ($item in @($parsed)) {
+        $nPrompt = [int](Get-TuneValue -Object $item -Name 'n_prompt' -Default 0)
+        $nGen = [int](Get-TuneValue -Object $item -Name 'n_gen' -Default 0)
+        $kind = 'unknown'; $n = 0
+        if ($nPrompt -gt 0 -and $nGen -eq 0) { $kind = 'prompt'; $n = $nPrompt }
+        elseif ($nGen -gt 0 -and $nPrompt -eq 0) { $kind = 'decode'; $n = $nGen }
+        $mean = [double](Get-TuneValue -Object $item -Name 'avg_ts' -Default 0)
+        $stddev = [double](Get-TuneValue -Object $item -Name 'stddev_ts' -Default 0)
+        $noisy = ($mean -gt 0 -and $stddev -gt ($mean * 0.10))
+        $rows += [pscustomobject]@{
+            kind = $kind; n = [int]$n; mean = [Math]::Round($mean, 4); stddev = [Math]::Round($stddev, 4); noisy = $noisy
+            build_commit = [string](Get-TuneValue -Object $item -Name 'build_commit' -Default '')
+            build_number = [int](Get-TuneValue -Object $item -Name 'build_number' -Default 0)
+            backends = [string](Get-TuneValue -Object $item -Name 'backends' -Default '')
+            devices = [string](Get-TuneValue -Object $item -Name 'devices' -Default '')
+            n_batch = [int](Get-TuneValue -Object $item -Name 'n_batch' -Default 0)
+            n_ubatch = [int](Get-TuneValue -Object $item -Name 'n_ubatch' -Default 0)
+            n_gpu_layers = [int](Get-TuneValue -Object $item -Name 'n_gpu_layers' -Default 0)
+            flash_attn = [bool](Get-TuneValue -Object $item -Name 'flash_attn' -Default $false)
+        }
+    }
+    return @($rows)
+}
+
+function Invoke-TuneBenchProcess {
+    param([string] $FilePath, [string] $Arguments, [string] $WorkingDirectory, [string] $StdoutPath, [string] $StderrPath, [string] $JobId = '')
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    # Write the PID before waiting so Cancel can stop the actual benchmark process,
+    # not just the worker that started it.
+    if (-not [string]::IsNullOrWhiteSpace($JobId)) { Write-TuneProgress -JobId $JobId -Fields @{ current_bench_pid = [int]$process.Id } }
+    $process.WaitForExit()
+    if (-not [string]::IsNullOrWhiteSpace($JobId)) { Write-TuneProgress -JobId $JobId -Fields @{ current_bench_pid = 0 } }
+    $out = if (Test-Path -LiteralPath $StdoutPath) { Get-Content -LiteralPath $StdoutPath -Raw } else { '' }
+    $err = if (Test-Path -LiteralPath $StderrPath) { Get-Content -LiteralPath $StderrPath -Raw } else { '' }
+    return [pscustomobject]@{ exit_code = [int]$process.ExitCode; stdout = [string]$out; stderr = [string]$err; process_id = [int]$process.Id }
+}
+
+function Invoke-TuneBench {
+    param([string] $JobId, [string] $Stage, $Model, $Runtime, [int[]] $Prompts, [int] $Gen, [int] $Reps, [int] $Batch = 0, [int] $Ubatch = 0)
+    $modelPath = Join-Path (Join-Path $InstallRoot 'models') ([string]$Model.file)
+    if (-not (Test-Path -LiteralPath $modelPath -PathType Leaf)) { return [pscustomobject]@{ status = 'model_missing'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = [string]$Runtime.device; device_verified = $false; observed_devices = @(); rows = @(); error = "Model file is missing: $modelPath" } }
+    $benchArgs = @('-m', $modelPath, '-dev', [string]$Runtime.device, '-ngl', '99', '-fa', [string]$Runtime.flash_arg, '-ctk', 'q8_0', '-ctv', 'q8_0', '-p', (@($Prompts) -join ','), '-n', [string]$Gen, '-r', [string]$Reps, '-o', 'json')
+    if ($Batch -gt 0) { $benchArgs += @('-b', [string]$Batch) }
+    if ($Ubatch -gt 0) { $benchArgs += @('-ub', [string]$Ubatch) }
+    $argString = (@($benchArgs | ForEach-Object { Quote-TuneArg -Value ([string]$_) }) -join ' ')
+    $command = $Runtime.bench_exe + ' ' + $argString
+    $safe = ("$Stage-$($Model.id)-$($Runtime.backend)-$Batch-$Ubatch" -replace '[^A-Za-z0-9._-]', '_')
+    $attempts = @()
+    $rows = @()
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $outPath = Get-TuneJobFile -JobId $JobId -Name ("raw/$safe-attempt$attempt.json")
+        $errPath = Get-TuneJobFile -JobId $JobId -Name ("raw/$safe-attempt$attempt.err.log")
+        Write-TuneProgress -JobId $JobId -Fields @{ stage = $Stage; current_model = [string]$Model.id; current_runtime = [string]$Runtime.label; current_bench_pid = 0 }
+        $run = Invoke-TuneBenchProcess -FilePath ([string]$Runtime.bench_exe) -Arguments $argString -WorkingDirectory ([string]$Runtime.path) -StdoutPath $outPath -StderrPath $errPath -JobId $JobId
+        $attempts += [pscustomobject]@{ attempt = $attempt; exit_code = $run.exit_code; raw_file = $outPath; error_file = $errPath; command = $command }
+        if ($run.exit_code -ne 0) {
+            Write-TuneProgress -JobId $JobId -Fields @{ current_bench_pid = 0; last_error = ("$Stage $($Model.id) $($Runtime.tag) exit $($run.exit_code): " + (($run.stderr -split "`n" | Select-Object -First 3) -join ' ')) }
+            return [pscustomobject]@{ status = 'failed'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = [string]$Runtime.device; device_verified = $false; observed_devices = @(); rows = @(); attempts = @($attempts); command = $command; error = (($run.stderr -split "`n" | Select-Object -First 5) -join ' ') }
+        }
+        try { $rows = @(ConvertFrom-TuneBenchJson -Text $run.stdout) } catch {
+            return [pscustomobject]@{ status = 'parse_failed'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = [string]$Runtime.device; device_verified = $false; observed_devices = @(); rows = @(); attempts = @($attempts); command = $command; error = [string]$_.Exception.Message }
+        }
+        # Verify the GPU from llama-bench's own JSON, not only from the -dev argument.
+        $expectedDevice = [string]$Runtime.device
+        $observedDevices = @($rows | ForEach-Object { [string]$_.devices } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        $rowsWithExpectedDevice = @($rows | Where-Object { [string]$_.devices -eq $expectedDevice }).Count
+        if ([string]::IsNullOrWhiteSpace($expectedDevice) -or $observedDevices.Count -ne 1 -or $observedDevices[0] -ne $expectedDevice -or $rowsWithExpectedDevice -ne $rows.Count) {
+            $observed = if ($observedDevices.Count -gt 0) { $observedDevices -join ', ' } else { '(none)' }
+            Write-TuneProgress -JobId $JobId -Fields @{ current_bench_pid = 0; last_error = "$Stage $($Model.id) $($Runtime.tag) reported device '$observed', expected '$expectedDevice'." }
+            return [pscustomobject]@{ status = 'device_mismatch'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = $expectedDevice; device_verified = $false; observed_devices = @($observedDevices); rows = @(); attempts = @($attempts); command = $command; error = "llama-bench reported '$observed', expected '$expectedDevice'; the row is not accepted." }
+        }
+        $noisy = @($rows | Where-Object { $_.noisy }).Count -gt 0
+        if (-not $noisy) { break }
+    }
+    $stillNoisy = @($rows | Where-Object { $_.noisy }).Count -gt 0
+    foreach ($row in $rows) { $row | Add-Member -NotePropertyName unreliable -NotePropertyValue $stillNoisy -Force; $row | Add-Member -NotePropertyName n_batch -NotePropertyValue $(if ($Batch -gt 0) { $Batch } else { $row.n_batch }) -Force; $row | Add-Member -NotePropertyName n_ubatch -NotePropertyValue $(if ($Ubatch -gt 0) { $Ubatch } else { $row.n_ubatch }) -Force }
+    return [pscustomobject]@{ status = 'ok'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = [string]$Runtime.device; device_verified = $true; observed_devices = @($observedDevices); rows = @($rows); attempts = @($attempts); command = $command; rerun = (@($attempts).Count -gt 1); unreliable = $stillNoisy }
+}
+
+function Get-TuneRowMetric {
+    param($Rows, [string] $Kind, [int] $N = 0)
+    $match = @($Rows | Where-Object { $_.kind -eq $Kind -and ($N -le 0 -or $_.n -eq $N) } | Select-Object -First 1)
+    if ($match.Count -eq 0) { return $null }
+    return $match[0]
+}
+
+function Get-TuneStageWinner {
+    param($Stage1, [string] $ModelId)
+    $rows = @($Stage1 | Where-Object { $_.model_id -eq $ModelId -and $_.status -eq 'ok' })
+    $candidates = @()
+    foreach ($row in $rows) {
+        $pp1 = Get-TuneRowMetric -Rows $row.rows -Kind 'prompt' -N 2048
+        $pp2 = Get-TuneRowMetric -Rows $row.rows -Kind 'prompt' -N 8192
+        $tg = Get-TuneRowMetric -Rows $row.rows -Kind 'decode' -N 128
+        if ($null -eq $pp1 -or $null -eq $pp2 -or $null -eq $tg) { continue }
+        $score = [Math]::Pow([double]$pp1.mean * [double]$pp2.mean * [double]$tg.mean, 1.0 / 3.0)
+        $candidates += [pscustomobject]@{ runtime_tag = $row.runtime_tag; backend = $row.backend; runtime = $row; score = $score; pp2048 = $pp1.mean; pp8192 = $pp2.mean; tg128 = $tg.mean }
+    }
+    $sorted = @($candidates | Sort-Object score -Descending)
+    if ($sorted.Count -eq 0) { return $null }
+    return $sorted[0]
+}
+
+function Get-TuneMaxContext {
+    param($Model, $Hardware, [int] $Maximum = 262144)
+    $cap = 131072
+    try {
+        $modelPath = Join-Path (Join-Path $InstallRoot 'models') ([string]$Model.file)
+        $meta = Read-GgufMetadata -Path $modelPath
+        $arch = if ($meta.ContainsKey('general.architecture')) { [string]$meta['general.architecture'] } else { '' }
+        $trained = [int](Get-GgufNumber -Metadata $meta -Key "$arch.context_length" -Default 0)
+        if ($trained -gt 0) { $cap = $trained }
+    } catch { }
+    $cap = [Math]::Min($cap, $Maximum)
+    $best = 0
+    for ($context = 8192; $context -le $cap; $context *= 2) {
+        try {
+            $estimate = Get-VramEstimate -Model $Model -Hardware $Hardware -Context $context -UsedGiB 0
+            if ([string]$estimate.verdict -eq 'fits') { $best = $context }
+        } catch { }
+    }
+    if ($best -le 0) { $best = 8192 }
+    return [int]$best
+}
+
+function Get-TuneEligibleRows {
+    param($Rows, $Baseline)
+    $base1 = Get-TuneRowMetric -Rows $Baseline.rows -Kind 'prompt' -N 2048
+    $base2 = Get-TuneRowMetric -Rows $Baseline.rows -Kind 'prompt' -N 8192
+    if ($null -eq $base1 -or $null -eq $base2) { return @() }
+    return @($Rows | Where-Object {
+        $p1 = Get-TuneRowMetric -Rows $_.rows -Kind 'prompt' -N 2048
+        $p2 = Get-TuneRowMetric -Rows $_.rows -Kind 'prompt' -N 8192
+        ($null -ne $p1 -and $null -ne $p2 -and -not [bool]$_.unreliable -and [double]$p1.mean -gt [double]$base1.mean -and [double]$p2.mean -gt [double]$base2.mean)
+    })
+}
+
+function New-TunePresetSet {
+    param($Model, $Stage2, $Hardware, [string] $JobId)
+    $results = @($Stage2 | Where-Object { $_.model_id -eq $Model.id -and $_.status -eq 'ok' -and @($_.rows).Count -gt 0 })
+    if ($results.Count -eq 0) { return $null }
+    # The comparison is against the actual default 2048/512 row. If that row did not run,
+    # there is no honest baseline and no recommendation may be produced.
+    $baseline = @($results | Where-Object { [int]$_.rows[0].n_batch -eq 2048 -and [int]$_.rows[0].n_ubatch -eq 512 } | Select-Object -First 1)
+    if ($baseline.Count -eq 0) { return $null }
+    # The recommendation rule is explicit: a setting must beat the default batch/ubatch
+    # on BOTH prompt tests. A short-test win alone is never enough.
+    $eligible = @(Get-TuneEligibleRows -Rows $results -Baseline $baseline[0])
+    if ($eligible.Count -eq 0) { return $null }
+    $pool = @($eligible)
+    $base1 = Get-TuneRowMetric -Rows $baseline[0].rows -Kind 'prompt' -N 2048
+    $base2 = Get-TuneRowMetric -Rows $baseline[0].rows -Kind 'prompt' -N 8192
+    $baseTg = Get-TuneRowMetric -Rows $baseline[0].rows -Kind 'decode' -N 128
+    $withScore = @()
+    foreach ($row in $pool) {
+        $p1 = Get-TuneRowMetric -Rows $row.rows -Kind 'prompt' -N 2048
+        $p2 = Get-TuneRowMetric -Rows $row.rows -Kind 'prompt' -N 8192
+        $tg = Get-TuneRowMetric -Rows $row.rows -Kind 'decode' -N 128
+        $score = 0.0
+        if ($null -ne $p1 -and $null -ne $p2 -and $null -ne $tg -and $null -ne $base1 -and $null -ne $base2 -and $null -ne $baseTg) {
+            $score = (([double]$p1.mean / [double]$base1.mean) + ([double]$p2.mean / [double]$base2.mean) + ([double]$tg.mean / [double]$baseTg.mean)) / 3.0
+        }
+        $withScore += [pscustomobject]@{ result = $row; pp2048 = $p1; pp8192 = $p2; tg128 = $tg; score = $score }
+    }
+    $fast = @($withScore | Where-Object { $null -ne $_.tg128 } | Sort-Object @{Expression={[double]$_.tg128.mean}} -Descending | Select-Object -First 1)
+    $balanced = @($withScore | Where-Object { [double]$_.score -gt 0 } | Sort-Object score -Descending | Select-Object -First 1)
+    $long = @($withScore | Where-Object { $null -ne $_.pp8192 } | Sort-Object @{Expression={[double]$_.pp8192.mean}} -Descending | Select-Object -First 1)
+    if ($fast.Count -eq 0 -or $balanced.Count -eq 0 -or $long.Count -eq 0) { return $null }
+    $fast = $fast[0]; $balanced = $balanced[0]; $long = $long[0]
+    $shortContext = Get-TuneMaxContext -Model $Model -Hardware $Hardware -Maximum 32768
+    $longContext = Get-TuneMaxContext -Model $Model -Hardware $Hardware -Maximum 262144
+    $presets = [ordered]@{}
+    foreach ($spec in @(@{ name = 'Fast'; pick = $fast; context = $shortContext; rule = 'highest decode mean among rows that passed both prompt tests' }, @{ name = 'Balanced'; pick = $balanced; context = $shortContext; rule = 'highest mean of normalized 2048 prompt, 8192 prompt, and decode' }, @{ name = 'Long context'; pick = $long; context = $longContext; rule = 'highest 8192 prompt mean with the largest context that the fit estimate says fits' })) {
+        $pick = $spec.pick
+        $rows = $pick.result.rows
+        $presets[$spec.name] = [pscustomobject]@{
+            name = $spec.name
+            batch_size = [int]$rows[0].n_batch
+            ubatch_size = [int]$rows[0].n_ubatch
+            context_size = [int]$spec.context
+            selected = $false
+            receipt = [pscustomobject]@{ job_id = $JobId; model_id = [string]$Model.id; runtime = [string]$pick.result.runtime_tag; backend = [string]$pick.result.backend; command = [string]$pick.result.command; pp2048 = $pick.pp2048; pp8192 = $pick.pp8192; tg128 = $pick.tg128; normalized_score = [Math]::Round([double]$pick.score, 4); eligible_both_prompts = ($eligible.Count -gt 0); selection_rule = $spec.rule; variance_flagged = [bool]$pick.result.unreliable }
+        }
+    }
+    return [pscustomobject]$presets
+}
+
+function Save-TunePresets {
+    param([string] $ModelId, $Presets)
+    if ($null -eq $Presets) { return }
+    $settings = Get-AppSettings
+    $all = @{}
+    if ($settings.ContainsKey('tune_presets') -and $null -ne $settings['tune_presets']) {
+        foreach ($property in $settings['tune_presets'].PSObject.Properties) { $all[$property.Name] = $property.Value }
+    }
+    $all[$ModelId] = $Presets
+    Set-AppSetting -Name 'tune_presets' -Value ([pscustomobject]$all)
+}
+
+function Get-TunePresetForModel {
+    param([string] $ModelId)
+    if ([string]::IsNullOrWhiteSpace($ModelId)) { return $null }
+    $settings = Get-AppSettings
+    if (-not $settings.ContainsKey('tune_presets') -or -not $settings.ContainsKey('tune_preset_selection')) { return $null }
+    $selection = Get-TuneValue -Object $settings['tune_preset_selection'] -Name $ModelId -Default ''
+    if ([string]::IsNullOrWhiteSpace([string]$selection)) { return $null }
+    $models = Get-TuneValue -Object $settings['tune_presets'] -Name $ModelId -Default $null
+    $preset = Get-TuneValue -Object $models -Name ([string]$selection) -Default $null
+    if ($null -eq $preset) { return $null }
+    return [pscustomobject]@{ name = [string]$selection; batch_size = [int](Get-TuneValue -Object $preset -Name 'batch_size' -Default 0); ubatch_size = [int](Get-TuneValue -Object $preset -Name 'ubatch_size' -Default 0); context_size = [int](Get-TuneValue -Object $preset -Name 'context_size' -Default 0) }
+}
+
+function Set-TunePresetSelection {
+    param([string] $ModelId, [string] $Preset)
+    if ([string]::IsNullOrWhiteSpace($ModelId)) { throw 'Choose a model id.' }
+    $settings = Get-AppSettings
+    $map = @{}
+    if ($settings.ContainsKey('tune_preset_selection') -and $null -ne $settings['tune_preset_selection']) {
+        foreach ($property in $settings['tune_preset_selection'].PSObject.Properties) { $map[$property.Name] = [string]$property.Value }
+    }
+    if ([string]::IsNullOrWhiteSpace($Preset) -or $Preset -eq 'none') { $map.Remove($ModelId) }
+    else {
+        $models = Get-TuneValue -Object $settings['tune_presets'] -Name $ModelId -Default $null
+        if ($null -eq $models -or $null -eq (Get-TuneValue -Object $models -Name $Preset -Default $null)) { throw "No Tune preset '$Preset' is stored for model '$ModelId'." }
+        $map[$ModelId] = $Preset
+    }
+    Set-AppSetting -Name 'tune_preset_selection' -Value ([pscustomobject]$map)
+}
+
+function Write-TuneSummary {
+    param([string] $Path, $Results)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('# llama-bench Tune receipt')
+    $lines.Add('')
+    $lines.Add("Generated: $($Results.generated_at)")
+    $lines.Add("Comparison caveat: $($Results.comparison_caveat)")
+    $lines.Add('')
+    $lines.Add('## Stage 1')
+    $lines.Add('| Model | Runtime | Requested device | Observed device | Prompt 2048 tok/s | Prompt 8192 tok/s | Decode 128 tok/s | Status |')
+    $lines.Add('|---|---|---|---|---:|---:|---:|---|')
+    foreach ($row in @($Results.stage1)) {
+        $p1 = Get-TuneRowMetric -Rows @($row.rows) -Kind 'prompt' -N 2048
+        $p2 = Get-TuneRowMetric -Rows @($row.rows) -Kind 'prompt' -N 8192
+        $tg = Get-TuneRowMetric -Rows @($row.rows) -Kind 'decode' -N 128
+        $observed = if (@($row.observed_devices).Count -gt 0) { @($row.observed_devices) -join ', ' } else { '-' }
+        $lines.Add("| $($row.model_id) | $($row.runtime_tag) | $($row.device) | $observed | $(if ($null -ne $p1) { $p1.mean } else { '-' }) | $(if ($null -ne $p2) { $p2.mean } else { '-' }) | $(if ($null -ne $tg) { $tg.mean } else { '-' }) | $($row.status) |")
+    }
+    $lines.Add('')
+    $lines.Add('## Stage 2')
+    $lines.Add('| Model | Runtime | Batch | Ubatch | Prompt 2048 tok/s | Prompt 8192 tok/s | Decode 128 tok/s | Status |')
+    $lines.Add('|---|---|---:|---:|---:|---:|---:|---|')
+    foreach ($row in @($Results.stage2)) {
+        $p1 = Get-TuneRowMetric -Rows @($row.rows) -Kind 'prompt' -N 2048
+        $p2 = Get-TuneRowMetric -Rows @($row.rows) -Kind 'prompt' -N 8192
+        $tg = Get-TuneRowMetric -Rows @($row.rows) -Kind 'decode' -N 128
+        $batch = if (@($row.rows).Count -gt 0) { $row.rows[0].n_batch } else { '-' }
+        $ubatch = if (@($row.rows).Count -gt 0) { $row.rows[0].n_ubatch } else { '-' }
+        $lines.Add("| $($row.model_id) | $($row.runtime_tag) | $batch | $ubatch | $(if ($null -ne $p1) { $p1.mean } else { '-' }) | $(if ($null -ne $p2) { $p2.mean } else { '-' }) | $(if ($null -ne $tg) { $tg.mean } else { '-' }) | $($row.status) |")
+    }
+    $lines.Add('')
+    $lines.Add('## Presets')
+    $presetModelIds = @($Results.presets.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    if ($presetModelIds.Count -eq 0) { $lines.Add('- No preset was recommended by this run.') }
+    foreach ($modelId in $presetModelIds) {
+        $set = $Results.presets.$modelId
+        $lines.Add("### $modelId")
+        foreach ($name in @($set.PSObject.Properties.Name)) {
+            $preset = $set.$name
+            $lines.Add("- ${name}: batch $($preset.batch_size), ubatch $($preset.ubatch_size), context $($preset.context_size); $($preset.receipt.selection_rule).")
+        }
+        $lines.Add('')
+    }
+    [IO.File]::WriteAllText($Path, ($lines -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-TuneWorker {
+    param([string] $JobId)
+    $dir = Get-TuneJobDirectory -JobId $JobId
+    $job = Read-TuneJson -Path (Join-Path $dir 'job.json')
+    if ($null -eq $job) { return 1 }
+    $plan = $job.plan
+    $started = Get-Date
+    $cancel = { Test-Path -LiteralPath (Join-Path $dir 'cancel.json') -PathType Leaf }
+    try {
+        $checkpoint = Read-TuneCheckpoint -JobId $JobId
+        if ($null -eq $checkpoint) {
+            $checkpoint = [pscustomobject]@{
+                schema_version = 1; job_id = $JobId; plan_generated_at = [string]$plan.generated_at
+                reference_before = $null; reference_before_stage2 = $null; stage1 = @(); stage2 = @()
+            }
+            Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+        } elseif ([string]$checkpoint.plan_generated_at -ne [string]$plan.generated_at) {
+            throw 'The saved checkpoint belongs to a different plan. Start a new Tune job instead of resuming this one.'
+        }
+        $stage1 = @($checkpoint.stage1)
+        $stage2 = @($checkpoint.stage2)
+        $referenceBefore = $checkpoint.reference_before
+        $referenceMid = $checkpoint.reference_before_stage2
+        $total = [int]$job.total_runs
+        Write-TuneProgress -JobId $JobId -Fields @{ state = 'running'; stage = 'reference-before'; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint); total_runs = $total; warnings = @(); last_error = '' }
+        $firstRuntime = @($plan.runtimes)[0]
+        $smoke = [bool](Get-TuneValue -Object $plan -Name 'smoke' -Default $false)
+        $referenceModel = @(Get-TuneModelCandidates -Hardware (Get-HardwareProfile) | Where-Object { $_.id -eq 'qwen3-4b' } | Select-Object -First 1)
+        if (-not $smoke -and $referenceModel.Count -eq 0) { throw 'The 4B reference model is not in the catalogue, so the reference check cannot run.' }
+        if ($referenceModel.Count -gt 0) { $referenceModel = $referenceModel[0] }
+        if (-not $smoke -and ($null -eq $referenceBefore -or [string]$referenceBefore.status -ne 'ok')) {
+            $referenceBefore = Invoke-TuneBench -JobId $JobId -Stage 'reference-before' -Model $referenceModel -Runtime $firstRuntime -Prompts @(2048) -Gen 128 -Reps 3
+            $checkpoint.reference_before = $referenceBefore
+            Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+        }
+        if (& $cancel) { Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }; return 0 }
+        $stagePrompts = if ($smoke) { @(512) } else { @(2048, 8192) }
+        $stageGen = if ($smoke) { 64 } else { 128 }
+        $stageReps = if ($smoke) { 1 } else { 3 }
+        $modelIndex = 0
+        foreach ($model in @($plan.models)) {
+            $order = @(Get-TuneAlternatingOrder -Runtimes @($plan.runtimes) -Index $modelIndex)
+            foreach ($runtime in $order) {
+                if (& $cancel) { Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }; return 0 }
+                $existing = @($stage1 | Where-Object { [string]$_.model_id -eq [string]$model.id -and [string]$_.runtime_tag -eq [string]$runtime.tag } | Select-Object -First 1)
+                $terminal = ($existing.Count -gt 0 -and (@('ok', 'skipped_fit', 'model_missing') -contains [string]$existing[0].status))
+                if ($terminal) {
+                    $row = $existing[0]
+                } else {
+                    if ($existing.Count -gt 0) { $stage1 = @($stage1 | Where-Object { -not ([string]$_.model_id -eq [string]$model.id -and [string]$_.runtime_tag -eq [string]$runtime.tag) }) }
+                    if (-not $model.installed) { $row = [pscustomobject]@{ status = 'model_missing'; model_id = $model.id; model = $model.name; runtime_tag = $runtime.tag; backend = $runtime.backend; device = $runtime.device; device_verified = $false; observed_devices = @(); rows = @(); error = 'Model file is not installed.' } }
+                    elseif ($model.fit.skip) { $row = [pscustomobject]@{ status = 'skipped_fit'; model_id = $model.id; model = $model.name; runtime_tag = $runtime.tag; backend = $runtime.backend; device = $runtime.device; device_verified = $false; observed_devices = @(); rows = @(); error = "Fit estimate: $($model.fit.verdict), $($model.fit.needed_gib) GiB needed." } }
+                    else { $row = Invoke-TuneBench -JobId $JobId -Stage 'stage1' -Model $model -Runtime $runtime -Prompts $stagePrompts -Gen $stageGen -Reps $stageReps }
+                    $stage1 += $row
+                    $checkpoint.stage1 = @($stage1)
+                    Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+                }
+                Write-TuneProgress -JobId $JobId -Fields @{ stage = 'stage1'; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint); total_runs = $total; current_model = [string]$model.id; current_runtime = [string]$runtime.label; current_bench_pid = 0; last_result = [string]$row.status }
+            }
+            $modelIndex++
+        }
+        if (& $cancel) { Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }; return 0 }
+        # The second reference must use the same build and device as the first, otherwise a
+        # backend difference would masquerade as clock drift.
+        if (-not $smoke -and ($null -eq $referenceMid -or [string]$referenceMid.status -ne 'ok')) {
+            $referenceMid = Invoke-TuneBench -JobId $JobId -Stage 'reference-before-stage2' -Model $referenceModel -Runtime $firstRuntime -Prompts @(2048) -Gen 128 -Reps 3
+            $checkpoint.reference_before_stage2 = $referenceMid
+            Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+        }
+        $driftPercent = $null
+        $driftWarning = ''
+        if ($smoke) {
+            # The smoke run has no second stage, so there is no drift comparison to make.
+        } elseif ($null -eq $referenceBefore -or [string]$referenceBefore.status -ne 'ok' -or $null -eq $referenceMid -or [string]$referenceMid.status -ne 'ok') {
+            $driftWarning = 'A reference benchmark did not complete; the run stopped before Stage 2 so a drift check cannot be faked.'
+        } else {
+            $b1 = Get-TuneRowMetric -Rows $referenceBefore.rows -Kind 'prompt' -N 2048
+            $m1 = Get-TuneRowMetric -Rows $referenceMid.rows -Kind 'prompt' -N 2048
+            if ($null -ne $b1 -and $null -ne $m1 -and [double]$b1.mean -gt 0) {
+                $driftPercent = [Math]::Round([Math]::Abs(([double]$m1.mean - [double]$b1.mean) / [double]$b1.mean) * 100, 2)
+                if ($driftPercent -gt 10) { $driftWarning = "Reference prompt speed drifted $($driftPercent) percent between stages; clocks or thermals may be distorting the run. Stopped before Stage 2." }
+            } else {
+                $driftWarning = 'The reference benchmark did not produce a 2048-token prompt result; the run stopped before Stage 2.'
+            }
+        }
+        if ($driftWarning) {
+            Write-TuneProgress -JobId $JobId -Fields @{ state = 'paused_for_user'; stage = 'awaiting-user'; warnings = @($driftWarning); reference_drift_percent = $driftPercent; current_bench_pid = 0 }
+            $job | Add-Member -NotePropertyName state -NotePropertyValue 'paused_for_user' -Force
+            Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job
+            return 0
+        }
+        $presetMap = [ordered]@{}
+        $stage2Models = if ($smoke) { @() } else { @($plan.models | Where-Object { $_.installed -and -not $_.fit.skip }) }
+        foreach ($model in @($stage2Models)) {
+            $modelWinner = Get-TuneStageWinner -Stage1 $stage1 -ModelId ([string]$model.id)
+            if ($null -eq $modelWinner) { continue }
+            $runtime = @($plan.runtimes | Where-Object { $_.tag -eq $modelWinner.runtime_tag } | Select-Object -First 1)
+            if ($runtime.Count -eq 0) { continue }
+            foreach ($combo in @(Get-TuneBatchCombinations)) {
+                if (& $cancel) { Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }; return 0 }
+                $existing = @($stage2 | Where-Object { [string]$_.model_id -eq [string]$model.id -and [int]$_.batch_size -eq [int]$combo.batch_size -and [int]$_.ubatch_size -eq [int]$combo.ubatch_size } | Select-Object -First 1)
+                if ($existing.Count -gt 0 -and [string]$existing[0].status -eq 'ok') {
+                    $row = $existing[0]
+                } else {
+                    if ($existing.Count -gt 0) { $stage2 = @($stage2 | Where-Object { -not ([string]$_.model_id -eq [string]$model.id -and [int]$_.batch_size -eq [int]$combo.batch_size -and [int]$_.ubatch_size -eq [int]$combo.ubatch_size) }) }
+                    $row = Invoke-TuneBench -JobId $JobId -Stage 'stage2' -Model $model -Runtime $runtime[0] -Prompts @(2048, 8192) -Gen 128 -Reps 2 -Batch $combo.batch_size -Ubatch $combo.ubatch_size
+                    $row | Add-Member -NotePropertyName runtime -NotePropertyValue $runtime[0].label -Force
+                    $row | Add-Member -NotePropertyName batch_size -NotePropertyValue ([int]$combo.batch_size) -Force
+                    $row | Add-Member -NotePropertyName ubatch_size -NotePropertyValue ([int]$combo.ubatch_size) -Force
+                    $stage2 += $row
+                    $checkpoint.stage2 = @($stage2)
+                    Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+                }
+                Write-TuneProgress -JobId $JobId -Fields @{ stage = 'stage2'; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint); total_runs = $total; current_model = [string]$model.id; current_runtime = [string]$runtime[0].label; current_bench_pid = 0; last_result = [string]$row.status }
+            }
+            $presets = New-TunePresetSet -Model $model -Stage2 $stage2 -Hardware (Get-HardwareProfile) -JobId $JobId
+            if ($null -ne $presets) { $presetMap[[string]$model.id] = $presets; Save-TunePresets -ModelId ([string]$model.id) -Presets $presets }
+        }
+        $hardware = Get-HardwareProfile
+        $results = [ordered]@{
+            schema_version = 1; kind = 'llama-bench-tune'; job_id = $JobId; generated_at = (Get-Date).ToUniversalTime().ToString('o')
+            smoke = $smoke
+            comparison_caveat = Get-TuneComparisonCaveat -Runtimes @($plan.runtimes)
+            machine = [pscustomobject]@{ cpu = [string]$hardware.CpuName; ram_gib = [double]$hardware.RamGiB; gpu = [string]$hardware.RocmGpu; max_vram_gib = [double]$hardware.MaxAmdVramGiB; driver = Get-GpuDriverInfo; os = [string][Environment]::OSVersion.VersionString }
+            runtimes = @($plan.runtimes)
+            reference_before = $referenceBefore
+            reference_before_stage2 = $referenceMid
+            reference_drift_percent = $driftPercent
+            stage1 = @($stage1)
+            stage1_order = @($stage1 | ForEach-Object { "$($_.model_id)/$($_.runtime_tag)" })
+            stage2 = @($stage2)
+            stage2_order = @($stage2 | ForEach-Object { "$($_.model_id)/$($_.runtime_tag)/$($_.batch_size)/$($_.ubatch_size)" })
+            presets = [pscustomobject]$presetMap
+            wall_time_seconds = [Math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        }
+        Write-TuneJson -Path (Join-Path $dir 'results.json') -Document ([pscustomobject]$results)
+        Write-TuneSummary -Path (Join-Path $dir 'summary.md') -Results ([pscustomobject]$results)
+        $job | Add-Member -NotePropertyName state -NotePropertyValue 'completed' -Force
+        Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job
+        Write-TuneProgress -JobId $JobId -Fields @{ state = 'completed'; stage = 'completed'; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint); total_runs = $total; current_bench_pid = 0 }
+        return 0
+    } catch {
+        Write-TuneProgress -JobId $JobId -Fields @{ state = 'failed'; stage = 'failed'; current_bench_pid = 0; last_error = [string]$_.Exception.Message }
+        try { $job | Add-Member -NotePropertyName state -NotePropertyValue 'failed' -Force; Write-TuneJson -Path (Join-Path $dir 'job.json') -Document $job } catch { }
+        return 1
+    }
+}
+
 function Write-JsonStdout {
     # One typed document on stdout, for -Action State/Recommend/Diagnose.
     param($Document)
@@ -6659,6 +7683,22 @@ try {
     if ($Action -eq 'Diagnose') {
         # One typed diagnostics document (ADR-005): machine-readable, no GUI, read-only.
         Write-JsonStdout -Document (Get-DiagnosticReport)
+        exit 0
+    }
+
+    if ($Action -eq 'Tune') {
+        # Tune is a typed backend surface. Worker is internal and writes its own receipts;
+        # every user-facing sub-action prints exactly one JSON document.
+        if ($TuneAction -eq 'Worker') { exit (Invoke-TuneWorker -JobId $TuneJobId) }
+        $tuneDocument = switch ([string]$TuneAction) {
+            'Start' { Start-TuneJob }
+            'Resume' { Resume-TuneJob -JobId $TuneJobId }
+            'Status' { Get-TuneStatusDocument -JobId $TuneJobId }
+            'Cancel' { Stop-TuneJob -JobId $TuneJobId }
+            'Results' { Get-TuneResultsDocument -JobId $TuneJobId }
+            default { Get-TunePlanDocument }
+        }
+        Write-JsonStdout -Document $tuneDocument
         exit 0
     }
 
