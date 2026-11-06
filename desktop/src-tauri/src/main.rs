@@ -1423,15 +1423,21 @@ fn main() {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     // Keep the process and tray alive; the webview is destroyed so its
-                    // WebView2 children are released. Open recreates it. Destroy from a
-                    // short-lived worker rather than re-entering the event loop from the
-                    // close callback: destroying the last window immediately emits
-                    // ExitRequested, and doing that inside this callback raced the close
-                    // prevention on a rapid close/open/close cycle.
+                    // WebView2 children are released. Open recreates it. Hide before the
+                    // destroy: destroy waits for WebView2 teardown, and leaving the window
+                    // visible during that wait made close-to-tray look stalled for 15 s.
+                    // Destroy from a short-lived worker rather than re-entering the event
+                    // loop from the close callback: destroying the last window immediately
+                    // emits ExitRequested, and doing that inside this callback raced the
+                    // close prevention on a rapid close/open/close cycle.
                     health_window_changed(window.app_handle(), false, false);
                     api.prevent_close();
                     let window = window.clone();
                     std::thread::spawn(move || {
+                        // Hide from the worker as well: the close callback itself can be
+                        // busy with WebView2 teardown, so asking the event loop to hide
+                        // before returning delayed the visible change by about 9 s.
+                        let _ = window.hide();
                         std::thread::sleep(Duration::from_millis(50));
                         let _ = window.destroy();
                     });
