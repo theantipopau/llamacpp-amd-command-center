@@ -40,6 +40,12 @@ const TRAY_ID: &str = "main-tray";
 /// Loopback channel used to hand a second launch to the process that already owns the
 /// tray. It is not a public API: it listens only on 127.0.0.1 and accepts a single word.
 const SINGLE_INSTANCE_PORT: u16 = 47821;
+/// A fixed, app-specific token makes the loopback handshake distinguishable from any
+/// unrelated process that happens to own the port. It is not a secret.
+const INSTANCE_TOKEN: &str = "llamacpp-command-center-single-instance-v1";
+const INSTANCE_TIMEOUT: Duration = Duration::from_millis(500);
+const INSTANCE_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const INSTANCE_MESSAGE_LIMIT: usize = 128;
 const DESKTOP_SETTINGS_FILE: &str = "desktop-settings.json";
 /// How many parent folders to search for the backend script when running from a build tree.
 const SEARCH_DEPTH: usize = 6;
@@ -1250,31 +1256,119 @@ public static class ConsoleProbe {{ [DllImport("kernel32.dll")] public static ex
         assert_eq!(after_state, "stopped", "the forced stop must leave no server running");
         println!("state after the forced stop: {after_state}");
     }
+
+    #[test]
+    fn single_instance_protocol_requires_the_exact_token_and_shape() {
+        assert!(is_instance_request(&instance_request()));
+        assert!(is_instance_ack(&instance_ack()));
+        assert!(!is_instance_request(b"show\n"));
+        assert!(!is_instance_request(b"show wrong-token\n"));
+        assert!(!is_instance_request(b"show llamacpp-command-center-single-instance-v1\nextra"));
+        assert!(!is_instance_request(b"show llamacpp-command-center-single-instance-v1"));
+        assert!(!is_instance_ack(b"ok\n"));
+        assert!(!is_instance_ack(b"ok wrong-token\n"));
+        assert!(!is_instance_ack(instance_request().as_slice()));
+    }
 }
 
+fn instance_request() -> Vec<u8> {
+    format!("show {INSTANCE_TOKEN}\n").into_bytes()
+}
+
+fn instance_ack() -> Vec<u8> {
+    format!("ok {INSTANCE_TOKEN}\n").into_bytes()
+}
+
+fn is_instance_request(bytes: &[u8]) -> bool {
+    bytes == instance_request()
+}
+
+fn is_instance_ack(bytes: &[u8]) -> bool {
+    bytes == instance_ack()
+}
+
+/// Read one bounded request/response. The deadline is for the whole message, not for each
+/// individual read, so a peer that trickles bytes cannot keep the caller waiting.
+fn read_instance_message(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + INSTANCE_TIMEOUT;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64];
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let _ = stream.set_read_timeout(Some(remaining.max(Duration::from_millis(1))));
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let room = INSTANCE_MESSAGE_LIMIT.saturating_sub(bytes.len());
+                if room == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read.min(room)]);
+                if bytes.contains(&b'\n') || bytes.len() >= INSTANCE_MESSAGE_LIMIT {
+                    break;
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(_) => return None,
+        }
+    }
+    Some(bytes)
+}
+
+/// Send the exact request and require the exact acknowledgement. A connection without a
+/// valid reply is a foreign listener, not an instance to hand this launch to.
 fn forward_to_running_instance() -> bool {
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) else {
+    let address = SocketAddr::from(([127, 0, 0, 1], SINGLE_INSTANCE_PORT));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, INSTANCE_CONNECT_TIMEOUT) else {
         return false;
     };
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
-    let _ = stream.write_all(b"show");
-    true
+    let _ = stream.set_write_timeout(Some(INSTANCE_TIMEOUT));
+    if stream.write_all(&instance_request()).is_err() {
+        return false;
+    }
+    read_instance_message(&mut stream).is_some_and(|reply| is_instance_ack(&reply))
 }
 
+/// Listen for the handoff on the Tauri main thread's message loop. Recreating a destroyed
+/// webview from the accept thread is unsafe and was the reopen failure: the window object
+/// was created, but its native window could not be brought up reliably.
 fn start_instance_listener(app: AppHandle) {
     match TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
         Ok(listener) => {
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
-                    if stream.is_ok() {
-                        show_main_window(&app);
+                    let Ok(mut stream) = stream else { continue };
+                    let Some(request) = read_instance_message(&mut stream) else { continue };
+                    if !is_instance_request(&request) {
+                        let _ = stream.write_all(b"no\n");
+                        continue;
                     }
+                    let _ = stream.set_write_timeout(Some(INSTANCE_TIMEOUT));
+                    let _ = stream.write_all(&instance_ack());
+                    // Let the second process close first. If the listener closes first, the
+                    // server side of the accepted socket sits in TIME_WAIT on port 47821
+                    // and a later launch can fail to bind after Quit.
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    let mut drain = [0u8; 1];
+                    let _ = stream.read(&mut drain);
+                    let dispatcher = app.clone();
+                    let for_window = app.clone();
+                    let _ = dispatcher.run_on_main_thread(move || show_main_window(&for_window));
                 }
             });
         }
-        Err(_) => {
-            let _ = forward_to_running_instance();
-            std::process::exit(0);
+        Err(error) => {
+            // The port may belong to a foreign process, or a simultaneous cold start may
+            // have won the bind. The second case has a valid handshake and exits; the first
+            // must continue as a normal first instance rather than trusting the port.
+            if forward_to_running_instance() {
+                std::process::exit(0);
+            }
+            eprintln!(
+                "Single-instance port {SINGLE_INSTANCE_PORT} is owned by another process; continuing without handoff: {error}"
+            );
         }
     }
 }
