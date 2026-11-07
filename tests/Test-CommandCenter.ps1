@@ -1052,6 +1052,24 @@ try {
     Set-TunePresetSelection -ModelId 'qwen3-4b' -Preset 'none'
     $clearedPreset = Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768
     Assert-True (($clearedPreset -join ' ') -eq ($beforePreset -join ' ')) 'clearing the selection restores the exact previous command line'
+    Write-Host 'MoE expert offload setting (opt-in)'
+    $moeActive = [pscustomobject]@{ id = 'qwen3.6-35b-a3b'; model_path = (Join-Path $tuneRoot 'models\dummy.gguf'); mmproj_path = ''; alias = 'qwen3.6:35b-a3b'; reasoning = $false; tool_calling = $false; thinking = $false }
+    $moeBefore = Get-ServerArguments -ActiveModel $moeActive -EffectiveContext 32768
+    Assert-True (($moeBefore -join ' ') -notmatch '--n-cpu-moe') 'with no choice made the launch arguments carry no expert offload'
+    Set-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b' -Layers 18
+    $moeAfter = Get-ServerArguments -ActiveModel $moeActive -EffectiveContext 32768
+    Assert-True (($moeAfter -join ' ') -match '--n-cpu-moe 18( |$)') 'a chosen layer count becomes --n-cpu-moe for that model'
+    Assert-True ((Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768) -join ' ' -notmatch '--n-cpu-moe') 'the choice never leaks to another model'
+    $moePreset = Get-Content -LiteralPath (Join-Path $tuneRoot 'server-preset.ini') -Raw -ErrorAction SilentlyContinue
+    $moeSplit = Split-ServerArguments -Arguments ([string[]]$moeAfter)
+    Assert-True ((ConvertTo-ServerPresetText -Alias 'x' -ModelArguments $moeSplit.Model) -match "(?m)^n-cpu-moe = 18$") 'the router preset carries the expert layers with the model flags'
+    $moePatchOk = Set-SettingsFromDocument -SettingsPatchText '{"moe_cpu_layers":{"qwen3.6-35b-a3b":22}}'
+    Assert-True ((@($moePatchOk.applied | Where-Object { $_.field -eq 'moe_cpu_layers.qwen3.6-35b-a3b' }).Count -eq 1) -and ((Get-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b') -eq 22)) 'the settings patch saves a layer count for a MoE model'
+    $moePatchBad = Set-SettingsFromDocument -SettingsPatchText '{"moe_cpu_layers":{"qwen3-4b":10,"qwen3.6-35b-a3b":-1}}'
+    $moeRejected = @($moePatchBad.rejected | ForEach-Object { [string]$_.field })
+    Assert-True (($moeRejected -contains 'moe_cpu_layers.qwen3-4b') -and ($moeRejected -contains 'moe_cpu_layers.qwen3.6-35b-a3b') -and ($null -eq (Get-MoeCpuLayers -ModelId 'qwen3-4b')) -and ((Get-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b') -eq 22)) 'a non-MoE model or a negative count is rejected and changes nothing'
+    [void](Set-SettingsFromDocument -SettingsPatchText '{"moe_cpu_layers":{"qwen3.6-35b-a3b":"auto"}}')
+    Assert-True (($null -eq (Get-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b')) -and ((Get-ServerArguments -ActiveModel $moeActive -EffectiveContext 32768) -join ' ') -eq ($moeBefore -join ' ')) 'auto clears the choice and restores the exact previous command line'
     $tuneSettingsDoc = Get-SettingsDocument
     Assert-True (($tuneSettingsDoc.PSObject.Properties.Name -contains 'tune_presets') -and ($null -ne $tuneSettingsDoc.tune_presets.models)) 'the settings document exposes Tune presets and the opt-in selection'
 

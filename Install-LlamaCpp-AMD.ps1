@@ -2525,6 +2525,10 @@ function Get-ServerArguments {
     if ($null -ne $tunePreset) {
         $arguments += @('--batch-size', [string]$tunePreset.batch_size, '--ubatch-size', [string]$tunePreset.ubatch_size)
     }
+    # Opt-in MoE expert offload: only a layer count the user chose for this model (settings
+    # moe_cpu_layers). Nothing is written by default; server-args.user.json still wins below.
+    $moeLayers = Get-MoeCpuLayers -ModelId ([string]$ActiveModel.id)
+    if ($null -ne $moeLayers) { $arguments += @('--n-cpu-moe', [string]$moeLayers) }
     if (-not [string]::IsNullOrWhiteSpace($Device)) { $arguments += @('--device', $Device) }
     if (Test-ThinkingEnabled -ActiveModel $ActiveModel) {
         $arguments += @('--reasoning', 'on', '--reasoning-format', 'deepseek', '--reasoning-budget', '2048')
@@ -3665,6 +3669,29 @@ function Get-ModelBackendMap {
     }
     foreach ($property in $value.PSObject.Properties) { $map[[string]$property.Name] = [string]$property.Value }
     return $map
+}
+
+function Get-MoeCpuLayers {
+    # The opt-in number of MoE expert layers kept on the CPU for a model; $null when unset.
+    param([string] $ModelId)
+    $settings = Get-AppSettings
+    if ([string]::IsNullOrWhiteSpace($ModelId) -or -not $settings.ContainsKey('moe_cpu_layers') -or $null -eq $settings['moe_cpu_layers']) { return $null }
+    $value = Get-TuneValue -Object $settings['moe_cpu_layers'] -Name $ModelId -Default $null
+    $parsed = 0
+    if ($null -eq $value -or -not [int]::TryParse([string]$value, [ref]$parsed) -or $parsed -lt 0) { return $null }
+    return [int]$parsed
+}
+
+function Set-MoeCpuLayers {
+    # $null clears the choice for that model.
+    param([string] $ModelId, $Layers)
+    $settings = Get-AppSettings
+    $map = @{}
+    if ($settings.ContainsKey('moe_cpu_layers') -and $null -ne $settings['moe_cpu_layers']) {
+        foreach ($property in $settings['moe_cpu_layers'].PSObject.Properties) { $map[$property.Name] = $property.Value }
+    }
+    if ($null -eq $Layers) { [void]$map.Remove($ModelId) } else { $map[$ModelId] = [int]$Layers }
+    Set-AppSetting -Name 'moe_cpu_layers' -Value ([pscustomobject]$map)
 }
 
 function Get-ModelBackendOverride {
@@ -6512,6 +6539,7 @@ function Get-SettingsDocument {
             note = 'Tune presets are opt-in. An empty selection leaves the launch arguments unchanged.'
         }
         model_backends = Get-ModelBackendMap
+        moe_cpu_layers = $(if ($settings.ContainsKey('moe_cpu_layers') -and $null -ne $settings['moe_cpu_layers']) { $settings['moe_cpu_layers'] } else { [pscustomobject]@{} })
     }
 }
 
@@ -6613,6 +6641,35 @@ function Set-SettingsFromDocument {
                 }
                 Set-ModelBackendOverride -ModelId $modelId -Backend $requested
                 $result['applied'] += @([pscustomobject]@{ field = "model_backends.$modelId"; value = $requested; note = 'set'; triple = $null })
+            }
+        }
+    }
+    # Optional: MoE expert layers kept on the CPU, per MoE model. A whole number from 0 up,
+    # or null/"auto" to clear it (llama.cpp's own fit decides again).
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'moe_cpu_layers') {
+        $moeMap = $parsed.moe_cpu_layers
+        if ($null -eq $moeMap) {
+            $result['rejected'] += @([pscustomobject]@{ field = 'moe_cpu_layers'; reason = 'moe_cpu_layers must be an object of model id to a layer count or auto.' })
+        } else {
+            foreach ($property in $moeMap.PSObject.Properties) {
+                $modelId = [string]$property.Name
+                $entry = @(Get-ModelCatalog | Where-Object { $_.Id -eq $modelId } | Select-Object -First 1)
+                if ($entry.Count -eq 0 -or -not ($entry[0].PSObject.Properties.Name -contains 'Moe' -and [bool]$entry[0].Moe)) {
+                    $result['rejected'] += @([pscustomobject]@{ field = "moe_cpu_layers.$modelId"; reason = 'Only a mixture-of-experts model in the catalogue has expert layers to offload.' })
+                    continue
+                }
+                if ($null -eq $property.Value -or [string]$property.Value -eq 'auto') {
+                    Set-MoeCpuLayers -ModelId $modelId -Layers $null
+                    $result['applied'] += @([pscustomobject]@{ field = "moe_cpu_layers.$modelId"; value = 'auto'; note = 'set'; triple = $null })
+                    continue
+                }
+                $layers = -1
+                if (-not [int]::TryParse([string]$property.Value, [ref]$layers) -or $layers -lt 0 -or $layers -gt 512) {
+                    $result['rejected'] += @([pscustomobject]@{ field = "moe_cpu_layers.$modelId"; reason = 'Expert layers on the CPU must be a whole number from 0 to 512, or auto.' })
+                    continue
+                }
+                Set-MoeCpuLayers -ModelId $modelId -Layers $layers
+                $result['applied'] += @([pscustomobject]@{ field = "moe_cpu_layers.$modelId"; value = $layers; note = 'set'; triple = $null })
             }
         }
     }
