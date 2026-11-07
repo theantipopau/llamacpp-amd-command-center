@@ -185,6 +185,8 @@ The setup recommends the **strongest tool-capable model that fits entirely in yo
 | Llama 3.1 8B | 5.6 GB | ✓ | | Proven general-purpose model. |
 | Gemma 4 12B *(new)* | 6.9 GB | ✓ | ✓ | Google's April 2026 model (Q4_0 quant). Tool calling is supported by current llama.cpp but hasn't been tested with Copilot Agent mode here. Needs the Vulkan or *llama.cpp ROCm (latest)* backend: AMD's ROCm 7.2.1 package is older than Gemma 4 and can't load it. |
 | Gemma 3 12B | 7.6 GB | | ✓ | Chat and image understanding; not for Agent mode. |
+| Qwen3.6 35B-A3B *(experimental)* | 21.5 GB | ✓ | ✓ | A mixture-of-experts model: 35B in total but only about 3B work on each word, which is why it can stay quick even when most of it sits in system RAM. Too big for 16 GB of graphics memory, so the app rates it `VRAM+RAM` and starts it on Vulkan. **Speed on this PC has not been measured yet.** |
+| Ornith 1.5 35B-A3B *(experimental)* | 21.1 GB | ✓ | ✓ | The same kind of model from the Ornith team (MIT), aimed at coding. Its makers' claims are unchecked here, and it is assumed to need the same newer backend as Ornith 1.5 9B. **Not measured on this PC yet.** |
 | Gemma 3 4B | 3.1 GB | | ✓ | For 8 GB systems and Ryzen integrated graphics. |
 | Qwen3 4B | 2.3 GB | ✓ | | Smallest and fastest; good for CPU-only machines. |
 | Ornith 1.5 9B *(experimental)* | 6.2 GB | ✓ | ✓ | A community-tuned version of Qwen3.5 9B aimed at coding. Its makers report better results; that hasn't been checked here. AMD's ROCm 7.2.1 package can't load it (the menu stops you before downloading). It needs the Vulkan backend, which crashed during long sessions on an RX 9070 XT, or the advanced *llama.cpp ROCm (latest)* backend, which should load it but hasn't been tested with it here. |
@@ -301,7 +303,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LlamaCpp-AMD.p
 
 | Option | Meaning |
 |---|---|
-| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma4-12b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b`, `ornith-1.5-9b` |
+| `-ModelId` | `qwen3.5-9b`, `qwen3.8-27b`, `qwen3-8b`, `llama3.1-8b`, `gemma4-12b`, `gemma3-12b`, `gemma3-4b`, `qwen3-4b`, `ornith-1.5-9b`, `qwen3.6-35b-a3b`, `ornith-1.5-35b-a3b` |
 | `-ContextSize` | Tokens per conversation. `0` (default) sizes it from your hardware. |
 | `-Thinking` | `Auto` (default: off for tool-capable models), `On`, or `Off`. |
 | `-Backend` | `Auto` (default), `ROCm` (AMD's validated package), `ROCmLatest` (llama.cpp's own ROCm build; advanced), or `Vulkan`. |

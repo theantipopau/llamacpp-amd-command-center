@@ -8,7 +8,7 @@ Windows command center for running llama.cpp on AMD Radeon GPUs and connecting i
 - `tests/Test-CommandCenter.ps1` — offline test harness (no downloads, no real install touched).
 - `docs/index.html` — GitHub Pages site. Keep it in sync with `README.md`.
 
-Live install lives in `%LOCALAPPDATA%\Programs\llama.cpp` (`current\`, `models\`, `active-model.json`, generated `Start-LlamaCpp.cmd`, `logs\`, `state-history\`).
+Live install lives in `%LOCALAPPDATA%\Programs\llama.cpp` (`runtimes\vulkan\<tag>` and `runtimes\rocm\<tag>` side by side, `models\`, `benchmarks\`, `active-model.json`, `settings.json`, generated `Start-LlamaCpp.cmd`, `logs\`, `state-history\`; there is no `current\` folder any more).
 
 `state-history\` holds auto-taken state snapshots (`Save-StateSnapshot`): one before `Activate`/`Install`/`Update`/`Uninstall`/`RemoveModel`/`Easy`, one on demand via `-Action Snapshot`, newest `$script:StateSnapshotKeep` (40) kept. `Save-StateSnapshot` never throws — history must never block the change it records, and `-Action State` itself stays strictly read-only.
 
@@ -18,7 +18,7 @@ Live install lives in `%LOCALAPPDATA%\Programs\llama.cpp` (`current\`, `models\`
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CommandCenter.ps1
 ```
 
-Also: AST-parse the script with Windows PowerShell 5.1, run `Invoke-ScriptAnalyzer -Severity Error` on the script and tests (must be 0), and confirm `.cmd`/`.ps1` files have no LF-only line endings. CI (`.github/workflows/ci.yml`) runs the same plus a batch smoke test; reproduce it with `LLAMACPP_NO_PAUSE=1` and a redirected choices file (`(echo x& echo 5& echo 8& echo 0) > choices.txt`), never a pipe.
+Also: AST-parse the script with Windows PowerShell 5.1, run `Invoke-ScriptAnalyzer -Severity Error` on the script and tests (must be 0), and confirm `.cmd`/`.ps1` files have no LF-only line endings. CI (`.github/workflows/ci.yml`) runs the same plus a batch smoke test and a `desktop` job (`npm run check`, `npm run vite:build`, `cargo test --locked`); reproduce the smoke test with `LLAMACPP_NO_PAUSE=1` and a redirected choices file (`(echo x& echo 5& echo 8& echo 0) > choices.txt`), never a pipe.
 
 ## PowerShell 5.1 rules
 
