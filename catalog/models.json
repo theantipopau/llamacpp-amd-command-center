@@ -99,7 +99,7 @@
       "Tag": "MOE / EXPERIMENTAL",
       "Experimental": true,
       "Moe": true,
-      "Description": "Mixture-of-experts model, 35B total and about 3B active per token (Apache 2.0, Unsloth quant). The Q4 file is about 20 GiB, so on a 16 GB card its experts have to sit in system RAM; speed on this PC is not measured yet. Experimental until a real run says otherwise.",
+      "Description": "Mixture-of-experts model, 35B total and about 3B active per token (Apache 2.0, Unsloth quant). The Q4 file is about 20 GiB, so on a 16 GB card some experts have to sit in system RAM. Measured with llama-bench on Vulkan b12110: about 50-59 tokens/s generation but only 370-490 tokens/s prompt processing, against 95 and 3,100 for Qwen3.5 9B on the same build, so long agent prompts are several times slower. Quality and tool calling untested; experimental.",
       "Reasoning": true,
       "Vision": true,
       "Tools": true
@@ -117,7 +117,7 @@
       "Experimental": true,
       "Moe": true,
       "NeedsMtpLoader": true,
-      "Description": "Community coding/reasoning mixture-of-experts model, 35B total and about 3B active (MIT). About 20 GiB at Q4, so its experts have to sit in system RAM. Publisher claims are not verified here. Its 9B sibling needs the MTP-capable Vulkan or llama.cpp ROCm (latest) build; this one is assumed to as well until a load proves otherwise.",
+      "Description": "Community coding/reasoning mixture-of-experts model, 35B total and about 3B active (MIT). About 20 GiB at Q4, so some experts have to sit in system RAM. Measured with llama-bench on Vulkan b12110: about 57-65 tokens/s generation and 530-645 tokens/s prompt processing, against 95 and 3,100 for Qwen3.5 9B on the same build. Loads on Vulkan b12110; its 9B sibling cannot load on AMD's ROCm 7.2.1 package, so this one is assumed to share that limit. Publisher claims, quality and tool calling are not verified here.",
       "Reasoning": true,
       "Vision": true,
       "Tools": true
