@@ -2,6 +2,14 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 import * as api from "./api";
 import logo from "./assets/logo.png";
 import {
+  BACKEND_CHOICES,
+  describeRollback,
+  describeRuntimeUpdate,
+  redactPaths,
+  type BackendChoice,
+  backendChoiceOf,
+  describeBackendChoice,
+  describeReceipts,
   describeDiagnostics,
   describeGpu,
   describeIdleCapability,
@@ -36,6 +44,8 @@ import {
 import { asDocument as narrow, asSettingsDocument, asSettingsSaveDocument } from "./types";
 import type {
   BackendResult,
+  RuntimeRollbackDocument,
+  RuntimeUpdatesDocument,
   DesktopSettings,
   DiagnosticDocument,
   LibraryDocument,
@@ -56,7 +66,7 @@ const START_DEADLINE_MS = 240000;
 const LIBRARY_POLL_MS = 15000;
 const LIBRARY_POLL_LIMIT = 240;
 
-type Busy = null | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `library:${string}`;
+type Busy = null | "updates" | "rollback" | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `backend:${string}` | `library:${string}`;
 type Tab = "home" | "models" | "settings" | "health";
 
 const TABS: Array<[Tab, string]> = [
@@ -370,6 +380,66 @@ export default function App() {
     setBusy(null);
   }
 
+  const [updatesDoc, setUpdatesDoc] = useState<RuntimeUpdatesDocument | null>(null);
+  const [buildNote, setBuildNote] = useState<{ message: string; ok: boolean } | null>(null);
+  const [copyNote, setCopyNote] = useState<string | null>(null);
+
+  /** User-started: asks the backend whether newer llama.cpp builds exist. Downloads nothing. */
+  async function onCheckUpdates() {
+    if (busyRef.current !== null) {
+      return;
+    }
+    busyRef.current = "updates";
+    setBusy("updates");
+    setBuildNote(null);
+    const result = await api.getRuntimeUpdates();
+    const document = narrow<RuntimeUpdatesDocument>(result.document);
+    if (!result.ok || !document) {
+      setFailure(result);
+      setBuildNote({ message: "The update check did not return a document.", ok: false });
+    } else {
+      setUpdatesDoc(document);
+    }
+    busyRef.current = null;
+    setBusy(null);
+  }
+
+  /** Go back to the previous llama.cpp build. Confirmed first; refused while the AI runs. */
+  async function onRollback() {
+    if (busyRef.current !== null) {
+      return;
+    }
+    if (!window.confirm("Go back to the previous llama.cpp build?\n\nYour models and settings are kept. The launchers are rebuilt for the older build.")) {
+      return;
+    }
+    busyRef.current = "rollback";
+    setBusy("rollback");
+    setBuildNote(null);
+    const result = await api.rollbackRuntime();
+    const document = narrow<RuntimeRollbackDocument>(result.document);
+    if (!result.ok || !document) {
+      setBuildNote({ message: result.error ?? "The rollback did not run. Nothing was changed.", ok: false });
+    } else {
+      setBuildNote(describeRollback(document));
+    }
+    busyRef.current = null;
+    setBusy(null);
+    await refresh();
+  }
+
+  async function onCopyDiagnostics() {
+    if (!diagnostics) {
+      return;
+    }
+    const text = JSON.stringify(redactPaths(diagnostics), null, 2);
+    try {
+      await api.copyToClipboard(text);
+      setCopyNote("Copied. Your Windows user name is replaced with %USERPROFILE%.");
+    } catch {
+      setCopyNote("The clipboard was not available. Open “Diagnostics document” below and copy the text by hand.");
+    }
+  }
+
   async function onDiagnose() {
     if (busyRef.current !== null) {
       return;
@@ -430,6 +500,33 @@ export default function App() {
       setDesktopSettings({ start_minimised_to_tray: !checked });
       setSettingsSave({ message: "The tray start setting could not be saved.", ok: false });
     }
+  }
+
+  /** Save one model's backend choice through the backend's settings patch, then re-read the library. */
+  async function onBackendChoice(model: LibraryModel, choice: BackendChoice) {
+    if (busyRef.current !== null) {
+      return;
+    }
+    busyRef.current = `backend:${model.id}`;
+    setBusy(`backend:${model.id}`);
+    const result = await api.saveSettings(JSON.stringify({ model_backends: { [model.id]: choice } }));
+    const document = asSettingsSaveDocument(result.document);
+    if (!result.ok || !document) {
+      setFailure(result);
+      setLibraryNote({ message: "The backend choice did not reach the backend. Nothing was saved.", ok: false });
+    } else {
+      const message = describeSettingsSave(document.applied.length, document.rejected);
+      const running = phase === "running" || phase === "loading";
+      setLibraryNote({
+        message: document.rejected.length === 0
+          ? `${model.name}: backend set to ${choice}. ${running && model.active ? "It applies the next time the AI starts." : "It applies when this model next starts."}`
+          : message,
+        ok: document.rejected.length === 0
+      });
+    }
+    busyRef.current = null;
+    setBusy(null);
+    await loadLibrary();
   }
 
   async function onSaveSettings() {
@@ -796,6 +893,38 @@ export default function App() {
                         </div>
                         <p className="model-state">{describeLibraryState(model)}{describeLibraryFit(model) ? ` — ${describeLibraryFit(model)}` : ""}</p>
                         {model.runtime_blocker ? <p className="warning">{model.runtime_blocker}</p> : null}
+                        {model.downloaded && model.preferred_backend ? (
+                          <div className="backend-choice">
+                            <label>
+                              Backend{" "}
+                              <select
+                                value={backendChoiceOf(model)}
+                                onChange={(event) => void onBackendChoice(model, event.target.value as BackendChoice)}
+                                disabled={busy !== null}
+                                aria-label={`Backend for ${model.name}`}
+                              >
+                                {BACKEND_CHOICES.map((choice) => (
+                                  <option key={choice} value={choice}>
+                                    {choice === "Auto" ? "Auto (recommended)" : choice}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <span className="muted">{describeBackendChoice(model)}</span>
+                          </div>
+                        ) : null}
+                        {describeReceipts(model).length > 0 ? (
+                          <div className="receipts">
+                            <p className="muted receipts-title">Tested on this PC</p>
+                            <ul>
+                              {describeReceipts(model).map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : (
+                          <p className="muted">Not benchmarked on this PC yet.</p>
+                        )}
                         {operation === "active" ? null : (
                           <div className="actions">
                             {operation === "download" ? (
@@ -824,6 +953,7 @@ export default function App() {
                     );
                   })}
                 </ul>
+                {library.receipts_caveat ? <p className="muted">Reading the speeds: {library.receipts_caveat}</p> : null}
                 {library.hardware_error ? <p className="warning">Hardware scan problem: {library.hardware_error}</p> : null}
                 {libraryNote ? (
                   <p className={libraryNote.ok ? "verdict" : "warning"} role="status" aria-live="polite">
@@ -967,6 +1097,32 @@ export default function App() {
                 {busy === "diagnose" ? "Checking…" : "Run diagnostics"}
               </button>
             </div>
+            <h3>llama.cpp builds</h3>
+            <div className="actions">
+              <button type="button" onClick={() => void onCheckUpdates()} disabled={busy !== null}>
+                {busy === "updates" ? "Checking…" : "Check for newer builds"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void onRollback()}
+                disabled={busy !== null || phase !== "stopped"}
+                title={phase !== "stopped" ? "Stop the AI first" : "Go back to the previous build"}
+              >
+                {busy === "rollback" ? "Rolling back…" : "Roll back to the previous build"}
+              </button>
+            </div>
+            {updatesDoc ? (
+              <ul className="builds">
+                {updatesDoc.updates.map((entry) => (
+                  <li key={`${entry.backend}-${entry.installed_tag}`}>{describeRuntimeUpdate(entry)}</li>
+                ))}
+              </ul>
+            ) : null}
+            {buildNote ? (
+              <p className={buildNote.ok ? "verdict" : "warning"} role="status">
+                {buildNote.message}
+              </p>
+            ) : null}
             {diagnostics ? (
               <>
                 <p className="verdict" role="status">{describeDiagnostics(diagnostics)}</p>
@@ -995,9 +1151,19 @@ export default function App() {
                     {line}
                   </p>
                 ))}
+                <div className="actions">
+                  <button type="button" onClick={() => void onCopyDiagnostics()}>
+                    Copy diagnostics
+                  </button>
+                </div>
+                {copyNote ? (
+                  <p className="muted" role="status">
+                    {copyNote}
+                  </p>
+                ) : null}
                 <details className="raw">
-                  <summary>Raw diagnostics document</summary>
-                  <pre>{JSON.stringify(diagnostics, null, 2)}</pre>
+                  <summary>Diagnostics document (user folder hidden)</summary>
+                  <pre>{JSON.stringify(redactPaths(diagnostics), null, 2)}</pre>
                 </details>
                 <RawDetail result={diagnosticResult} />
               </>

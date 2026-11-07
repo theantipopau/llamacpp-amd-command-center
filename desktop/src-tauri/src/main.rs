@@ -866,6 +866,71 @@ fn update_runtime(force: bool) -> BackendResult {
     run_backend("Runtime", if force { "runtime:update:force" } else { "runtime:update" }, &extra)
 }
 
+/// Put text on the Windows clipboard through clip.exe. The webview's own clipboard needs
+/// the window focused and permitted; this works whenever the button was clicked and adds no
+/// dependency. clip.exe reads UTF-16 as Unicode text; a byte-order mark would be pasted as a stray character.
+#[tauri::command]
+fn copy_to_clipboard(text: String) -> Result<(), String> {
+    let mut command = Command::new("clip.exe");
+    command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|error| format!("clip.exe did not start: {error}"))?;
+    let mut bytes: Vec<u8> = Vec::new();
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&bytes).map_err(|error| format!("clip.exe did not take the text: {error}"))?;
+    }
+    let status = child.wait().map_err(|error| format!("clip.exe did not finish: {error}"))?;
+    if status.success() { Ok(()) } else { Err("clip.exe reported a failure.".to_string()) }
+}
+
+/// Newest-available check for each installed backend (`-RuntimeAction updates`). Read-only:
+/// it asks GitHub for the latest tag (cached six hours by the backend) and downloads nothing.
+#[tauri::command]
+fn get_runtime_updates() -> BackendResult {
+    run_backend(
+        "Runtime",
+        "runtime:updates",
+        &["-RuntimeAction".to_string(), "updates".to_string()],
+    )
+}
+
+/// Point llama.cpp back at the previous build of the active backend (`-RuntimeAction
+/// rollback`). The backend would restart a running server in a visible console, which this
+/// window never opens, so a running server is refused here and the user stops it first.
+#[tauri::command]
+fn rollback_runtime() -> BackendResult {
+    let health = runtime_health();
+    let state = health
+        .document
+        .as_ref()
+        .and_then(|document| document.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if state == "running" || state == "loading" {
+        return BackendResult {
+            ok: false,
+            action: "runtime:rollback".to_string(),
+            document: None,
+            error: Some("Stop the AI before rolling llama.cpp back. Nothing was changed.".to_string()),
+            command: String::new(),
+            exit_code: None,
+            stderr: String::new(),
+            install_root: install_root().display().to_string(),
+            script: None,
+            candidates: Vec::new(),
+        };
+    }
+    run_backend(
+        "Runtime",
+        "runtime:rollback",
+        &["-RuntimeAction".to_string(), "rollback".to_string()],
+    )
+}
+
 /// Read-only settings document (`-Action Settings`): what the user can change and what the
 /// installed runtime actually supports.
 #[tauri::command]
@@ -1194,6 +1259,18 @@ mod tests {
     }
 
     #[test]
+    fn rollback_with_no_runtime_is_typed_and_changes_nothing() {
+        let root = temp_root("rollback");
+        point_at_test_backend(&root);
+        let result = rollback_runtime();
+        assert!(result.ok, "rollback answered with an error: {:?} ({})", result.error, result.stderr);
+        let document = result.document.expect("a rollback document");
+        assert_eq!(document["action"], "rollback");
+        assert_eq!(document["status"], "no_runtime");
+        assert_eq!(document["restarted"], false);
+    }
+
+    #[test]
     fn an_odd_install_root_degrades_instead_of_failing() {
         let root = temp_root("odd-root");
         // State never throws (ADR-003): a root that is a file still returns a document
@@ -1261,7 +1338,7 @@ mod tests {
         // model downloads all use the no-window flag.
         // Including the pieces through concat! keeps this assertion from matching itself.
         let flag_call = concat!(".creation_flags(", "CREATE_NO_WINDOW)");
-        assert_eq!(include_str!("main.rs").matches(flag_call).count(), 4);
+        assert_eq!(include_str!("main.rs").matches(flag_call).count(), 5);
     }
 
     #[cfg(windows)]
@@ -1528,6 +1605,9 @@ fn main() {
             start_server,
             stop_server,
             update_runtime,
+            get_runtime_updates,
+            copy_to_clipboard,
+            rollback_runtime,
             get_settings,
             save_settings,
             get_library,

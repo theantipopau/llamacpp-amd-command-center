@@ -37,6 +37,18 @@ export function updateRuntime(force: boolean): Promise<BackendResult> {
   return invoke<BackendResult>("update_runtime", { force });
 }
 
+export function copyToClipboard(text: string): Promise<void> {
+  return invoke<void>("copy_to_clipboard", { text });
+}
+
+export function getRuntimeUpdates(): Promise<BackendResult> {
+  return invoke<BackendResult>("get_runtime_updates");
+}
+
+export function rollbackRuntime(): Promise<BackendResult> {
+  return invoke<BackendResult>("rollback_runtime");
+}
+
 export function getDesktopSettings(): Promise<DesktopSettings> {
   return invoke<DesktopSettings>("get_desktop_settings");
 }

@@ -581,3 +581,41 @@ select {
 .raw dd {
   margin: 0;
 }
+
+.backend-choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+}
+
+.receipts {
+  margin: 6px 0 0;
+  font-size: 0.86rem;
+}
+
+.receipts-title {
+  margin: 0 0 2px;
+  font-weight: 600;
+}
+
+.receipts ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.builds {
+  margin: 8px 0;
+  padding-left: 18px;
+  font-size: 0.92rem;
+}
+
+.receipts li,
+.builds li {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}

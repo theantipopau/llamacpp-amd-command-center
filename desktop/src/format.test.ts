@@ -20,6 +20,13 @@ import {
   describeTier,
   describeStatusBadge,
   describeVram,
+  backendChoiceOf,
+  describeRollback,
+  describeRuntimeUpdate,
+  redactPaths,
+  describeBackendChoice,
+  describeReceipt,
+  describeReceipts,
   nextTabIndex,
   describeModelState,
   describeGamePause,
@@ -476,5 +483,79 @@ describe("model library display rules", () => {
         total_gib: 0, verdict: "fits", confidence: "high"
       }).available
     ).toBe(false);
+  });
+});
+
+describe("per-model backend and receipts", () => {
+  const base = {
+    id: "qwen3.5-9b", name: "Qwen3.5 9B", alias: "qwen3.5:9b", approx_gib: 6.2, tools: true, vision: true,
+    experimental: false, downloaded: true, active: false, runtime_blocker: "", fit_status: "EXCELLENT", gpu_resident: true
+  };
+  const receipt = {
+    backend: "Vulkan", runtime_tag: "b12110", job_id: "tune-1", measured_at: "2026-11-04T23:39:16Z", gpu_layers: 99,
+    prompt: [{ tokens: 2048, tokens_per_second: 3140.7, noisy: false }, { tokens: 8192, tokens_per_second: 3027.3, noisy: true }],
+    decode: { tokens: 128, tokens_per_second: 94.7, noisy: false }, unreliable: false
+  };
+
+  it("shows Auto until the user picks a backend, and ignores anything unknown", () => {
+    expect(backendChoiceOf(base)).toBe("Auto");
+    expect(backendChoiceOf({ ...base, backend_override: "" })).toBe("Auto");
+    expect(backendChoiceOf({ ...base, backend_override: "ROCm" })).toBe("ROCm");
+    expect(backendChoiceOf({ ...base, backend_override: "Metal" })).toBe("Auto");
+  });
+
+  it("says where the backend comes from and why", () => {
+    expect(describeBackendChoice({ ...base, preferred_backend: "Vulkan", backend_source: "user" })).toBe("Starts on Vulkan (your choice).");
+    expect(describeBackendChoice({ ...base, preferred_backend: "Vulkan", backend_source: "default", backend_reason: "7B-14B models use Vulkan by default on this PC." }))
+      .toBe("Starts on Vulkan (default: 7B-14B models use Vulkan by default on this PC).");
+    expect(describeBackendChoice(base)).toBe("");
+  });
+
+  it("writes a receipt as measured numbers with build and date, flagging noise", () => {
+    const line = describeReceipt(receipt);
+    expect(line).toContain("Vulkan b12110");
+    expect(line).toContain("3140.7 tok/s at 2048");
+    expect(line).toContain("3027.3 tok/s (noisy) at 8192");
+    expect(line).toContain("generation 94.7 tok/s");
+    expect(line).toContain("measured 2026-11-04");
+    expect(describeReceipt({ ...receipt, unreliable: true })).toContain("Marked unreliable.");
+  });
+
+  it("lists nothing when a model has no receipts", () => {
+    expect(describeReceipts(base)).toEqual([]);
+    expect(describeReceipts({ ...base, receipts: [] })).toEqual([]);
+    expect(describeReceipts({ ...base, receipts: [receipt] })).toHaveLength(1);
+  });
+});
+
+describe("health: path redaction, build updates and rollback", () => {
+  it("hides the Windows user name everywhere in a document, without changing the original", () => {
+    const original = {
+      install_root: "C:\\Users\\matth\\AppData\\Local\\Programs\\llama.cpp",
+      nested: [{ path: "D:\\Users\\Someone Else\\Documents\\notes.txt", fine: "no path here", count: 3 }]
+    };
+    const redacted = redactPaths(original);
+    expect(redacted.install_root).toBe("%LOCALAPPDATA%\\Programs\\llama.cpp");
+    expect(redacted.nested[0].path).toBe("%USERPROFILE%\\Documents\\notes.txt");
+    expect(redacted.nested[0].fine).toBe("no path here");
+    expect(redacted.nested[0].count).toBe(3);
+    expect(original.install_root).toContain("matth");
+    expect(JSON.stringify(redacted)).not.toContain("matth");
+    expect(redactPaths(null)).toBeNull();
+    expect(redactPaths(7)).toBe(7);
+  });
+
+  it("describes each build check in one line, naming errors instead of hiding them", () => {
+    const base = { backend: "Vulkan", installed_tag: "b12110", latest_tag: "b12110", channel: "ggml-org Vulkan", update_available: false, checked_at: "", cached: true, stale: false, error: "" };
+    expect(describeRuntimeUpdate(base)).toBe("Vulkan b12110: up to date with ggml-org Vulkan (b12110).");
+    expect(describeRuntimeUpdate({ ...base, latest_tag: "b12182", update_available: true })).toContain("a newer build is available (b12182");
+    expect(describeRuntimeUpdate({ ...base, error: "offline" })).toContain("could not check for a newer build (offline)");
+  });
+
+  it("reports a rollback as done only when the backend says rolled_back", () => {
+    const done = describeRollback({ schema_version: 1, action: "rollback", status: "rolled_back", detail: "Rolled back from b12110 to b12109.", backend: "vulkan", from_tag: "b12110", to_tag: "b12109", restarted: false });
+    expect(done).toEqual({ message: "Rolled back from b12110 to b12109.", ok: true });
+    const refused = describeRollback({ schema_version: 1, action: "rollback", status: "no_previous", detail: "No previous build is installed for this backend; two builds are needed to roll back.", backend: "vulkan", from_tag: "b12110", to_tag: "", restarted: false });
+    expect(refused.ok).toBe(false);
   });
 });

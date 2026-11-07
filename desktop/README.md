@@ -5,9 +5,24 @@ documents the backend already prints (`-Action State`, `-Action Recommend`,
 `-Action Diagnose`, `-Action Runtime`, `-Action Settings`), and it owns no domain logic: it
 never reads files, never parses output text and never decides what the state is (ADR-006).
 
-Shipped so far: launch, show state, Start, Stop, Open chat, Diagnose, and the Settings screen (idle
-unload minutes and the use-case picker, saved through the backend's own settings
-helpers). Model downloads and editor integrations are later phases.
+Shipped so far: launch, show state, Start, Stop, Open chat, Diagnose, the Settings screen (idle
+unload minutes and the use-case picker, saved through the backend's own settings helpers), the
+model library, and the system tray. Per tab:
+
+- **Home** - the AI's state and a graphics-memory bar drawn from the backend's own
+  `vram_estimate` (weights, context cache, compute buffers, reserve), every segment named and
+  numbered in text. With no estimate it says so; it never falls back to weights alone.
+- **Models** - download, switch and remove models. Each downloaded model has a backend choice
+  (Auto, Vulkan or ROCm, saved through the settings patch `model_backends`; it applies the next
+  time that model starts) and a "Tested on this PC" list of the speeds Tune measured here
+  (read-only, from the saved results; models never measured say so).
+- **Settings** - idle unload, game pause, use case, start minimised to the tray.
+- **Health** - diagnostics, **Copy diagnostics** (the Windows user folder is replaced with
+  `%USERPROFILE%` / `%LOCALAPPDATA%` first), a user-started check for newer llama.cpp builds,
+  and **Roll back to the previous build** (confirmed first, and refused while the AI is running
+  so the window never has to open a console to restart it).
+
+Editor integrations and Tune are not in the window.
 
 ## Requirements
 

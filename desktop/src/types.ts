@@ -199,6 +199,37 @@ export interface DesktopSettings {
   start_minimised_to_tray: boolean;
 }
 
+/** One backend family's newest-build check (`-RuntimeAction updates`). */
+export interface RuntimeUpdateEntry {
+  backend: string;
+  installed_tag: string;
+  latest_tag: string;
+  channel: string;
+  update_available: boolean;
+  checked_at: string;
+  cached: boolean;
+  stale: boolean;
+  error: string;
+}
+
+export interface RuntimeUpdatesDocument {
+  schema_version: number;
+  generated_at: string;
+  updates: RuntimeUpdateEntry[];
+}
+
+/** The typed answer of `-RuntimeAction rollback`. */
+export interface RuntimeRollbackDocument {
+  schema_version: number;
+  action: string;
+  status: string;
+  detail: string;
+  backend: string;
+  from_tag: string;
+  to_tag: string;
+  restarted: boolean;
+}
+
 /** The settings document the backend prints for `-Action Settings` (read). */
 export interface SettingsDocument {
   schema_version: number;
@@ -232,6 +263,25 @@ export interface SettingsSaveDocument {
   settings: SettingsDocument | null;
 }
 
+/** One measured speed number from a Tune run on this PC. */
+export interface ReceiptSpeed {
+  tokens: number;
+  tokens_per_second: number;
+  noisy: boolean;
+}
+
+/** "Tested on this PC": one backend's saved benchmark for one model. */
+export interface LibraryReceipt {
+  backend: string;
+  runtime_tag: string;
+  job_id: string;
+  measured_at: string;
+  gpu_layers: number | null;
+  prompt: ReceiptSpeed[];
+  decode: ReceiptSpeed | null;
+  unreliable: boolean;
+}
+
 /** One model entry in the backend's Library document. */
 export interface LibraryModel {
   id: string;
@@ -246,6 +296,13 @@ export interface LibraryModel {
   runtime_blocker: string;
   fit_status: string;
   gpu_resident: boolean;
+  /** Optional so an older backend document still parses. */
+  preferred_backend?: string;
+  backend_source?: "user" | "default" | string;
+  backend_reason?: string;
+  /** "" when the user has not chosen; otherwise Vulkan or ROCm. */
+  backend_override?: string;
+  receipts?: LibraryReceipt[];
 }
 
 /** One model a newer runtime would unblock (catalogue-derived, id+name only). */
@@ -263,6 +320,9 @@ export interface LibraryDocument {
   models: LibraryModel[];
   /** Models a newer llama.cpp build would unblock; empty when none or no runtime. */
   unlocked_models: UnlockableModel[] | null;
+  active_backend?: string;
+  /** Why measured backends are not a like-for-like comparison, from the saved Tune run. */
+  receipts_caveat?: string;
   hardware_error: string | null;
 }
 

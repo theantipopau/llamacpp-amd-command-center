@@ -2,6 +2,10 @@
 // document, so the rules are unit testable without a window or a backend (ADR-006 §4).
 
 import type {
+  RuntimeRollbackDocument,
+  RuntimeUpdateEntry,
+  LibraryReceipt,
+  ReceiptSpeed,
   BackendResult,
   DiagnosticDocument,
   HardwareProfile,
@@ -527,4 +531,89 @@ export function describeVram(estimate: VramEstimate | null | undefined): VramSum
   const parts = segments.map((part) => `${part.label.toLowerCase()} ${part.gib.toFixed(1)} GiB`).join(", ");
   const label = `Estimated ${needed.toFixed(1)} GiB of the ${total.toFixed(1)} GiB graphics memory (${confidence}): ${parts}.`;
   return { available: true, segments, percent, fits, verdict, label, spoken: `${verdict}. ${label}` };
+}
+
+export const BACKEND_CHOICES = ["Auto", "Vulkan", "ROCm"] as const;
+export type BackendChoice = (typeof BACKEND_CHOICES)[number];
+
+/** The value the backend setting dropdown shows: "Auto" until the user picks one. */
+export function backendChoiceOf(model: LibraryModel): BackendChoice {
+  const chosen = model.backend_override;
+  return chosen === "Vulkan" || chosen === "ROCm" ? chosen : "Auto";
+}
+
+/** Which backend this model will start on, and whether that is the default or a choice. */
+export function describeBackendChoice(model: LibraryModel): string {
+  const backend = model.preferred_backend;
+  if (!backend) {
+    return "";
+  }
+  return model.backend_source === "user"
+    ? `Starts on ${backend} (your choice).`
+    : `Starts on ${backend} (default${model.backend_reason ? `: ${model.backend_reason.replace(/\.$/, "")}` : ""}).`;
+}
+
+function speedText(speed: ReceiptSpeed): string {
+  return `${speed.tokens_per_second.toFixed(1)} tok/s${speed.noisy ? " (noisy)" : ""}`;
+}
+
+/** One saved benchmark as a sentence: backend, build, prompt and generation speed, date. */
+export function describeReceipt(receipt: LibraryReceipt): string {
+  const prompt = receipt.prompt.map((row) => `${speedText(row)} at ${row.tokens}`).join(", ");
+  const parts: string[] = [];
+  if (prompt) {
+    parts.push(`prompt ${prompt} tokens`);
+  }
+  if (receipt.decode) {
+    parts.push(`generation ${speedText(receipt.decode)}`);
+  }
+  const date = /^\d{4}-\d{2}-\d{2}/.exec(receipt.measured_at)?.[0];
+  const when = date ? `, measured ${date}` : "";
+  const flag = receipt.unreliable ? " Marked unreliable." : "";
+  return `${receipt.backend} ${receipt.runtime_tag}: ${parts.join("; ")}${when}.${flag}`;
+}
+
+/** "Tested on this PC" lines for one model; an honest empty list when nothing was measured. */
+export function describeReceipts(model: LibraryModel): string[] {
+  return (model.receipts ?? []).map(describeReceipt);
+}
+
+/**
+ * Replace the Windows user folder in every string of a document so a copied report does not
+ * carry the account name. The local-app-data folder becomes %LOCALAPPDATA%, any other path
+ * under the profile becomes %USERPROFILE%. Pure: returns a copy.
+ */
+export function redactPaths<T>(value: T): T {
+  if (typeof value === "string") {
+    return value
+      .replace(/[A-Za-z]:\\Users\\[^\\"]+\\AppData\\Local/gi, "%LOCALAPPDATA%")
+      .replace(/[A-Za-z]:\\Users\\[^\\"]+/gi, "%USERPROFILE%") as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactPaths(item)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      copy[key] = redactPaths(item);
+    }
+    return copy as T;
+  }
+  return value;
+}
+
+/** One line per backend: what is installed and whether a newer build exists. */
+export function describeRuntimeUpdate(entry: RuntimeUpdateEntry): string {
+  if (entry.error) {
+    return `${entry.backend} ${entry.installed_tag}: could not check for a newer build (${entry.error}).`;
+  }
+  if (entry.update_available) {
+    return `${entry.backend} ${entry.installed_tag}: a newer build is available (${entry.latest_tag}, ${entry.channel}).`;
+  }
+  return `${entry.backend} ${entry.installed_tag}: up to date with ${entry.channel} (${entry.latest_tag}).`;
+}
+
+/** The result of a rollback as one sentence the window can show. */
+export function describeRollback(document: RuntimeRollbackDocument): { message: string; ok: boolean } {
+  return { message: document.detail || `Rollback finished with status ${document.status}.`, ok: document.status === "rolled_back" };
 }
