@@ -6639,6 +6639,53 @@ function Set-SettingsFromDocument {
     return [pscustomobject]$result
 }
 
+function Get-ModelReceipts {
+    # "Tested on this PC": the benchmark numbers Tune measured here, read straight from the
+    # saved results (never edited, never invented). Smoke runs and rows that did not run
+    # are ignored; per model and backend the newest completed run wins. Read-only, and a
+    # missing or malformed file just contributes nothing.
+    $byModel = @{}
+    $caveat = ''
+    $root = Get-TuneJobRoot
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return [pscustomobject]@{ models = $byModel; caveat = $caveat } }
+    $jobs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'tune-*' -ErrorAction SilentlyContinue | Sort-Object Name)
+    foreach ($job in $jobs) {
+        $results = Read-TuneJson -Path (Join-Path $job.FullName 'results.json')
+        if ($null -eq $results -or $results.PSObject.Properties.Name -notcontains 'stage1') { continue }
+        if (($results.PSObject.Properties.Name -contains 'smoke') -and [bool]$results.smoke) { continue }
+        if ($results.PSObject.Properties.Name -contains 'comparison_caveat') { $caveat = [string]$results.comparison_caveat }
+        foreach ($entry in @($results.stage1)) {
+            if ([string]$entry.status -ne 'ok' -or -not [bool]$entry.device_verified) { continue }
+            $prompt = @()
+            $decode = $null
+            $layers = $null
+            $unreliable = $false
+            foreach ($row in @($entry.rows)) {
+                if ($null -eq $layers -and ($row.PSObject.Properties.Name -contains 'n_gpu_layers')) { $layers = [int]$row.n_gpu_layers }
+                if (($row.PSObject.Properties.Name -contains 'unreliable') -and [bool]$row.unreliable) { $unreliable = $true }
+                $noisy = (($row.PSObject.Properties.Name -contains 'noisy') -and [bool]$row.noisy)
+                $item = [pscustomobject]@{ tokens = [int]$row.n; tokens_per_second = [Math]::Round([double]$row.mean, 1); noisy = $noisy }
+                if ([string]$row.kind -eq 'prompt') { $prompt += $item } elseif ([string]$row.kind -eq 'decode') { $decode = $item }
+            }
+            if ($prompt.Count -eq 0 -and $null -eq $decode) { continue }
+            $modelId = [string]$entry.model_id
+            if (-not $byModel.ContainsKey($modelId)) { $byModel[$modelId] = @{} }
+            # Jobs are visited oldest first, so a later job replaces an earlier one.
+            $byModel[$modelId][[string]$entry.backend] = [pscustomobject]@{
+                backend = [string]$entry.backend
+                runtime_tag = [string]$entry.runtime_tag
+                job_id = [string]$job.Name
+                measured_at = if ($results.PSObject.Properties.Name -contains 'generated_at') { [string]$results.generated_at } else { '' }
+                gpu_layers = $layers
+                prompt = @($prompt)
+                decode = $decode
+                unreliable = $unreliable
+            }
+        }
+    }
+    return [pscustomobject]@{ models = $byModel; caveat = $caveat }
+}
+
 function Get-LibraryDocument {
     # One typed document describing every catalog model and its local state (ADR-003:
     # read-only, additive). Model facts come from the catalogue; local facts (downloaded,
@@ -6651,6 +6698,7 @@ function Get-LibraryDocument {
     $hardwareError = $null
     try { $hardware = Get-HardwareProfile } catch { $hardwareError = [string]$_.Exception.Message }
     $installed = @(Get-InstalledModels | ForEach-Object { [string]$_.Id })
+    $receipts = Get-ModelReceipts
     $models = @()
     $diskBusy = $false
     foreach ($model in @(Get-ModelCatalog | Sort-Object Rank -Descending)) {
@@ -6678,6 +6726,7 @@ function Get-LibraryDocument {
             backend_source = [string]$preference.source
             backend_reason = [string]$preference.reason
             backend_override = Get-ModelBackendOverride -ModelId ([string]$model.Id)
+            receipts = @(if ($receipts.models.ContainsKey([string]$model.Id)) { @($receipts.models[[string]$model.Id].Values | Sort-Object backend) } else { @() })
         }
     }
     return [pscustomobject]@{
@@ -6689,6 +6738,7 @@ function Get-LibraryDocument {
         active_backend = if ($null -ne $runtime) { [string]$runtime.backend } else { '' }
         models = $models
         unlocked_models = Get-RuntimeUpdateUnlock -Runtime $runtime
+        receipts_caveat = [string]$receipts.caveat
         hardware_error = $hardwareError
     }
 }

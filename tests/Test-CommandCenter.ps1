@@ -1060,6 +1060,42 @@ try {
         Set-Item -Path Function:\Get-TuneModelCandidates -Value $originalTuneModels
     }
 
+    # Receipts: "tested on this PC" comes only from completed, non-smoke Tune results.
+    $receiptRoot = Join-Path ([IO.Path]::GetTempPath()) ('receipt-test-' + [guid]::NewGuid().ToString('N'))
+    $previousReceiptRoot = $InstallRoot
+    try {
+        $InstallRoot = $receiptRoot
+        $emptyReceipts = Get-ModelReceipts
+        Assert-True (($emptyReceipts.models.Count -eq 0) -and ($emptyReceipts.caveat -eq '')) 'with no benchmarks folder there are no receipts'
+        $fullDir = Join-Path $receiptRoot 'benchmarks\tune-20261105-000002'
+        $smokeDir = Join-Path $receiptRoot 'benchmarks\tune-20261105-000003'
+        $brokenDir = Join-Path $receiptRoot 'benchmarks\tune-20261105-000004'
+        New-Item -ItemType Directory -Path $fullDir, $smokeDir, $brokenDir -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $brokenDir 'results.json'), '{ not json', (New-Object System.Text.UTF8Encoding($false)))
+        $fullResults = @{
+            smoke = $false; generated_at = '2026-11-04T23:39:16Z'; comparison_caveat = 'Different llama.cpp builds.'
+            stage1 = @(
+                @{ status = 'ok'; model_id = 'qwen3-4b'; backend = 'Vulkan'; runtime_tag = 'b12110'; device_verified = $true; rows = @(
+                    @{ kind = 'prompt'; n = 2048; mean = 5540.29; noisy = $false; unreliable = $false; n_gpu_layers = 99 },
+                    @{ kind = 'decode'; n = 128; mean = 180.13; noisy = $false; unreliable = $false; n_gpu_layers = 99 } ) },
+                @{ status = 'skipped_fit'; model_id = 'qwen3.8-27b'; backend = 'Vulkan'; runtime_tag = 'b12110'; device_verified = $false; rows = @() },
+                @{ status = 'ok'; model_id = 'qwen3-4b'; backend = 'ROCm'; runtime_tag = 'rocm-7.2.1-b8407'; device_verified = $false; rows = @( @{ kind = 'decode'; n = 128; mean = 131.0 } ) }
+            )
+        }
+        [IO.File]::WriteAllText((Join-Path $fullDir 'results.json'), ($fullResults | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+        $smokeResults = @{ smoke = $true; stage1 = @( @{ status = 'ok'; model_id = 'qwen3-4b'; backend = 'Vulkan'; runtime_tag = 'b99999'; device_verified = $true; rows = @( @{ kind = 'decode'; n = 64; mean = 1.0 } ) } ) }
+        [IO.File]::WriteAllText((Join-Path $smokeDir 'results.json'), ($smokeResults | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+        $receipts = Get-ModelReceipts
+        $fourB = @($receipts.models['qwen3-4b'].Values)
+        Assert-True (($fourB.Count -eq 1) -and ($fourB[0].backend -eq 'Vulkan') -and ($fourB[0].runtime_tag -eq 'b12110')) 'only a verified, completed, non-smoke result becomes a receipt'
+        Assert-True (($fourB[0].decode.tokens_per_second -eq 180.1) -and (@($fourB[0].prompt)[0].tokens -eq 2048) -and ($fourB[0].gpu_layers -eq 99)) 'receipt numbers are the measured ones, rounded to one decimal'
+        Assert-True (-not $receipts.models.ContainsKey('qwen3.8-27b')) 'a model that was skipped has no receipt'
+        Assert-True ($receipts.caveat -eq 'Different llama.cpp builds.') 'the comparison caveat travels with the receipts'
+    } finally {
+        $InstallRoot = $previousReceiptRoot
+        Remove-Item -LiteralPath $receiptRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     $cancelJob = 'tune-20261104-000001'
     $cancelDir = Join-Path $tuneRoot "benchmarks\$cancelJob"
     New-Item -ItemType Directory -Path $cancelDir -Force | Out-Null
