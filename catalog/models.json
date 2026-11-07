@@ -93,6 +93,7 @@
       "Repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
       "File": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
       "Projector": "mmproj-F16.gguf",
+      "LocalProjector": "mmproj-Qwen3.6-35B-A3B-F16.gguf",
       "ApproxGiB": 21.45,
       "Rank": 91,
       "Tag": "MOE / EXPERIMENTAL",

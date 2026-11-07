@@ -665,6 +665,8 @@ try {
     Assert-True (($modelsDoc.schema_version -eq 1) -and (@($modelsDoc.models).Count -eq 11)) 'models.json declares schema_version 1 and the eleven catalog models'
     Assert-True (@($modelsDoc.models | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Id) -or [string]::IsNullOrWhiteSpace([string]$_.File) -or ($_.PSObject.Properties.Name -notcontains 'Rank') }).Count -eq 0) 'every model entry has an id, a file and a rank'
     Assert-True ((@(Get-ModelCatalog).Count -eq 11) -and ((Get-ModelCatalog)[0].Id -eq 'qwen3.8-27b')) 'Get-ModelCatalog reads the file, not an embedded copy'
+    $localProjectors = @(Get-ModelCatalog | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Projector) } | ForEach-Object { Get-ProjectorLocalName -Model $_ })
+    Assert-True ($localProjectors.Count -eq @($localProjectors | Select-Object -Unique).Count) 'no two catalogue models share a local projector file name (a shared name would overwrite the other model projector)'
     $runtimeDoc = Get-CatalogJson -Name 'runtimes.json'
     Assert-True (($runtimeDoc.schema_version -eq 1) -and ([long]$runtimeDoc.amd_rocm_package.size -eq 565651083L) -and ([string]$runtimeDoc.amd_rocm_package.checked_on -eq '2026-10-08')) 'runtimes.json pins the AMD package facts verified in the evidence record'
     Assert-True (([string]$script:AmdRocmPage -eq [string]$runtimeDoc.amd_rocm_package.page) -and ([int]$script:AmdRocmPackageFreshnessDays -eq [int]$runtimeDoc.amd_rocm_package.freshness_days)) 'the script variables match the runtime catalogue'
