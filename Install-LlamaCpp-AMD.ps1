@@ -989,7 +989,7 @@ function Get-TierReason {
         # Residency is decided by graphics memory alone, so the claim and the number must both be VRAM.
         if ($null -ne $Assessment -and $Assessment.GpuResident) {
             if ($Assessment.PSObject.Properties.Name -contains 'VramHeadroomGiB') {
-                return "Stays entirely in VRAM, with $($Assessment.VramHeadroomGiB) GiB of graphics memory to spare."
+                return "The model stays entirely in VRAM, leaving about $($Assessment.VramHeadroomGiB) GiB after its weights for context and other apps."
             }
             return 'Stays entirely in VRAM.'
         }
@@ -1353,16 +1353,19 @@ function Stop-Runtime {
     # Router mode can publish a child process while the first snapshot is being stopped.
     # Keep taking snapshots briefly and verify the result instead of reporting success from
     # a one-shot kill list.
-    $killed = 0
+    # Count each process once: a killed process can still be listed for a moment, and the
+    # retry loop would otherwise report "Stopped 6" for a router and one child.
+    $stoppedIds = New-Object 'System.Collections.Generic.HashSet[int]'
     $deadline = (Get-Date).AddSeconds(8)
     while ((Get-Date) -lt $deadline) {
         $remaining = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
         if ($remaining.Count -eq 0) { break }
         foreach ($serverProcess in $remaining) {
-            try { Stop-Process -Id $serverProcess.Id -Force -ErrorAction Stop; $killed++ } catch { }
+            try { Stop-Process -Id $serverProcess.Id -Force -ErrorAction Stop; [void]$stoppedIds.Add([int]$serverProcess.Id) } catch { }
         }
         Start-Sleep -Milliseconds 200
     }
+    $killed = $stoppedIds.Count
     $left = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
     if ($left.Count -eq 0) {
         return [pscustomobject]@{ schema_version = 1; adapter = 'llamacpp'; status = 'stopped'; detail = "Stopped $killed llama-server process(es)."; killed = $killed; remaining = 0 }
@@ -3982,6 +3985,21 @@ function Show-Diagnostics {
     } finally { Pop-Location }
 }
 
+function Select-PortListenerRow {
+    # Get-NetTCPConnection -LocalPort returns every socket on the port: the listener (remote
+    # port 0), live connections from clients, and TIME_WAIT/CLOSED leftovers whose owner is 0.
+    # Taking the first row picked a leftover about half the time, so our own healthy server
+    # looked like an unknown program holding its port (measured 2026-11-07, 3 of 3 Diagnose runs).
+    param($Rows)
+    $rows = @($Rows)
+    if ($rows.Count -eq 0) { return $null }
+    $listener = @($rows | Where-Object { [int]$_.RemotePort -eq 0 -and [int]$_.OwningProcess -gt 0 }) | Select-Object -First 1
+    if ($null -ne $listener) { return $listener }
+    $owned = @($rows | Where-Object { [int]$_.OwningProcess -gt 0 }) | Select-Object -First 1
+    if ($null -ne $owned) { return $owned }
+    return ($rows | Select-Object -First 1)
+}
+
 function Get-PortListener {
     # Who is listening on this port, if anyone. Strictly read-only: it looks at the
     # socket table and the owning process, and never sends a signal of any kind.
@@ -4011,7 +4029,7 @@ function Get-PortListener {
     }
     if (-not $listening) { return $null }
 
-    $connection = $rows | Select-Object -First 1
+    $connection = Select-PortListenerRow -Rows $rows
     $owner = 0
     if ($null -ne $connection) {
         $candidate = [int]$connection.OwningProcess
@@ -6446,6 +6464,7 @@ function Get-SettingsDocument {
     # estimated here beyond what Get-VramHeadroom already assumes in Recommend.
     $vramGiB = $null
     $activeGib = $null
+    $footprintGib = $null
     try {
         $hardware = Get-HardwareProfile
         if ($hardware.HasAmdGpu -and $hardware.MaxAmdVramGiB -ge 4) { $vramGiB = [double]$hardware.MaxAmdVramGiB }
@@ -6454,6 +6473,14 @@ function Get-SettingsDocument {
     if ($null -ne $activeModel) {
         $catalogModel = @(Get-ModelCatalog | Where-Object { $_.Id -ieq [string]$activeModel.id } | Select-Object -First 1)
         if ($null -ne $catalogModel) { $activeGib = [double]$catalogModel.ApproxGiB }
+        # What unloading actually frees: weights plus KV cache and compute buffers (an estimate),
+        # not the weights alone.
+        try {
+            if ($null -ne $catalogModel -and $null -ne $vramGiB) {
+                $estimate = Get-VramEstimate -Model $catalogModel -Hardware $hardware -Context ([int]$activeModel.context_size) -UsedGiB 0
+                $footprintGib = [Math]::Round([double]$estimate.needed_gib - [double]$estimate.headroom_gib, 1)
+            }
+        } catch { $footprintGib = $null }
     }
     return [pscustomobject]@{
         schema_version = 1
@@ -6462,6 +6489,7 @@ function Get-SettingsDocument {
         install_root = [string]$InstallRoot
         gpu_vram_gib = $vramGiB
         active_model_gib = $activeGib
+        active_model_footprint_gib = $footprintGib
         idle_unload = [pscustomobject]@{
             minutes = $idleSaved
             capable = $idleCapable

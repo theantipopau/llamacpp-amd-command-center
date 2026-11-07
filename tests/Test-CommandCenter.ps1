@@ -728,7 +728,7 @@ try {
     }
     # Fit wording: a resident pick states VRAM headroom only; a spilling or Radeon-less pick never claims VRAM residency.
     $residentReason = [string]$tiers16.balanced.reason
-    Assert-True (($residentReason -match 'Stays entirely in VRAM, with [0-9.]+ GiB of graphics memory to spare') -and ($residentReason -notmatch 'memory budget headroom')) 'a resident tier states VRAM headroom, never the RAM-inclusive budget'
+    Assert-True (($residentReason -match 'stays entirely in VRAM, leaving about [0-9.]+ GiB after its weights') -and ($residentReason -notmatch 'memory budget headroom')) 'a resident tier states VRAM headroom, never the RAM-inclusive budget'
     Assert-True ([string]$tiers16.maximum.reason -notmatch 'Stays entirely in VRAM') 'a spilling tier never claims VRAM residency'
     $noAmdHw = [pscustomobject]@{ HasAmdGpu = $false; HasDiscreteAmdGpu = $false; HasAmdIntegratedGpu = $false; RocmRecommended = $false; RocmReason = 'test'; MaxAmdVramGiB = 0.0; RamGiB = 32.0; ModelBudgetGiB = 25.0; Gpus = @() }
     $noAmdTiers = Get-WorkloadRecommendations -Hardware $noAmdHw -Runtime $null -DetectionConfidence 'medium'
@@ -1628,6 +1628,16 @@ try {
                 Start-Sleep -Milliseconds 200
             }
             Assert-True (($null -ne $seen) -and ($seen.process_id -eq $child.Id)) "a listener in a separate process is seen with its real owner PID (got $(if ($null -ne $seen) { $seen.process_id } else { 'none' }), expected $($child.Id))"
+            $mixedRows = @(
+                [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 8080; RemotePort = 64488; State = 'TimeWait'; OwningProcess = 0 }
+                [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 8080; RemotePort = 49781; State = 'Established'; OwningProcess = 7068 }
+                [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 8080; RemotePort = 0; State = ''; OwningProcess = 7068 }
+            )
+            $picked = Select-PortListenerRow -Rows $mixedRows
+            Assert-True (($picked.RemotePort -eq 0) -and ($picked.OwningProcess -eq 7068)) 'the listener row wins over closed-connection leftovers with owner 0'
+            $leftoversOnly = @([pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 8080; RemotePort = 64488; State = 'TimeWait'; OwningProcess = 0 })
+            Assert-True ((Select-PortListenerRow -Rows $leftoversOnly).OwningProcess -eq 0) 'leftover rows alone still yield an unknown owner, not a crash'
+            Assert-True ($null -eq (Select-PortListenerRow -Rows @())) 'no rows means no listener row'
             $childConflict = Resolve-PortConflict -Port $childPort
             Assert-True (($childConflict.status -eq 'conflict') -and ($childConflict.process_id -eq $child.Id)) 'the separate listener is a conflict, not a free port'
         } finally {
