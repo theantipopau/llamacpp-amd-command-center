@@ -570,7 +570,8 @@ export function describeReceipt(receipt: LibraryReceipt): string {
   const date = /^\d{4}-\d{2}-\d{2}/.exec(receipt.measured_at)?.[0];
   const when = date ? `, measured ${date}` : "";
   const flag = receipt.unreliable ? " Marked unreliable." : "";
-  return `${receipt.backend} ${receipt.runtime_tag}: ${parts.join("; ")}${when}.${flag}`;
+  const experts = typeof receipt.cpu_moe_layers === "number" ? ` (expert layers on CPU: ${receipt.cpu_moe_layers})` : "";
+  return `${receipt.backend} ${receipt.runtime_tag}${experts}: ${parts.join("; ")}${when}.${flag}`;
 }
 
 /** "Tested on this PC" lines for one model; an honest empty list when nothing was measured. */

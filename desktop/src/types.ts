@@ -277,6 +277,8 @@ export interface LibraryReceipt {
   job_id: string;
   measured_at: string;
   gpu_layers: number | null;
+  /** MoE sweeps only: how many expert layers stayed on the CPU at the fastest point. */
+  cpu_moe_layers?: number | null;
   prompt: ReceiptSpeed[];
   decode: ReceiptSpeed | null;
   unreliable: boolean;

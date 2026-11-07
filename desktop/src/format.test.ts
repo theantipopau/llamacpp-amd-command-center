@@ -521,6 +521,11 @@ describe("per-model backend and receipts", () => {
     expect(describeReceipt({ ...receipt, unreliable: true })).toContain("Marked unreliable.");
   });
 
+  it("names the expert layers kept on the CPU for a MoE receipt", () => {
+    expect(describeReceipt({ ...receipt, gpu_layers: null, cpu_moe_layers: 18 })).toContain("Vulkan b12110 (expert layers on CPU: 18):");
+    expect(describeReceipt(receipt)).not.toContain("expert layers");
+  });
+
   it("lists nothing when a model has no receipts", () => {
     expect(describeReceipts(base)).toEqual([]);
     expect(describeReceipts({ ...base, receipts: [] })).toEqual([]);

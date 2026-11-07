@@ -982,6 +982,13 @@ try {
         $script:tuneAlwaysNoisyJson = $tuneJson.Replace('"devices":"Vulkan1"', '"devices":"Vulkan0"')
         $deviceMismatch = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-device-mismatch' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048, 8192) -Gen 128 -Reps 3
         Assert-True (($deviceMismatch.status -eq 'device_mismatch') -and (-not $deviceMismatch.device_verified) -and (@($deviceMismatch.observed_devices) -contains 'Vulkan0')) 'a benchmark JSON naming a different device is rejected even when the argument was correct'
+        $script:tuneBenchCalls = 5
+        $script:tuneAlwaysNoisy = $false
+        $script:tuneCleanJson = $tuneJson
+        $script:tuneAlwaysNoisyJson = $tuneJson
+        $withMoe = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-moe' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048) -Gen 128 -Reps 3 -CpuMoe 18
+        $withoutMoe = Invoke-TuneBench -JobId $tuneJob -Stage 'unit-nomoe' -Model $tuneModel -Runtime $tuneRuntime -Prompts @(2048) -Gen 128 -Reps 3
+        Assert-True (($withMoe.status -eq 'ok') -and ([string]$withMoe.command -match ' -ncmoe 18( |$)') -and ([string]$withoutMoe.command -notmatch '-ncmoe')) 'the expert-offload flag is passed only when a sweep point asks for it'
     } finally {
         Set-Item -Path Function:\Invoke-TuneBenchProcess -Value $originalBenchProcess
     }
@@ -1021,6 +1028,18 @@ try {
     Assert-True ((@($checkpointRead.stage1).Count -eq 1) -and (@($checkpointRead.stage2).Count -eq 1) -and ((Get-TuneCompletedCount -Checkpoint $checkpointRead) -eq 3)) 'Tune writes and reads per-row checkpoints for resuming'
     $skipCheckpoint = [pscustomobject]@{ stage1 = @([pscustomobject]@{ status = 'skipped_fit' }); stage2 = @(); reference_before = $null; reference_before_stage2 = $null }
     Assert-True ((Get-TuneCompletedCount -Checkpoint $skipCheckpoint) -eq 0) 'a skipped did-not-fit row is not counted as a completed benchmark'
+
+    Write-Host 'Tune: MoE expert-offload sweep'
+    Assert-True ((@(Get-TuneMoeSweepPoints -BlockCount 40) -join ',') -eq '40,32,26,22,18,14,10') 'the sweep walks expert layers from all on CPU down to a quarter, from the model layer count'
+    Assert-True (@(Get-TuneMoeSweepPoints -BlockCount 0).Count -eq 0) 'a model with an unknown layer count gets no sweep'
+    Assert-True ((@(Get-TuneMoeSweepPoints -BlockCount 4) -join ',') -eq '4,3,2,1') 'tiny layer counts collapse duplicate sweep points'
+    function New-MoeEntry { param([int] $At, [double] $Tg, [string] $Status = 'ok', [bool] $Unreliable = $false)
+        [pscustomobject]@{ model_id = 'moe-test'; cpu_moe = $At; status = $Status; unreliable = $Unreliable; device_verified = $true; rows = @([pscustomobject]@{ kind = 'prompt'; n = 2048; mean = 400.0; noisy = $false }, [pscustomobject]@{ kind = 'decode'; n = 128; mean = $Tg; noisy = $false }) } }
+    $moeBest = Get-TuneMoeBest -Entries @((New-MoeEntry -At 40 -Tg 35), (New-MoeEntry -At 18 -Tg 59), (New-MoeEntry -At 10 -Tg 70 -Unreliable $true), (New-MoeEntry -At 14 -Tg 80 -Status 'failed'))
+    Assert-True ([int]$moeBest.cpu_moe -eq 18) 'the best sweep point is the fastest generation among clean, completed runs'
+    Assert-True ($null -eq (Get-TuneMoeBest -Entries @((New-MoeEntry -At 40 -Tg 35 -Status 'failed')))) 'with no clean point there is no best value'
+    $moeCheckpoint = [pscustomobject]@{ stage1 = @(); stage2 = @(); reference_before = $null; reference_before_stage2 = $null; moe = @((New-MoeEntry -At 40 -Tg 35), (New-MoeEntry -At 18 -Tg 59)) }
+    Assert-True ((Get-TuneCompletedCount -Checkpoint $moeCheckpoint) -eq 2) 'sweep points count toward Tune progress'
 
     Set-AppSetting -Name 'tune_presets' -Value ([pscustomobject]@{ 'qwen3-4b' = [pscustomobject]@{ 'Fast' = [pscustomobject]@{ batch_size = 512; ubatch_size = 128; context_size = 16384; selected = $false; receipt = [pscustomobject]@{ job_id = $tuneJob; model_id = 'qwen3-4b' } } } })
     $tuneActive = [pscustomobject]@{ id = 'qwen3-4b'; model_path = (Join-Path $tuneRoot 'models\dummy.gguf'); mmproj_path = ''; alias = 'qwen3:4b'; reasoning = $false; tool_calling = $false; thinking = $false }
@@ -1093,6 +1112,17 @@ try {
         Assert-True (($fourB[0].decode.tokens_per_second -eq 180.1) -and (@($fourB[0].prompt)[0].tokens -eq 2048) -and ($fourB[0].gpu_layers -eq 99)) 'receipt numbers are the measured ones, rounded to one decimal'
         Assert-True (-not $receipts.models.ContainsKey('qwen3.8-27b')) 'a model that was skipped has no receipt'
         Assert-True ($receipts.caveat -eq 'Different llama.cpp builds.') 'the comparison caveat travels with the receipts'
+        $moeDir = Join-Path $receiptRoot 'benchmarks\tune-20261105-000005'
+        New-Item -ItemType Directory -Path $moeDir -Force | Out-Null
+        $moeResults = @{
+            smoke = $false; generated_at = '2026-11-08T10:00:00Z'; stage1 = @()
+            moe_sweep = @( @{ model_id = 'moe-test'; backend = 'Vulkan'; runtime_tag = 'b12110'; best_cpu_moe = 18; points = @(
+                @{ cpu_moe = 40; status = 'ok'; device_verified = $true; rows = @( @{ kind = 'decode'; n = 128; mean = 35.0 } ) },
+                @{ cpu_moe = 18; status = 'ok'; device_verified = $true; rows = @( @{ kind = 'prompt'; n = 2048; mean = 645.2 }, @{ kind = 'decode'; n = 128; mean = 65.24 } ) } ) } )
+        }
+        [IO.File]::WriteAllText((Join-Path $moeDir 'results.json'), ($moeResults | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+        $moeReceipt = @((Get-ModelReceipts).models['moe-test'].Values)
+        Assert-True (($moeReceipt.Count -eq 1) -and ($moeReceipt[0].cpu_moe_layers -eq 18) -and ($moeReceipt[0].decode.tokens_per_second -eq 65.2) -and ($moeReceipt[0].prompt[0].tokens_per_second -eq 645.2)) 'a MoE sweep becomes a receipt at its fastest point, naming the expert layers kept on the CPU'
     } finally {
         $InstallRoot = $previousReceiptRoot
         Remove-Item -LiteralPath $receiptRoot -Recurse -Force -ErrorAction SilentlyContinue

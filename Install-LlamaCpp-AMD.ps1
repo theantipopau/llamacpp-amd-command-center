@@ -6682,6 +6682,33 @@ function Get-ModelReceipts {
                 unreliable = $unreliable
             }
         }
+        # A MoE sweep contributes its fastest-generation point as that model's receipt, with
+        # how many expert layers stayed on the CPU. Same rules: verified device, never invented.
+        foreach ($sweep in @(Get-TuneValue -Object $results -Name 'moe_sweep' -Default @())) {
+            $bestAt = [int](Get-TuneValue -Object $sweep -Name 'best_cpu_moe' -Default -1)
+            $best = @($sweep.points | Where-Object { [int]$_.cpu_moe -eq $bestAt -and [string]$_.status -eq 'ok' -and [bool]$_.device_verified } | Select-Object -First 1)
+            if ($best.Count -eq 0) { continue }
+            $prompt = @(); $decode = $null; $unreliable = $false
+            foreach ($row in @($best[0].rows)) {
+                if (($row.PSObject.Properties.Name -contains 'unreliable') -and [bool]$row.unreliable) { $unreliable = $true }
+                $item = [pscustomobject]@{ tokens = [int]$row.n; tokens_per_second = [Math]::Round([double]$row.mean, 1); noisy = (($row.PSObject.Properties.Name -contains 'noisy') -and [bool]$row.noisy) }
+                if ([string]$row.kind -eq 'prompt') { $prompt += $item } elseif ([string]$row.kind -eq 'decode') { $decode = $item }
+            }
+            if ($prompt.Count -eq 0 -and $null -eq $decode) { continue }
+            $modelId = [string]$sweep.model_id
+            if (-not $byModel.ContainsKey($modelId)) { $byModel[$modelId] = @{} }
+            $byModel[$modelId][[string]$sweep.backend] = [pscustomobject]@{
+                backend = [string]$sweep.backend
+                runtime_tag = [string]$sweep.runtime_tag
+                job_id = [string]$job.Name
+                measured_at = if ($results.PSObject.Properties.Name -contains 'generated_at') { [string]$results.generated_at } else { '' }
+                gpu_layers = $null
+                cpu_moe_layers = $bestAt
+                prompt = @($prompt)
+                decode = $decode
+                unreliable = $unreliable
+            }
+        }
     }
     return [pscustomobject]@{ models = $byModel; caveat = $caveat }
 }
@@ -6868,7 +6895,7 @@ function Get-TuneCompletedCount {
     if ($null -eq $Checkpoint) { return 0 }
     # A skipped_fit row is a recorded decision, not a completed benchmark; counting it
     # made a 24-run plan report 26/24 when the 27B rows were skipped.
-    $count = @($Checkpoint.stage1 | Where-Object { [string]$_.status -ne 'skipped_fit' }).Count + @($Checkpoint.stage2).Count
+    $count = @($Checkpoint.stage1 | Where-Object { [string]$_.status -ne 'skipped_fit' }).Count + @($Checkpoint.stage2).Count + @(Get-TuneValue -Object $Checkpoint -Name 'moe' -Default @()).Count
     if ($null -ne $Checkpoint.reference_before) { $count++ }
     if ($null -ne $Checkpoint.reference_before_stage2) { $count++ }
     return [int]$count
@@ -6964,7 +6991,56 @@ function Get-TuneBenchSupport {
     foreach ($flag in @('-dev', '-ngl', '-fa', '-ctk', '-ctv', '-b', '-ub', '-p', '-n', '-r', '-o')) {
         if (-not $text.Contains($flag)) { $missing += $flag }
     }
-    return [pscustomobject]@{ available = ($text.Length -gt 0 -and $missing.Count -eq 0); missing = @($missing); text = $text }
+    # -ncmoe is optional: only the MoE sweep needs it, so an older build without it must not block Tune.
+    return [pscustomobject]@{ available = ($text.Length -gt 0 -and $missing.Count -eq 0); missing = @($missing); text = $text; moe_offload = $text.Contains('-ncmoe') }
+}
+
+function Get-TuneMoeSweepPoints {
+    # Expert layers kept on the CPU, as fractions of the model's layer count (all, then fewer
+    # and fewer). Measured on this PC: generation peaks part-way down and falls off a cliff
+    # once the card pages, so the sweep has to look at several points, not guess one.
+    param([int] $BlockCount)
+    if ($BlockCount -le 0) { return @() }
+    $points = @(foreach ($fraction in @(1.0, 0.8, 0.65, 0.55, 0.45, 0.35, 0.25)) { [int][Math]::Round($BlockCount * $fraction) })
+    return @($points | Select-Object -Unique)
+}
+
+function Get-TuneMoeCandidates {
+    # Installed catalogue models flagged Moe that this PC can sweep: a Vulkan llama-bench
+    # that knows -ncmoe, a runtime that can load the model, and a weight file that fits in
+    # VRAM plus system RAM. These models never go through Stage 1/2 (their weights exceed
+    # VRAM, so that fit check would only skip them).
+    param($Hardware, $Runtimes)
+    $runtime = $null
+    foreach ($candidate in @($Runtimes | Where-Object { [string]$_.backend -eq 'Vulkan' -and [bool]$_.bench_present })) {
+        if ((Get-TuneBenchSupport -ExePath ([string]$candidate.bench_exe)).moe_offload) { $runtime = $candidate; break }
+    }
+    if ($null -eq $runtime) { return @() }
+    $result = @()
+    foreach ($model in @(Get-InstalledModels | Where-Object { ($_.PSObject.Properties.Name -contains 'Moe') -and [bool]$_.Moe })) {
+        if (Get-ModelRuntimeBlocker -Model $model -Runtime $runtime) { continue }
+        try {
+            $path = Join-Path (Join-Path $InstallRoot 'models') ([string]$model.File)
+            $meta = Read-GgufMetadata -Path $path
+            $arch = if ($meta.ContainsKey('general.architecture')) { [string]$meta['general.architecture'] } else { '' }
+            $blocks = [int](Get-GgufNumber -Metadata $meta -Key "$arch.block_count" -Default 0)
+            $weights = [double](Get-Item -LiteralPath $path).Length / 1GB
+            if ($weights -gt ([double]$Hardware.MaxAmdVramGiB + [double]$Hardware.RamGiB * 0.6)) { continue }
+            $points = @(Get-TuneMoeSweepPoints -BlockCount $blocks)
+            if ($points.Count -eq 0) { continue }
+            $result += [pscustomobject]@{ id = [string]$model.Id; name = [string]$model.Name; file = [string]$model.File; installed = $true; block_count = $blocks; points = $points; runtime_tag = [string]$runtime.tag; runtime = $runtime }
+        } catch { }
+    }
+    return @($result)
+}
+
+function Get-TuneMoeBest {
+    # Fastest generation among sweep points that ran cleanly; $null when none did. Prompt
+    # speed is reported next to it, never traded away silently.
+    param($Entries)
+    $good = @($Entries | Where-Object { [string]$_.status -eq 'ok' -and -not [bool]$_.unreliable -and $null -ne (Get-TuneRowMetric -Rows @($_.rows) -Kind 'decode') })
+    if ($good.Count -eq 0) { return $null }
+    return @($good | Sort-Object -Property @{ Expression = { [double](Get-TuneRowMetric -Rows @($_.rows) -Kind 'decode').mean } } -Descending)[0]
 }
 
 function Get-TuneFit {
@@ -7036,7 +7112,8 @@ function Get-TunePreconditions {
         } else { $game.state = 'unknown' }
     }
     $models = @(Get-TuneModelCandidates -Hardware $hardware)
-    return [pscustomobject]@{ hardware = $hardware; server = $server; gpu = $gpu; game = $game; runtimes = @($runtimes); models = @($models); blockers = @($blockers) }
+    $moe = @(Get-TuneMoeCandidates -Hardware $hardware -Runtimes @($runtimes))
+    return [pscustomobject]@{ hardware = $hardware; server = $server; gpu = $gpu; game = $game; runtimes = @($runtimes); models = @($models); moe_models = @($moe); blockers = @($blockers) }
 }
 
 function Get-TuneBatchCombinations {
@@ -7095,7 +7172,8 @@ function Get-TunePlanDocument {
         models = @($pre.models)
         stage1 = @($stage1)
         stage2 = @($stage2)
-        planned_runs = (@($stage1 | Where-Object { $_.status -eq 'planned' }).Count + @($stage2).Count + 2)
+        moe_models = @($pre.moe_models)
+        planned_runs = (@($stage1 | Where-Object { $_.status -eq 'planned' }).Count + @($stage2).Count + 2 + [int](@($pre.moe_models | ForEach-Object { @($_.points).Count } | Measure-Object -Sum).Sum))
         reference = [pscustomobject]@{ model_id = 'qwen3-4b'; prompts = @(2048); gen = 128; repetitions = 3 }
         note = 'A preset is opt-in data. Selecting none leaves the generated command line unchanged.'
     }
@@ -7217,6 +7295,7 @@ function Start-TuneJob {
             $plan.models = @($smokeModel[0])
             $plan.stage1 = @([pscustomobject]@{ model_id = 'qwen3-4b'; model = $smokeModel[0].name; runtime = $smokeRuntime[0].label; runtime_tag = $smokeRuntime[0].tag; backend = $smokeRuntime[0].backend; device = $smokeRuntime[0].device; device_arg = [string]$smokeRuntime[0].device_arg; status = 'planned'; reason = ''; fit = $smokeModel[0].fit })
             $plan.stage2 = @()
+            $plan.moe_models = @()
             $plan.planned_runs = 1
             $plan | Add-Member -NotePropertyName smoke -NotePropertyValue $true -Force
             $plan.reference = [pscustomobject]@{ model_id = 'qwen3-4b'; prompts = @(512); gen = 64; repetitions = 1 }
@@ -7330,15 +7409,16 @@ function Invoke-TuneBenchProcess {
 }
 
 function Invoke-TuneBench {
-    param([string] $JobId, [string] $Stage, $Model, $Runtime, [int[]] $Prompts, [int] $Gen, [int] $Reps, [int] $Batch = 0, [int] $Ubatch = 0)
+    param([string] $JobId, [string] $Stage, $Model, $Runtime, [int[]] $Prompts, [int] $Gen, [int] $Reps, [int] $Batch = 0, [int] $Ubatch = 0, [int] $CpuMoe = -1)
     $modelPath = Join-Path (Join-Path $InstallRoot 'models') ([string]$Model.file)
     if (-not (Test-Path -LiteralPath $modelPath -PathType Leaf)) { return [pscustomobject]@{ status = 'model_missing'; model_id = [string]$Model.id; runtime_tag = [string]$Runtime.tag; backend = [string]$Runtime.backend; device = [string]$Runtime.device; device_verified = $false; observed_devices = @(); rows = @(); error = "Model file is missing: $modelPath" } }
     $benchArgs = @('-m', $modelPath, '-dev', [string]$Runtime.device, '-ngl', '99', '-fa', [string]$Runtime.flash_arg, '-ctk', 'q8_0', '-ctv', 'q8_0', '-p', (@($Prompts) -join ','), '-n', [string]$Gen, '-r', [string]$Reps, '-o', 'json')
     if ($Batch -gt 0) { $benchArgs += @('-b', [string]$Batch) }
     if ($Ubatch -gt 0) { $benchArgs += @('-ub', [string]$Ubatch) }
+    if ($CpuMoe -ge 0) { $benchArgs += @('-ncmoe', [string]$CpuMoe) }
     $argString = (@($benchArgs | ForEach-Object { Quote-TuneArg -Value ([string]$_) }) -join ' ')
     $command = $Runtime.bench_exe + ' ' + $argString
-    $safe = ("$Stage-$($Model.id)-$($Runtime.backend)-$Batch-$Ubatch" -replace '[^A-Za-z0-9._-]', '_')
+    $safe = ("$Stage-$($Model.id)-$($Runtime.backend)-$Batch-$Ubatch-$CpuMoe" -replace '[^A-Za-z0-9._-]', '_')
     $attempts = @()
     $rows = @()
     for ($attempt = 1; $attempt -le 2; $attempt++) {
@@ -7552,6 +7632,21 @@ function Write-TuneSummary {
         $lines.Add("| $($row.model_id) | $($row.runtime_tag) | $batch | $ubatch | $(if ($null -ne $p1) { $p1.mean } else { '-' }) | $(if ($null -ne $p2) { $p2.mean } else { '-' }) | $(if ($null -ne $tg) { $tg.mean } else { '-' }) | $($row.status) |")
     }
     $lines.Add('')
+    if (@(Get-TuneValue -Object $Results -Name 'moe_sweep' -Default @()).Count -gt 0) {
+        $lines.Add('## MoE expert offload (Vulkan)')
+        $lines.Add((Get-TuneValue -Object $Results -Name 'moe_note' -Default ''))
+        $lines.Add('| Model | Expert layers on CPU | Prompt 2048 tok/s | Decode 128 tok/s | Status |')
+        $lines.Add('|---|---:|---:|---:|---|')
+        foreach ($sweep in @($Results.moe_sweep)) {
+            foreach ($point in @($sweep.points)) {
+                $p1 = Get-TuneRowMetric -Rows @($point.rows) -Kind 'prompt' -N 2048
+                $tg = Get-TuneRowMetric -Rows @($point.rows) -Kind 'decode' -N 128
+                $mark = if ($null -ne $sweep.best_cpu_moe -and [int]$point.cpu_moe -eq [int]$sweep.best_cpu_moe) { ' (fastest generation)' } else { '' }
+                $lines.Add("| $($sweep.model_id) | $($point.cpu_moe) | $(if ($null -ne $p1) { $p1.mean } else { '-' }) | $(if ($null -ne $tg) { $tg.mean } else { '-' }) | $($point.status)$mark |")
+            }
+        }
+        $lines.Add('')
+    }
     $lines.Add('## Presets')
     $presetModelIds = @($Results.presets.PSObject.Properties | ForEach-Object { [string]$_.Name })
     if ($presetModelIds.Count -eq 0) { $lines.Add('- No preset was recommended by this run.') }
@@ -7685,6 +7780,29 @@ function Invoke-TuneWorker {
             $presets = New-TunePresetSet -Model $model -Stage2 $stage2 -Hardware (Get-HardwareProfile) -JobId $JobId
             if ($null -ne $presets) { $presetMap[[string]$model.id] = $presets; Save-TunePresets -ModelId ([string]$model.id) -Presets $presets }
         }
+        # MoE sweep: one Vulkan llama-bench per -ncmoe point, same prompt/decode sizes as the
+        # reference. Resumes per point; a point that already ran ok is not repeated.
+        $moeEntries = @(Get-TuneValue -Object $checkpoint -Name 'moe' -Default @())
+        foreach ($moeModel in @(Get-TuneValue -Object $plan -Name 'moe_models' -Default @())) {
+            $moeRuntime = $moeModel.runtime
+            foreach ($point in @($moeModel.points)) {
+                if (& $cancel) { Write-TuneProgress -JobId $JobId -Fields @{ state = 'cancelled'; stage = 'cancelled'; current_bench_pid = 0 }; return 0 }
+                $existing = @($moeEntries | Where-Object { [string]$_.model_id -eq [string]$moeModel.id -and [int]$_.cpu_moe -eq [int]$point } | Select-Object -First 1)
+                if ($existing.Count -gt 0 -and [string]$existing[0].status -eq 'ok') { continue }
+                $moeEntries = @($moeEntries | Where-Object { -not ([string]$_.model_id -eq [string]$moeModel.id -and [int]$_.cpu_moe -eq [int]$point) })
+                $row = Invoke-TuneBench -JobId $JobId -Stage 'moe' -Model $moeModel -Runtime $moeRuntime -Prompts @(2048) -Gen 128 -Reps 3 -CpuMoe ([int]$point)
+                $row | Add-Member -NotePropertyName cpu_moe -NotePropertyValue ([int]$point) -Force
+                $moeEntries += $row
+                $checkpoint | Add-Member -NotePropertyName moe -NotePropertyValue @($moeEntries) -Force
+                Write-TuneCheckpoint -JobId $JobId -Checkpoint $checkpoint
+                Write-TuneProgress -JobId $JobId -Fields @{ stage = 'moe'; completed_runs = (Get-TuneCompletedCount -Checkpoint $checkpoint); total_runs = $total; current_model = [string]$moeModel.id; current_runtime = [string]$moeRuntime.label; current_bench_pid = 0; last_result = [string]$row.status }
+            }
+        }
+        $moeSweep = @(foreach ($moeModel in @(Get-TuneValue -Object $plan -Name 'moe_models' -Default @())) {
+            $mine = @($moeEntries | Where-Object { [string]$_.model_id -eq [string]$moeModel.id })
+            $best = Get-TuneMoeBest -Entries $mine
+            [pscustomobject]@{ model_id = [string]$moeModel.id; runtime_tag = [string]$moeModel.runtime_tag; backend = 'Vulkan'; block_count = [int]$moeModel.block_count; points = @($mine); best_cpu_moe = $(if ($null -ne $best) { [int]$best.cpu_moe } else { $null }) }
+        })
         $hardware = Get-HardwareProfile
         $results = [ordered]@{
             schema_version = 1; kind = 'llama-bench-tune'; job_id = $JobId; generated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -7700,6 +7818,8 @@ function Invoke-TuneWorker {
             stage2 = @($stage2)
             stage2_order = @($stage2 | ForEach-Object { "$($_.model_id)/$($_.runtime_tag)/$($_.batch_size)/$($_.ubatch_size)" })
             presets = [pscustomobject]$presetMap
+            moe_sweep = @($moeSweep)
+            moe_note = 'Sweep ran at one slot and an 8k-token benchmark context, with the desktop in normal use. The server runs more context, which leaves less VRAM, so its best value is probably a little higher.'
             wall_time_seconds = [Math]::Round(((Get-Date) - $started).TotalSeconds, 1)
         }
         Write-TuneJson -Path (Join-Path $dir 'results.json') -Document ([pscustomobject]$results)
