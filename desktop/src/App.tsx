@@ -9,6 +9,7 @@ import {
   describeLibraryBadges,
   describeLibraryFit,
   describeGamePause,
+  describeHomeVerdict,
   describeModelState,
   describeStatusBadge,
   isGamePauseValid,
@@ -24,6 +25,7 @@ import {
   describeSupport,
   describeTier,
   describeUseCase,
+  describeVram,
   formatStartProgress,
   isMinutesValid,
   nextTabIndex,
@@ -63,6 +65,21 @@ const TABS: Array<[Tab, string]> = [
   ["settings", "Settings"],
   ["health", "Health"]
 ];
+
+type Theme = "system" | "light" | "dark";
+const THEME_KEY = "llamacpp-command-center-theme";
+
+function readTheme(): Theme {
+  try {
+    const saved = window.localStorage.getItem(THEME_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system") {
+      return saved;
+    }
+  } catch {
+    // A locked-down webview can deny storage; the system preference still works.
+  }
+  return "system";
+}
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -140,6 +157,7 @@ export default function App() {
   const [progress, setProgress] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("home");
+  const [theme, setTheme] = useState<Theme>(readTheme);
   const busyRef = useRef<Busy>(null);
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
@@ -172,6 +190,15 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // The visual choice still applies for this session.
+    }
+  }, [theme]);
 
   async function onStart() {
     if (busyRef.current !== null) {
@@ -578,9 +605,12 @@ export default function App() {
   // What 'Update llama.cpp' would unlock, straight from the library document's
   // catalogue-driven list; absent or empty means the line simply does not render.
   const unlockLine = describeUnlockableModels(library?.unlocked_models);
+  const homeVerdict = describeHomeVerdict(phase, state.model?.name, state.model?.model_present, state.server?.port);
+  const vram = state?.model ? describeVram(state.vram_estimate) : null;
 
   return (
-    <main className="window">
+    <main className="window" id="main-content">
+      <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="app-header">
         <img src={logo} alt="" className="logo" />
         <div className="titles">
@@ -590,6 +620,19 @@ export default function App() {
         <span className={`badge ${badge.tone}`} role="status" aria-live="polite">
           {badge.label}
         </span>
+        <div className="theme-switch" role="group" aria-label="Color theme">
+          {(["system", "light", "dark"] as const).map((choice) => (
+            <button
+              key={choice}
+              type="button"
+              aria-pressed={theme === choice}
+              onClick={() => setTheme(choice)}
+              title={choice === "system" ? "Follow the Windows theme" : `Use the ${choice} theme`}
+            >
+              {choice === "system" ? "Auto" : choice === "light" ? "Light" : "Dark"}
+            </button>
+          ))}
+        </div>
       </header>
 
       <div className="action-bar" role="toolbar" aria-label="Server actions">
@@ -651,9 +694,43 @@ export default function App() {
         ))}
       </nav>
 
-      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="tab-panel">
+      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="tab-panel" aria-busy={busy !== null}>
         {tab === "home" ? (
           <>
+            <section className={`card home-verdict ${homeVerdict.tone}`} aria-live="polite">
+              <h2>{homeVerdict.headline}</h2>
+              <p className="verdict-detail">{homeVerdict.detail}</p>
+              {vram ? (
+                <div className="vram">
+                  <div className="vram-labels">
+                    <span>Graphics memory estimate</span>
+                    <span>{vram.available ? `${vram.verdict} · ${vram.percent}%` : vram.verdict}</span>
+                  </div>
+                  {vram.available ? (
+                    <div className={`vram-track${vram.fits ? "" : " over"}`} role="img" aria-label={vram.spoken}>
+                      {vram.segments.map((segment) => (
+                        <span
+                          key={segment.key}
+                          className={`vram-fill vram-${segment.key}`}
+                          style={{ width: `${segment.percent}%` }}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="muted">{vram.label}</p>
+                  {vram.available ? (
+                    <ul className="vram-legend">
+                      {vram.segments.map((segment) => (
+                        <li key={segment.key}>
+                          <span className={`vram-swatch vram-${segment.key}`} aria-hidden="true" />
+                          {segment.label} {segment.gib.toFixed(1)} GiB
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
             <section className="card">
               <h2>Your AI</h2>
               <dl className="facts">
@@ -892,7 +969,7 @@ export default function App() {
             </div>
             {diagnostics ? (
               <>
-                <p className="verdict">{describeDiagnostics(diagnostics)}</p>
+                <p className="verdict" role="status">{describeDiagnostics(diagnostics)}</p>
                 <dl className="facts">
                   <dt>Runtime</dt>
                   <dd>

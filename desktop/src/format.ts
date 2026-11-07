@@ -12,7 +12,8 @@ import type {
   RouterModelState,
   RuntimeState,
   ServerPhase,
-  Tier
+  Tier,
+  VramEstimate
 } from "./types";
 
 export function describeServer(phase: ServerPhase | string | undefined): string {
@@ -395,4 +396,135 @@ export function describeDiagnostics(diagnostics: DiagnosticDocument | null): str
     return "No diagnostics have been collected yet";
   }
   return describeOverall(diagnostics.overall?.status, diagnostics.overall?.confidence);
+}
+
+// --- Home verdict and memory headroom -----------------------------------
+
+export type HomeTone = "ok" | "busy" | "off" | "warn";
+
+export interface HomeVerdict {
+  tone: HomeTone;
+  headline: string;
+  detail: string;
+}
+
+/** The first sentence on Home. It only repeats backend facts; it never claims readiness
+ * when the model file is missing or the server has not reported a state. */
+export function describeHomeVerdict(
+  phase: ServerPhase | string | undefined,
+  modelName: string | undefined,
+  modelPresent: boolean | undefined,
+  port: number | undefined
+): HomeVerdict {
+  if (modelPresent === false) {
+    return {
+      tone: "warn",
+      headline: "The model file is missing",
+      detail: "Download the selected model again before the AI can start."
+    };
+  }
+  const name = modelName?.trim() || "The selected model";
+  switch (phase) {
+    case "running":
+      return {
+        tone: "ok",
+        headline: "Ready to chat",
+        detail: `${name} is answering on the local server${port ? ` at 127.0.0.1:${port}` : ""}.`
+      };
+    case "loading":
+      return {
+        tone: "busy",
+        headline: "The AI is starting",
+        detail: `${name} is loading. The first reply can take a little longer.`
+      };
+    case "stopped":
+      return {
+        tone: "off",
+        headline: "The AI is off",
+        detail: "Start it when you want to chat. Nothing runs on the GPU until then."
+      };
+    default:
+      return {
+        tone: "warn",
+        headline: "Server state unknown",
+        detail: "The backend did not report whether the local AI is running. Refresh to try again."
+      };
+  }
+}
+
+export interface VramSegment {
+  key: "weights" | "cache" | "compute" | "reserve";
+  label: string;
+  gib: number;
+  percent: number;
+}
+
+export interface VramSummary {
+  /** False when the backend gave no usable estimate: the card then says so and draws no bar. */
+  available: boolean;
+  segments: VramSegment[];
+  /** Share of the card's memory the whole estimate needs, capped at 100. */
+  percent: number;
+  fits: boolean;
+  verdict: string;
+  label: string;
+  /** One sentence for screen readers: every number the bar shows, in words. */
+  spoken: string;
+}
+
+const UNAVAILABLE: VramSummary = {
+  available: false,
+  segments: [],
+  percent: 0,
+  fits: true,
+  verdict: "No estimate",
+  label: "No graphics memory estimate is available for the active model, so nothing is shown.",
+  spoken: "No graphics memory estimate is available for the active model."
+};
+
+function nonNegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * The Home memory bar, built only from the backend's `vram_estimate` split (weights, context
+ * cache, compute buffers, reserve). It never falls back to the weights alone: a missing or
+ * unusable estimate says so. Every segment is named and numbered in text, so colour is never
+ * the only carrier, and the wording keeps the word "estimate".
+ */
+export function describeVram(estimate: VramEstimate | null | undefined): VramSummary {
+  if (!estimate || estimate.available === false) {
+    return UNAVAILABLE;
+  }
+  const weights = nonNegative(estimate.weights_gib);
+  const cache = nonNegative(estimate.kv_gib);
+  const compute = nonNegative(estimate.compute_gib);
+  const reserve = nonNegative(estimate.headroom_gib);
+  const total = nonNegative(estimate.total_gib);
+  if (weights === null || cache === null || compute === null || reserve === null || total === null || total === 0) {
+    return UNAVAILABLE;
+  }
+  const needed = weights + cache + compute + reserve;
+  const share = (gib: number) => Math.min(100, (gib / total) * 100);
+  const segments: VramSegment[] = [
+    { key: "weights", label: "Model weights", gib: weights, percent: share(weights) },
+    { key: "cache", label: "Context cache", gib: cache, percent: share(cache) },
+    { key: "compute", label: "Compute buffers", gib: compute, percent: share(compute) },
+    { key: "reserve", label: "Safety reserve", gib: reserve, percent: share(reserve) }
+  ];
+  const fits = estimate.verdict !== "will_not_fit";
+  const verdict =
+    estimate.verdict === "will_not_fit"
+      ? "Will not fit entirely"
+      : estimate.verdict === "tight"
+        ? "Tight fit"
+        : estimate.verdict === "fits"
+          ? "Should fit"
+          : "Unclear fit";
+  const confidence =
+    estimate.confidence && estimate.confidence !== "none" ? `${estimate.confidence} confidence` : "unknown confidence";
+  const percent = Math.min(100, Math.round((needed / total) * 100));
+  const parts = segments.map((part) => `${part.label.toLowerCase()} ${part.gib.toFixed(1)} GiB`).join(", ");
+  const label = `Estimated ${needed.toFixed(1)} GiB of the ${total.toFixed(1)} GiB graphics memory (${confidence}): ${parts}.`;
+  return { available: true, segments, percent, fits, verdict, label, spoken: `${verdict}. ${label}` };
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeGpu,
+  describeHomeVerdict,
   describeIdleCapability,
   describeIdleVramEffect,
   describeLibraryBadges,
@@ -18,6 +19,7 @@ import {
   describeSupport,
   describeTier,
   describeStatusBadge,
+  describeVram,
   nextTabIndex,
   describeModelState,
   describeGamePause,
@@ -421,5 +423,58 @@ describe("model library display rules", () => {
     expect(describeLibraryResult("validated", "passed preflight").ok).toBe(true);
     expect(describeLibraryResult("failed", "is not downloaded yet").ok).toBe(false);
     expect(describeLibraryResult("failed", "")).toEqual({ message: "failed", ok: false });
+  });
+
+  it("puts the backend's readiness first and never hides a missing model", () => {
+    const running = describeHomeVerdict("running", "Qwen3.5 9B", true, 8080);
+    expect(running.tone).toBe("ok");
+    expect(running.headline).toBe("Ready to chat");
+    expect(running.detail).toContain("127.0.0.1:8080");
+    expect(describeHomeVerdict("loading", "Qwen3.5 9B", true, 8080).tone).toBe("busy");
+    expect(describeHomeVerdict("stopped", "Qwen3.5 9B", true, 8080).headline).toBe("The AI is off");
+    expect(describeHomeVerdict("running", "Qwen3.5 9B", false, 8080).tone).toBe("warn");
+    expect(describeHomeVerdict("weird", "Qwen3.5 9B", true, 8080).tone).toBe("warn");
+  });
+
+  it("builds the memory bar from the backend estimate split, in text as well as colour", () => {
+    const summary = describeVram({
+      estimate: true, weights_gib: 2.33, kv_gib: 4.78, compute_gib: 0.2, headroom_gib: 1, needed_gib: 8.31,
+      total_gib: 15.8, verdict: "fits", confidence: "high"
+    });
+    expect(summary.available).toBe(true);
+    expect(summary.segments.map((part) => part.key)).toEqual(["weights", "cache", "compute", "reserve"]);
+    expect(summary.percent).toBe(53);
+    expect(summary.verdict).toBe("Should fit");
+    expect(summary.label).toContain("Estimated 8.3 GiB of the 15.8 GiB");
+    expect(summary.label).toContain("context cache 4.8 GiB");
+    expect(summary.label).toContain("high confidence");
+    expect(summary.spoken.startsWith("Should fit.")).toBe(true);
+  });
+
+  it("marks an estimate that exceeds the card and caps the bar at 100%", () => {
+    const summary = describeVram({
+      estimate: true, weights_gib: 18, kv_gib: 3, compute_gib: 0.2, headroom_gib: 1, needed_gib: 22.2,
+      total_gib: 15.8, verdict: "will_not_fit", confidence: "medium"
+    });
+    expect(summary.fits).toBe(false);
+    expect(summary.percent).toBe(100);
+    expect(summary.verdict).toBe("Will not fit entirely");
+    expect(summary.segments.every((part) => part.percent <= 100)).toBe(true);
+  });
+
+  it("says no estimate exists instead of falling back to the weights alone", () => {
+    for (const missing of [null, undefined, { estimate: true, available: false }]) {
+      const summary = describeVram(missing as never);
+      expect(summary.available).toBe(false);
+      expect(summary.segments).toEqual([]);
+      expect(summary.label).toContain("No graphics memory estimate");
+    }
+    expect(describeVram({ estimate: true, weights_gib: 2.3, total_gib: 15.8 } as never).available).toBe(false);
+    expect(
+      describeVram({
+        estimate: true, weights_gib: 1, kv_gib: 1, compute_gib: 0, headroom_gib: 1, needed_gib: 3,
+        total_gib: 0, verdict: "fits", confidence: "high"
+      }).available
+    ).toBe(false);
   });
 });

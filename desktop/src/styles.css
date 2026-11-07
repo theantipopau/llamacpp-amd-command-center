@@ -6,9 +6,44 @@
   --text: #e8eef4;
   --muted: #9fb0be;
   --accent: #f2a33c;
+  --primary-text: #1a1206;
   --danger: #ff8a7a;
   --ok: #5fd38a;
+  --code-bg: #0d1116;
+  --button-bg: #1f2830;
   font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f3ec;
+  --panel: #fffdf8;
+  --line: #b9b0a0;
+  --text: #1b2329;
+  --muted: #56616b;
+  --accent: #a85b00;
+  --primary-text: #ffffff;
+  --danger: #a52a1a;
+  --ok: #1f6b43;
+  --code-bg: #f0ebe1;
+  --button-bg: #ebe5d8;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) {
+    color-scheme: light;
+    --bg: #f6f3ec;
+    --panel: #fffdf8;
+    --line: #b9b0a0;
+    --text: #1b2329;
+    --muted: #56616b;
+    --accent: #a85b00;
+    --primary-text: #ffffff;
+    --danger: #a52a1a;
+    --ok: #1f6b43;
+    --code-bg: #f0ebe1;
+    --button-bg: #ebe5d8;
+  }
 }
 
 * {
@@ -60,7 +95,7 @@ body {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 5px 14px;
-  background: #0d1116;
+  background: var(--code-bg);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -143,6 +178,154 @@ h3 {
   color: var(--muted);
 }
 
+.theme-switch {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.theme-switch button {
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.theme-switch button[aria-pressed="true"] {
+  background: var(--button-bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: -60px;
+  z-index: 10;
+  padding: 8px 12px;
+  background: var(--accent);
+  color: var(--primary-text);
+  border-radius: 6px;
+}
+
+.skip-link:focus {
+  top: 12px;
+}
+
+.home-verdict {
+  border-left: 4px solid var(--line);
+}
+
+.home-verdict.ok {
+  border-left-color: var(--ok);
+}
+
+.home-verdict.busy {
+  border-left-color: var(--accent);
+}
+
+.home-verdict.warn {
+  border-left-color: var(--danger);
+}
+
+.verdict-detail {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.vram {
+  margin-top: 14px;
+}
+
+.vram-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin-bottom: 5px;
+}
+
+.vram-track {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  background: var(--button-bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.vram-fill {
+  display: block;
+  height: 100%;
+  flex: none;
+  transition: width 180ms ease-out;
+}
+
+/* Four segments told apart by pattern as well as colour, and named in the legend. */
+.vram-weights { background: var(--ok); }
+.vram-cache { background: repeating-linear-gradient(45deg, var(--ok) 0 3px, transparent 3px 6px); }
+.vram-compute { background: repeating-linear-gradient(90deg, var(--ok) 0 2px, transparent 2px 5px); }
+.vram-reserve { background: var(--line); }
+
+.vram-track.over .vram-weights { background: var(--danger); }
+.vram-track.over .vram-cache { background: repeating-linear-gradient(45deg, var(--danger) 0 3px, transparent 3px 6px); }
+.vram-track.over .vram-compute { background: repeating-linear-gradient(90deg, var(--danger) 0 2px, transparent 2px 5px); }
+
+.vram-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.vram-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+
+.vram p {
+  margin: 7px 0 0;
+  font-size: 0.9rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --line: #6f8492;
+  }
+
+  button,
+  .card,
+  .tabs,
+  input,
+  select {
+    border-width: 2px;
+  }
+}
+
 .card,
 .error,
 .progress {
@@ -189,7 +372,7 @@ pre {
 pre {
   white-space: pre-wrap;
   word-break: break-word;
-  background: #0d1116;
+  background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
@@ -227,7 +410,7 @@ pre {
 }
 
 button {
-  background: #1f2830;
+  background: var(--button-bg);
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -249,7 +432,7 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #1a1206;
+  color: var(--primary-text);
   font-weight: 600;
 }
 
@@ -325,7 +508,7 @@ button.primary:hover:not(:disabled) {
 
 input[type="number"],
 select {
-  background: #0d1116;
+  background: var(--code-bg);
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 6px;

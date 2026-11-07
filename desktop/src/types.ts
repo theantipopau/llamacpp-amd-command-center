@@ -65,6 +65,25 @@ export interface HardwareProfile {
   recommendation: { backend: string; model_id: string; confidence: string; reason: string };
 }
 
+/** The backend's graphics-memory estimate for the active model (always an estimate). */
+export interface VramEstimate {
+  estimate: boolean;
+  available?: boolean;
+  weights_gib: number;
+  kv_gib: number;
+  compute_gib: number;
+  headroom_gib: number;
+  needed_gib: number;
+  total_gib: number;
+  used_gib?: number;
+  free_gib?: number;
+  context_tokens?: number;
+  slots?: number;
+  verdict: "fits" | "tight" | "will_not_fit" | string;
+  confidence: string;
+  warnings?: string[];
+}
+
 export interface StateDocument {
   schema_version: number;
   generated_at: string;
@@ -80,6 +99,8 @@ export interface StateDocument {
   desktop_shortcuts: string;
   hardware: HardwareProfile | null;
   hardware_error: string | null;
+  /** Optional so an older backend document still parses; null with no active model or Radeon. */
+  vram_estimate?: VramEstimate | null;
 }
 
 export interface Tier {
