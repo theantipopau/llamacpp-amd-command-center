@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "catalog_version": "0.1.6",
-  "verified_on": "2026-10-08",
+  "catalog_version": "0.1.7",
+  "verified_on": "2026-11-07",
   "verified_against": "tests/fixtures/catalog-evidence.json",
   "models": [
     {
@@ -87,6 +87,41 @@
       "Tools": false
     },
     {
+      "Id": "qwen3.6-35b-a3b",
+      "Name": "Qwen3.6 35B-A3B",
+      "Alias": "qwen3.6:35b-a3b",
+      "Repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "File": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "Projector": "mmproj-F16.gguf",
+      "ApproxGiB": 21.45,
+      "Rank": 91,
+      "Tag": "MOE / EXPERIMENTAL",
+      "Experimental": true,
+      "Moe": true,
+      "Description": "Mixture-of-experts model, 35B total and about 3B active per token (Apache 2.0, Unsloth quant). The Q4 file is about 20 GiB, so on a 16 GB card its experts have to sit in system RAM; speed on this PC is not measured yet. Experimental until a real run says otherwise.",
+      "Reasoning": true,
+      "Vision": true,
+      "Tools": true
+    },
+    {
+      "Id": "ornith-1.5-35b-a3b",
+      "Name": "Ornith 1.5 35B-A3B",
+      "Alias": "ornith:1.5-35b-a3b",
+      "Repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+      "File": "Ornith-1.5-35B-Q4_K_M.gguf",
+      "Projector": "mmproj-Ornith-1.5-35B-BF16.gguf",
+      "ApproxGiB": 21.06,
+      "Rank": 90,
+      "Tag": "MOE / EXPERIMENTAL",
+      "Experimental": true,
+      "Moe": true,
+      "NeedsMtpLoader": true,
+      "Description": "Community coding/reasoning mixture-of-experts model, 35B total and about 3B active (MIT). About 20 GiB at Q4, so its experts have to sit in system RAM. Publisher claims are not verified here. Its 9B sibling needs the MTP-capable Vulkan or llama.cpp ROCm (latest) build; this one is assumed to as well until a load proves otherwise.",
+      "Reasoning": true,
+      "Vision": true,
+      "Tools": true
+    },
+    {
       "Id": "qwen3-8b",
       "Name": "Qwen3 8B",
       "Alias": "qwen3:8b",
@@ -142,7 +177,7 @@
       "ApproxGiB": 2.33,
       "Rank": 68,
       "Tag": "FASTEST",
-      "Description": "Small, fast reasoning and tool-use model; ideal for 8\u201316 GB systems and CPU fallback.",
+      "Description": "Small, fast reasoning and tool-use model; ideal for 8–16 GB systems and CPU fallback.",
       "Reasoning": true,
       "Vision": false,
       "Tools": true

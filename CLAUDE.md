@@ -4,7 +4,7 @@ Windows command center for running llama.cpp on AMD Radeon GPUs and connecting i
 
 - `Start-LlamaCpp.cmd` — beginner batch menu (double-click entry point). Calls the PowerShell script for all real work.
 - `Install-LlamaCpp-AMD.ps1` — everything else: hardware scan, backend install, model catalog/download, launcher generation, editor integrations. `-Action` selects the mode (see README "Command-line reference").
-- `catalog/` — versioned JSON data loaded at runtime by `Get-CatalogJson`: `models.json` (the nine-model catalog), `runtimes.json` (AMD package facts), `hardware_profiles.json` (ROCm matrix pattern and reasons), `compatibility.json` (runtime-vs-model rules). Single source of truth (ADR-004): never duplicate catalogue values in code or tests, and never embed a fallback copy — a missing or broken file must fail loudly with its path.
+- `catalog/` — versioned JSON data loaded at runtime by `Get-CatalogJson`: `models.json` (the eleven-model catalog), `runtimes.json` (AMD package facts), `hardware_profiles.json` (ROCm matrix pattern and reasons), `compatibility.json` (runtime-vs-model rules). Single source of truth (ADR-004): never duplicate catalogue values in code or tests, and never embed a fallback copy — a missing or broken file must fail loudly with its path.
 - `tests/Test-CommandCenter.ps1` — offline test harness (no downloads, no real install touched).
 - `docs/index.html` — GitHub Pages site. Keep it in sync with `README.md`.
 

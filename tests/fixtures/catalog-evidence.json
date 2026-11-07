@@ -1,5 +1,5 @@
 {
- "checked_utc": "2026-10-08T02:53:14Z",
+ "checked_utc": "2026-11-07T09:41:32Z",
  "checked_by": "tests/fixtures/refresh note: captured from the Hugging Face API (model metadata + tree at pinned revision); see docs/research/upstream-evidence.md",
  "files": [
   {
@@ -136,6 +136,36 @@
    "projector_bytes": null,
    "projector_sha256": null,
    "approx_gib_recorded": 2.33
+  },
+  {
+   "model_id": "qwen3.6-35b-a3b",
+   "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+   "revision": "a483e9e6cbd595906af30beda3187c2663a1118c",
+   "gated": false,
+   "license": "apache-2.0",
+   "last_modified": "2026-04-20T12:42:25.000Z",
+   "file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+   "file_bytes": 22134528992,
+   "file_sha256": "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
+   "projector": "mmproj-F16.gguf",
+   "projector_bytes": 899283680,
+   "projector_sha256": "8971ee4f331ff0a4c609374f32984b3d4e6dc086c0aa35f1d637fad1829e887f",
+   "approx_gib_recorded": 21.45
+  },
+  {
+   "model_id": "ornith-1.5-35b-a3b",
+   "repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+   "revision": "12393612fd4f730ff5aadc23e9b8f9648aa49ceb",
+   "gated": false,
+   "license": "mit",
+   "last_modified": "2026-08-24T03:43:47.000Z",
+   "file": "Ornith-1.5-35B-Q4_K_M.gguf",
+   "file_bytes": 21713463040,
+   "file_sha256": "42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f",
+   "projector": "mmproj-Ornith-1.5-35B-BF16.gguf",
+   "projector_bytes": 902822240,
+   "projector_sha256": "1921a36a85aee56cd2abd27f46701802c9d85a33474792e600df6c3b282a135d",
+   "approx_gib_recorded": 21.06
   }
  ]
 }
