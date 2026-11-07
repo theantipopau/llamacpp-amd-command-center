@@ -1,0 +1,48 @@
+{
+    "schema_version":  1,
+    "generated_at":  "2026-11-06T06:26:47.1302469Z",
+    "command_center_version":  "0.2.0",
+    "detection_confidence":  "high",
+    "hardware_error":  null,
+    "recommended":  {
+                        "fast":  {
+                                     "tier":  "fast",
+                                     "model_id":  "qwen3-4b",
+                                     "model_name":  "Qwen3 4B",
+                                     "status":  "recommended",
+                                     "confidence":  "high",
+                                     "reason":  "Stays entirely in VRAM, with 11.9 GiB of graphics memory to spare.",
+                                     "gpu_resident":  true,
+                                     "blockers":  [
+
+                                                  ]
+                                 },
+                        "balanced":  {
+                                         "tier":  "balanced",
+                                         "model_id":  "qwen3.5-9b",
+                                         "model_name":  "Qwen3.5 9B",
+                                         "status":  "recommended",
+                                         "confidence":  "high",
+                                         "reason":  "Stays entirely in VRAM, with 8 GiB of graphics memory to spare.",
+                                         "gpu_resident":  true,
+                                         "blockers":  [
+
+                                                      ]
+                                     },
+                        "maximum":  {
+                                        "tier":  "maximum",
+                                        "model_id":  "qwen3.8-27b",
+                                        "model_name":  "Qwen3.8 27B",
+                                        "status":  "supported",
+                                        "confidence":  "medium",
+                                        "reason":  "Runs, but slower: it does not fit entirely in graphics memory, so some of it runs from system RAM.",
+                                        "gpu_resident":  false,
+                                        "blockers":  [
+
+                                                     ]
+                                    }
+                    },
+    "blockers":  [
+
+                 ]
+}

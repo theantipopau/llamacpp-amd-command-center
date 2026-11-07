@@ -1,0 +1,107 @@
+{
+    "schema_version":  1,
+    "generated_at":  "2026-11-06T06:26:45.4938912Z",
+    "command_center_version":  "0.2.0",
+    "install_root":  "E:\\llamacpp-amd-command-center\\notes\\terminal-cleanup-root",
+    "runtime":  null,
+    "model":  null,
+    "server":  {
+                   "state":  "stopped",
+                   "port":  8080,
+                   "base_url":  "http://127.0.0.1:8080",
+                   "process_ids":  [
+
+                                   ],
+                   "model_state":  "unknown"
+               },
+    "models":  [
+
+               ],
+    "settings":  {
+                     "idle_sleep_minutes":  null,
+                     "use_case":  null
+                 },
+    "idle_minutes":  0,
+    "editors":  {
+                    "vscode":  "stale"
+                },
+    "desktop_shortcuts":  "no",
+    "hardware":  {
+                     "CpuName":  "AMD Ryzen 7 9800X3D 8-Core Processor",
+                     "CpuCores":  8,
+                     "CpuThreads":  16,
+                     "HasAmdCpu":  true,
+                     "HasAmdGpu":  true,
+                     "HasAmdIntegratedGpu":  true,
+                     "RocmRecommended":  true,
+                     "RocmGpu":  "AMD Radeon RX 9070 XT",
+                     "RocmReason":  "AMD Windows ROCm 7.2.1 compatibility matrix lists this Radeon dGPU (gfx120X/gfx110X/gfx115X family).",
+                     "RamGiB":  31.2,
+                     "MaxAmdVramGiB":  15.8,
+                     "Gpus":  [
+                                  {
+                                      "Name":  "AMD Radeon RX 9070 XT",
+                                      "IsAmd":  true,
+                                      "IsIntegrated":  false,
+                                      "VramGiB":  15.8,
+                                      "SharedGiB":  15.6,
+                                      "Driver":  "",
+                                      "Source":  "dxgi",
+                                      "VramConfidence":  "high"
+                                  },
+                                  {
+                                      "Name":  "AMD Radeon(TM) Graphics",
+                                      "IsAmd":  true,
+                                      "IsIntegrated":  true,
+                                      "VramGiB":  0.5,
+                                      "SharedGiB":  15.6,
+                                      "Driver":  "",
+                                      "Source":  "dxgi",
+                                      "VramConfidence":  "high"
+                                  },
+                                  {
+                                      "Name":  "Microsoft Basic Render Driver",
+                                      "IsAmd":  false,
+                                      "IsIntegrated":  false,
+                                      "VramGiB":  0,
+                                      "SharedGiB":  15.6,
+                                      "Driver":  "",
+                                      "Source":  "dxgi",
+                                      "VramConfidence":  "high"
+                                  }
+                              ],
+                     "Profile":  "HIGH-PERFORMANCE",
+                     "ModelBudgetGiB":  24.8,
+                     "ExecutionMode":  "AMD dGPU OFFLOAD + CPU",
+                     "VulkanLoader":  true,
+                     "HasDiscreteAmdGpu":  true,
+                     "cpu":  {
+                                 "name":  "AMD Ryzen 7 9800X3D 8-Core Processor",
+                                 "cores":  8,
+                                 "threads":  16,
+                                 "vendor_amd":  true
+                             },
+                     "memory":  {
+                                    "ram_gib":  31.2
+                                },
+                     "detection":  {
+                                       "gpu_source":  "dxgi",
+                                       "confidence":  "high"
+                                   },
+                     "support":  {
+                                     "level":  "supported",
+                                     "confidence":  "high",
+                                     "reasons":  [
+
+                                                 ]
+                                 },
+                     "recommendation":  {
+                                            "backend":  "ROCm",
+                                            "model_id":  "qwen3.5-9b",
+                                            "confidence":  "high",
+                                            "reason":  "AMD Windows ROCm 7.2.1 compatibility matrix lists this Radeon dGPU (gfx120X/gfx110X/gfx115X family)."
+                                        }
+                 },
+    "hardware_error":  null,
+    "vram_estimate":  null
+}

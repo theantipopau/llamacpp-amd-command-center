@@ -19,7 +19,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,10 +30,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const SCRIPT_NAME: &str = "Install-LlamaCpp-AMD.ps1";
-/// Suppress the console window that Windows would otherwise allocate for every
-/// `powershell.exe` child of this GUI process. This is deliberately applied only to
-/// background backend commands; the server, chat and download launchers use `cmd start`
-/// and keep their visible consoles.
+/// Suppress the console window that Windows would otherwise allocate for every child of
+/// this GUI process. The app opens no terminal windows at all; the server's output goes
+/// to its log file instead.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TRAY_ID: &str = "main-tray";
@@ -269,17 +268,71 @@ struct DesktopSettings {
     start_minimised_to_tray: bool,
 }
 
-/// The PowerShell process that owns the deliberate server console. Keeping the child
-/// handle lets a forced Stop close that console after the server process is gone; the
-/// console must not be closed while the server is still running.
+/// The PowerShell process that owns the server. Keeping the child handle lets Stop/Quit
+/// stop the server the app started; a server that existed before the app has no handle.
 static LAUNCHER: Mutex<Option<Child>> = Mutex::new(None);
 
-fn stop_launcher_console() {
-    if let Ok(mut slot) = LAUNCHER.lock() {
-        if let Some(mut child) = slot.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+/// Serializes Start requests. The tray and the window can ask at the same time; without
+/// this lock both health probes can see "stopped" and each spawn a server launcher.
+static START_LOCK: Mutex<()> = Mutex::new(());
+
+/// Detached, hidden helpers (the Chat.cmd launcher) that must not outlive the app.
+static HELPERS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+
+const LAUNCHER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for the server launcher to return after the backend stops the server; only
+/// force-kill it if it is still alive after the grace period.
+fn close_launcher_console() {
+    let child = LAUNCHER.lock().ok().and_then(|mut slot| slot.take());
+    let Some(mut child) = child else { return };
+    let deadline = Instant::now() + LAUNCHER_EXIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => break,
         }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn launcher_is_running() -> bool {
+    let Ok(mut slot) = LAUNCHER.lock() else { return false };
+    let Some(child) = slot.as_mut() else { return false };
+    match child.try_wait() {
+        Ok(None) => true,
+        _ => {
+            let _ = slot.take();
+            false
+        }
+    }
+}
+
+fn reap_helpers() {
+    if let Ok(mut helpers) = HELPERS.lock() {
+        helpers.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    }
+}
+
+fn remember_helper(child: Child) {
+    reap_helpers();
+    if let Ok(mut helpers) = HELPERS.lock() {
+        helpers.push(child);
+    }
+}
+
+fn close_helpers() {
+    let helpers = HELPERS
+        .lock()
+        .map(|mut helpers| std::mem::take(&mut *helpers))
+        .unwrap_or_default();
+    for mut child in helpers {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -628,11 +681,14 @@ fn runtime_health() -> BackendResult {
     )
 }
 
-/// Start the server through the supported adapter entry point, detached, in its own
-/// console window so the user watches the real server log. The port-ownership guard and
-/// the loader diagnostics live in the backend, not here.
+/// Start the server through the supported adapter entry point, hidden. Its output goes
+/// to `<install root>\\logs\\desktop-server.log`, so no terminal window is opened. The
+/// port-ownership guard and the loader diagnostics live in the backend, not here.
 #[tauri::command]
 fn start_server() -> BackendResult {
+    // One Start at a time: the tray and the window can race, and two health checks that
+    // both see "stopped" would otherwise try to start two servers.
+    let _start_guard = START_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = install_root();
     let root_text = root.display().to_string();
     let script = match resolve_script() {
@@ -677,22 +733,60 @@ fn start_server() -> BackendResult {
         script.display(),
         root.display()
     );
-    // CREATE_NEW_CONSOLE gives the server its deliberate, visible console in one step.
-    // The previous `cmd.exe /C start` added a transient cmd console before PowerShell's
-    // console, which read as a second unwanted window in the four-phase console audit.
-    let spawned = Command::new("powershell.exe")
+    let candidates = script_candidates()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    // A live launcher already owns the server. It can be alive while the server is still
+    // initialising, so refuse a second start instead of starting a duplicate.
+    if launcher_is_running() {
+        return BackendResult {
+            ok: false,
+            action: "runtime:start".to_string(),
+            document: None,
+            error: Some(
+                "The server is already starting. Wait for it to finish, or stop it first."
+                    .to_string(),
+            ),
+            command: console_command,
+            exit_code: None,
+            stderr: String::new(),
+            install_root: root_text,
+            script: Some(script.display().to_string()),
+            candidates,
+        };
+    }
+
+    // Run the server hidden and keep its output in the install's logs folder. Creating a
+    // console here left a Windows Terminal tab behind even after the process exited,
+    // because Terminal's tab lifetime is a user setting the app cannot control.
+    let log_path = root.join("logs").join("desktop-server.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let mut command = Command::new("powershell.exe");
+    command
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
         .args(["-Action", "Runtime", "-RuntimeAction", "start"])
         .arg("-InstallRoot")
         .arg(&root)
-        .creation_flags(0x00000010)
-        .spawn();
+        .stdin(Stdio::null());
+    if let Some(file) = log {
+        command.stdout(Stdio::from(file));
+        if let Ok(errors) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            command.stderr(Stdio::from(errors));
+        }
+    }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let spawned = command.spawn();
 
-    let candidates = script_candidates()
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect();
     match spawned {
         Ok(child) => {
             let launcher_pid = child.id();
@@ -700,28 +794,29 @@ fn start_server() -> BackendResult {
                 *slot = Some(child);
             }
             BackendResult {
-            ok: true,
-            action: "runtime:start".to_string(),
-            document: Some(json!({
-                "spawned": true,
-                "launcher_pid": launcher_pid,
-                "launcher_console": console_command,
-                "health_before_start": health.document,
-            })),
-            error: None,
-            command: console_command,
-            exit_code: None,
-            stderr: String::new(),
-            install_root: root_text,
-            script: Some(script.display().to_string()),
-            candidates,
-        }
+                ok: true,
+                action: "runtime:start".to_string(),
+                document: Some(json!({
+                    "spawned": true,
+                    "launcher_pid": launcher_pid,
+                    "launcher_console": console_command,
+                    "server_log": log_path.display().to_string(),
+                    "health_before_start": health.document,
+                })),
+                error: None,
+                command: console_command,
+                exit_code: None,
+                stderr: String::new(),
+                install_root: root_text,
+                script: Some(script.display().to_string()),
+                candidates,
+            }
         }
         Err(spawn_error) => BackendResult {
             ok: false,
             action: "runtime:start".to_string(),
             document: None,
-            error: Some(format!("Could not open the server window: {spawn_error}")),
+            error: Some(format!("Could not start the server: {spawn_error}")),
             command: console_command,
             exit_code: None,
             stderr: String::new(),
@@ -742,9 +837,20 @@ fn stop_server(force: bool) -> BackendResult {
     }
     let result = run_backend("Runtime", if force { "runtime:stop:force" } else { "runtime:stop" }, &extra);
     if force && result.ok {
-        stop_launcher_console();
+        close_launcher_console();
     }
     result
+}
+
+/// Tray Quit is the one exit path that owns the app's children. Stop the server through
+/// the adapter, let its launcher exit, then close hidden helpers. A server that was
+/// already running before this app started has no LAUNCHER and is left untouched.
+fn shutdown_owned_processes() {
+    if launcher_is_running() {
+        let _ = stop_server(true);
+    }
+    close_launcher_console();
+    close_helpers();
 }
 
 /// The runtime update entry (`-RuntimeAction update`): two-step like stop. The first
@@ -798,12 +904,9 @@ fn library_change(action: String, model_id: String) -> BackendResult {
     )
 }
 
-/// A download runs for minutes. Validate first (the backend answers with a typed result
-/// that carries the refreshed library), and open the real transfer in its own console
-/// window through the proven `-Action Models -ModelId <id>` path, detached from this
-/// process so the window is never tied to the download.
-/// Open the chat window through the install's own `Chat.cmd`, which starts the AI when it is
-/// off, waits for it and opens the app window. The window does not duplicate that logic.
+/// Start the AI through this app's tracked launcher when it is off, then run the install's
+/// own `Chat.cmd` hidden. Chat.cmd still waits for the model and opens the chat browser,
+/// but it cannot open a second server console: the app already owns the hidden server.
 #[tauri::command]
 fn open_chat() -> BackendResult {
     let root = install_root();
@@ -826,32 +929,79 @@ fn open_chat() -> BackendResult {
             "Chat.cmd is missing from {root_text}. Run Start-LlamaCpp.cmd and choose [E] Easy start once to recreate it."
         ));
     }
-    let spawned = Command::new("cmd.exe")
-        .args(["/C", "start", "llama.cpp chat", "/D"])
-        .arg(&root)
-        .args(["cmd.exe", "/C", "Chat.cmd"])
-        .status();
-    match spawned {
-        Ok(status_ok) if status_ok.success() => BackendResult {
-            ok: true,
-            action: "chat:open".to_string(),
-            document: None,
-            error: None,
-            command: format!("{} /C Chat.cmd", chat.display()),
-            exit_code: status_ok.code(),
-            stderr: String::new(),
-            install_root: root_text,
-            script: Some(chat.display().to_string()),
-            candidates: Vec::new(),
-        },
-        Ok(status_failed) => failure(format!(
-            "The chat window did not open (cmd.exe exit code {}).",
-            status_failed.code().unwrap_or(-1)
-        )),
+
+    // Chat.cmd starts a minimized Start-LlamaCpp.cmd console when the server is off. Start
+    // through the app's own launcher first and wait until llama-server exists, so Chat.cmd
+    // only waits and the app can close the one hidden launcher it owns.
+    let mut state = runtime_health()
+        .document
+        .as_ref()
+        .and_then(|document| document.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if state != "running" && state != "loading" {
+        let started = start_server();
+        if !started.ok {
+            return failure(started.error.unwrap_or_else(|| "The AI could not be started.".to_string()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+            let probe = runtime_health();
+            state = probe
+                .document
+                .as_ref()
+                .and_then(|document| document.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if state == "running" || state == "loading" {
+                break;
+            }
+        }
+        if state != "running" && state != "loading" {
+            return failure(format!(
+                "The AI did not start, so the chat window was not opened. Check logs\\desktop-server.log or the Health tab."
+            ));
+        }
+    }
+
+    let mut command = Command::new("cmd.exe");
+    command
+        .args(["/C"])
+        .arg(&chat)
+        .current_dir(&root)
+        .env("LLAMACPP_NO_PAUSE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    match command.spawn() {
+        Ok(child) => {
+            remember_helper(child);
+            BackendResult {
+                ok: true,
+                action: "chat:open".to_string(),
+                document: None,
+                error: None,
+                command: format!("{} /C Chat.cmd", chat.display()),
+                exit_code: None,
+                stderr: String::new(),
+                install_root: root_text,
+                script: Some(chat.display().to_string()),
+                candidates: Vec::new(),
+            }
+        }
         Err(spawn_error) => failure(format!("Could not open the chat window: {spawn_error}")),
     }
 }
 
+/// A download runs for minutes. Validate first (the backend answers with a typed result
+/// that carries the refreshed library), then run the real transfer hidden through the
+/// proven `-Action Models -ModelId <id>` path. The window keeps polling the library; no
+/// second console window is opened or left behind.
 #[tauri::command]
 fn download_model(model_id: String) -> BackendResult {
     let root = install_root();
@@ -886,48 +1036,33 @@ fn download_model(model_id: String) -> BackendResult {
         .unwrap_or("")
         .to_string();
     if validated.ok && status == "validated" {
-        let spawned = Command::new("cmd.exe")
-            .args([
-                "/C",
-                "start",
-                "llama.cpp model download",
-                "/D",
-            ])
-            .arg(&root)
-            .arg("powershell.exe")
+        let mut command = Command::new("powershell.exe");
+        command
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
             .args(["-Action", "Models", "-ModelId", &model_id, "-Force"])
             .arg("-InstallRoot")
             .arg(&root)
-            .status();
+            .current_dir(&root)
+            .env("LLAMACPP_NO_PAUSE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let spawned = command.spawn();
         let candidates = script_candidates()
             .iter()
             .map(|path| path.display().to_string())
             .collect();
         match spawned {
-            Ok(status_ok) if status_ok.success() => BackendResult {
+            Ok(_child) => BackendResult {
                 ok: true,
                 action: "library:download".to_string(),
                 document: validated.document,
                 error: None,
                 command: format!("-Action Models -ModelId {model_id} -Force"),
-                exit_code: status_ok.code(),
-                stderr: String::new(),
-                install_root: root_text,
-                script: Some(script.display().to_string()),
-                candidates,
-            },
-            Ok(status_failed) => BackendResult {
-                ok: false,
-                action: "library:download".to_string(),
-                document: None,
-                error: Some(format!(
-                    "The download window did not open (cmd.exe exit code {}).",
-                    status_failed.code().unwrap_or(-1)
-                )),
-                command: format!("-Action Models -ModelId {model_id} -Force"),
-                exit_code: status_failed.code(),
+                exit_code: None,
                 stderr: String::new(),
                 install_root: root_text,
                 script: Some(script.display().to_string()),
@@ -937,7 +1072,7 @@ fn download_model(model_id: String) -> BackendResult {
                 ok: false,
                 action: "library:download".to_string(),
                 document: None,
-                error: Some(format!("Could not open the download window: {spawn_error}")),
+                error: Some(format!("Could not start the download: {spawn_error}")),
                 command: format!("-Action Models -ModelId {model_id} -Force"),
                 exit_code: None,
                 stderr: String::new(),
@@ -1121,11 +1256,12 @@ mod tests {
     }
 
     #[test]
-    fn the_no_window_flag_is_applied_only_by_the_background_command_builder() {
-        // The intentional console launchers are built with cmd.exe, not this helper.
+    fn background_and_hidden_helper_commands_have_no_console_window() {
+        // Background backend calls, the server launcher, hidden Chat.cmd, and hidden
+        // model downloads all use the no-window flag.
         // Including the pieces through concat! keeps this assertion from matching itself.
         let flag_call = concat!(".creation_flags(", "CREATE_NO_WINDOW)");
-        assert_eq!(include_str!("main.rs").matches(flag_call).count(), 1);
+        assert_eq!(include_str!("main.rs").matches(flag_call).count(), 4);
     }
 
     #[cfg(windows)]
@@ -1459,14 +1595,21 @@ fn main() {
         .expect("the command center window failed to start");
 
     app.run(|app, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
-            let quitting = app
-                .try_state::<QuitRequested>()
-                .map(|flag| flag.0.load(Ordering::SeqCst))
-                .unwrap_or(false);
-            if should_prevent_exit(quitting) {
-                api.prevent_exit();
+        match event {
+            RunEvent::ExitRequested { api, .. } => {
+                let quitting = app
+                    .try_state::<QuitRequested>()
+                    .map(|flag| flag.0.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if should_prevent_exit(quitting) {
+                    api.prevent_exit();
+                }
             }
+            // Quit is allowed to leave the event loop only after the server it started and
+            // the hidden helpers are stopped. A pre-existing server has no LAUNCHER and is
+            // deliberately not touched.
+            RunEvent::Exit => shutdown_owned_processes(),
+            _ => {}
         }
     });
 }

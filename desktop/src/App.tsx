@@ -31,7 +31,7 @@ import {
   libraryConfirmText,
   libraryOperation
 } from "./format";
-import { asDocument as narrow } from "./types";
+import { asDocument as narrow, asSettingsDocument, asSettingsSaveDocument } from "./types";
 import type {
   BackendResult,
   DesktopSettings,
@@ -43,14 +43,13 @@ import type {
   RuntimeAdapterResult,
   RuntimeHealthDocument,
   SettingsDocument,
-  SettingsSaveDocument,
   StateDocument
 } from "./types";
 
 const POLL_INTERVAL_MS = 2000;
 const GIVE_UP_AFTER_MS = 25000;
 const START_DEADLINE_MS = 240000;
-// A download runs in its own console window: check the read-only library list every
+// A download runs hidden in the background: check the read-only library list every
 // 15 s for up to an hour, then stop and leave the Refresh button to the user.
 const LIBRARY_POLL_MS = 15000;
 const LIBRARY_POLL_LIMIT = 240;
@@ -269,7 +268,7 @@ export default function App() {
       setFailure(first);
     } else if (firstDoc?.status === "requires_confirmation") {
       const confirmed = window.confirm(
-        "Download the newest llama.cpp build?\n\nDownloaded models are kept and launchers are rebuilt for the new build.\nThe download runs in its own window with size and SHA-256 checks."
+        "Download the newest llama.cpp build?\n\nDownloaded models are kept and launchers are rebuilt for the new build.\nThe download runs in the background with size and SHA-256 checks."
       );
       if (!confirmed) {
         setNotice("Nothing was downloaded.");
@@ -362,8 +361,9 @@ export default function App() {
     setBusy(null);
   }
 
-  /** Show the backend's settings document as the draft, the save result re-syncs it. */
-  const applySettingsDocument = useCallback((document: SettingsDocument | null) => {
+  /** Normalize the backend's settings document before it reaches React. */
+  const applySettingsDocument = useCallback((raw: unknown) => {
+    const document = asSettingsDocument(raw);
     setSettings(document);
     if (document) {
       setSettingsDraftMinutes(document.idle_unload.capable ? String(document.idle_unload.minutes ?? 0) : "");
@@ -378,10 +378,9 @@ export default function App() {
 
   const loadSettings = useCallback(async () => {
     const result = await api.getSettings();
-    const document = narrow<SettingsDocument>(result.document);
-    if (result.ok && document) {
-      applySettingsDocument(document);
-    } else if (!result.ok) {
+    if (result.ok) {
+      applySettingsDocument(result.document);
+    } else {
       setFailure(result);
     }
   }, [applySettingsDocument]);
@@ -423,7 +422,7 @@ export default function App() {
       setSettingsSave({ message: "Pick one of the listed use cases.", ok: false });
       return;
     }
-    const pauseCapable = settings.game_pause?.capable !== false;
+    const pauseCapable = settings.game_pause?.capable === true;
     if (pauseCapable && !isGamePauseValid(settingsDraftGamePause)) {
       setSettingsSave({ message: "Game pause needs 0 (off) or a whole number from 4 to 40 GiB.", ok: false });
       return;
@@ -438,7 +437,7 @@ export default function App() {
       ...(pauseCapable ? { game_pause: { gib: Number(settingsDraftGamePause.trim()) } } : {})
     });
     const result = await api.saveSettings(patch);
-    const document = narrow<SettingsSaveDocument>(result.document);
+    const document = asSettingsSaveDocument(result.document);
     if (!result.ok || !document) {
       setFailure(result);
       setSettingsSave({ message: "The change did not reach the backend. Nothing was saved.", ok: false });
@@ -471,8 +470,9 @@ export default function App() {
     void loadLibrary();
   }, [loadLibrary]);
 
-  // While a download runs in its own window, re-read the library so the list shows the
-  // model as downloaded when the file lands. Stops on success or after the poll limit.
+  // While a download runs hidden in the background, re-read the library so the list
+  // shows the model as downloaded when the file lands. Stops on success or after the
+  // poll limit.
   useEffect(() => {
     if (pendingDownload === null) {
       return;
@@ -574,7 +574,7 @@ export default function App() {
   const hardware = state.hardware;
   // What the idle choice means in VRAM terms; the backend's settings document already
   // carries the two facts, the rule only words them (null when either is unknown).
-  const idleVramEffect = settings ? describeIdleVramEffect(settings.gpu_vram_gib, settings.active_model_gib) : null;
+  const idleVramEffect = settings ? describeIdleVramEffect(settings.gpu_vram_gib, settings.active_model_footprint_gib) : null;
   // What 'Update llama.cpp' would unlock, straight from the library document's
   // catalogue-driven list; absent or empty means the line simply does not render.
   const unlockLine = describeUnlockableModels(library?.unlocked_models);
@@ -755,7 +755,7 @@ export default function App() {
                 ) : null}
                 {pendingDownload !== null ? (
                   <p className="progress" role="status" aria-live="polite">
-                    Download running in its own window. This list updates when the file is in place.
+                    Download running in the background. This list updates when the file is in place.
                   </p>
                 ) : null}
                 {busy?.startsWith("library:") ? (
@@ -809,7 +809,7 @@ export default function App() {
                   ) : null}
                   <dt>Game pause</dt>
                   <dd>
-                    {settings.game_pause?.capable === false ? (
+                    {settings.game_pause?.capable !== true ? (
                       "Not available with the installed runtime"
                     ) : (
                       <label>
@@ -834,17 +834,21 @@ export default function App() {
                   <dd className="muted">{describeGamePause(Number(settingsDraftGamePause) || 0, settings.game_pause?.capable)}</dd>
                   <dt>Use case</dt>
                   <dd>
-                    <select
-                      value={settingsDraftUseCase ?? ""}
-                      onChange={(event) => setSettingsDraftUseCase(event.target.value)}
-                      aria-label="What you use the AI for"
-                    >
-                      {settings.use_case.allowed.map((id) => (
-                        <option key={id} value={id}>
-                          {describeUseCase(id)}
-                        </option>
-                      ))}
-                    </select>
+                    {settings.use_case.allowed.length > 0 ? (
+                      <select
+                        value={settingsDraftUseCase ?? ""}
+                        onChange={(event) => setSettingsDraftUseCase(event.target.value)}
+                        aria-label="What you use the AI for"
+                      >
+                        {settings.use_case.allowed.map((id) => (
+                          <option key={id} value={id}>
+                            {describeUseCase(id)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="muted">The backend did not report any use cases.</span>
+                    )}
                   </dd>
                   <dt>{" "}</dt>
                   <dd className="muted">The suggestion engine uses this when you ask for a model.</dd>

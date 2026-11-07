@@ -36,6 +36,7 @@ npm run dev     # one command: Vite + the window against it
 | `npm run build` | standalone release binary in `src-tauri/target/release/` (frontend embedded, no dev server, no network) and the NSIS installer in `src-tauri/target/release/bundle/nsis/`, which bundles the backend in a `backend` folder |
 | `npm run check` | `tsc --noEmit` + the pure display-rule tests (vitest) |
 | `npm test` | the display-rule tests only |
+| `npm run test:lifecycle` | the release-window lifecycle test (needs a completed `npm run build`) |
 
 **Always build the release binary with `npm run build`, never plain `cargo build
 --release`.** Tauri's dev-context switch is set by its build pipeline: a binary compiled
@@ -69,10 +70,12 @@ The install root is `LLAMACPP_INSTALL_ROOT`, or the same
 ## What the buttons do
 
 - **Start the AI** — asks the backend for health first (it answers "already running"
-  instead of starting a second server), then opens the server in its own console window
-  through `-Action Runtime -RuntimeAction start`, so the port-ownership guard and the
-  loader diagnostics apply. The window then polls `-Action Runtime -RuntimeAction health`
-  and shows the real state and elapsed time while the model loads.
+  instead of starting a second server), then starts the server hidden through
+  `-Action Runtime -RuntimeAction start`, so the port-ownership guard and the loader
+  diagnostics apply and no terminal is opened. Server output is appended to
+  `<install root>\logs\desktop-server.log`. The window then polls
+  `-Action Runtime -RuntimeAction health` and shows the real state and elapsed time while
+  the model loads.
 - **Stop the AI** — calls the adapter stop *without* force first: the backend answers
   `requires_confirmation` and kills nothing. Only after you confirm does the window call it
   with `-Force`, then waits for the backend to report the server gone.
@@ -87,14 +90,14 @@ The install root is `LLAMACPP_INSTALL_ROOT`, or the same
   build would unblock — computed by the backend **from the compatibility catalogue**
   (`unlocked_models` in the Library document), never a hardcoded list, and the line
   simply does not render when nothing would unlock.
-- **Open chat** — opens the install's own `Chat.cmd`. That helper starts the AI when it is off, waits for it and opens the chat window, so the desktop never repeats that logic. A missing `Chat.cmd` gets a plain message that says how to recreate it.
+- **Open chat** — starts the AI through the app's tracked launcher when it is off, then runs the install's own `Chat.cmd` hidden. That helper waits for the model and opens the chat browser, so the desktop never repeats its logic and does not leave a second terminal behind. A missing `Chat.cmd` gets a plain message that says how to recreate it.
 - **Run diagnostics** (Health tab) — renders the four health sections in plain language, with the raw
   document behind a disclosure.
 - **Model library** — every catalogued model with its size, capability flags, fit
   wording and local state straight from the backend's `-Action Library` document.
   Download validates first (disk space, runtime blocker, not-already-downloaded) and
-  then opens the real transfer in its own console window through the proven
-  `-Action Models` path, size- and SHA-256-verified. While that download runs, the list re-reads the library every 15 seconds (for up to an hour) and marks the model downloaded when the file lands; Refresh always works too. Activate switches instantly through
+  then runs the real transfer hidden through the proven `-Action Models` path,
+  size- and SHA-256-verified. While that download runs, the list re-reads the library every 15 seconds (for up to an hour) and marks the model downloaded when the file lands; Refresh always works too. Activate switches instantly through
   the existing offline switch (launchers and VS Code endpoint re-sync included);
   Remove asks first and refuses the active model. Blocked models show the backend's
   own reason with the operation disabled, never a hidden row.
@@ -139,23 +142,32 @@ No external dependencies beyond .NET (`System.Drawing`).
 
 ## Tests
 
-- `npm run check` — display rules and types (35 vitest cases, including the settings
+- `npm run check` — display rules and types (43 vitest cases, including the settings
   wording, minutes/use-case validation, and the model-library badges/fit/state/operation
   rules).
 - `cargo test` (in `src-tauri`) — the supervisor layer against a real backend call:
   document parsing, contract version, failure detail, backend discovery, and the
-  settings read/refuse paths (6 cases).
+  settings read/refuse paths (14 passed and 1 ignored by default).
 - `cargo test -- --ignored --nocapture live_start_stop` — the real lifecycle on this
   machine: start, wait for the model, diagnose, soft stop must refuse to kill, forced stop
   must stop it.
+- `npm run test:lifecycle` — the release-window regression test. It launches the built
+  executable against a stub backend and fails if duplicate Start creates a second
+  launcher, Stop or Quit leaves a server launcher, Quit leaves the live hidden Chat.cmd
+  helper behind, or any step opens a new terminal window. It uses the built executable;
+  run `npm run build` first. It refuses to run over an existing app or `llama-server`
+  process.
 
 ## Known gaps in this slice
 
-- **No automated UI driver.** Clicking the real buttons is not automated (WebDriver for a
-  WebView2 window is a Phase D concern); the window is verified by launching it, exercising
-  the same commands through `cargo test`, and the harness's capture gate against
+- **No automated full UI driver.** The lifecycle test drives the real tray menu and
+  Open chat (via UI Automation and WebView2's CDP endpoint), but it does not click every
+  button or compare pixels. The window is also verified by launching it, exercising the
+  same commands through `cargo test`, and the harness's capture gate against
   `Capture-DesktopScreenshot.ps1` (see above).
 - **No pixel-diff regression.** Visual changes are checked by re-running the capture tool
   and comparing the artifact.
-- The server console window closes when the server exits; the window's state then reads
-  `stopped` and Diagnose explains why.
+- The app opens no terminal windows: the server, chat and model downloads run hidden.
+  Server output is in `<install root>\logs\desktop-server.log`. Stop and Quit stop the
+  server this app started; a server that was already running before the app started is
+  left untouched.

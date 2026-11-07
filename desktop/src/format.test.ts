@@ -32,6 +32,7 @@ import {
   libraryOperation
 } from "./format";
 import type { BackendResult, HardwareProfile, LibraryModel, Tier } from "./types";
+import { asSettingsDocument, asSettingsSaveDocument } from "./types";
 
 const hardware: HardwareProfile = {
   CpuName: "AMD Ryzen 7 9800X3D 8-Core Processor",
@@ -238,6 +239,7 @@ describe("settings wording and validation", () => {
     expect(describeIdleCapability(true, 3)).toContain("leaves graphics memory");
     expect(describeIdleCapability(false, 0)).toContain("Set up the AI first");
     expect(describeIdleCapability(false, 2)).toContain("too old");
+    expect(describeIdleCapability(undefined, undefined)).toContain("Set up the AI first");
   });
 
   it("validates idle minutes exactly as the backend does", () => {
@@ -251,22 +253,26 @@ describe("settings wording and validation", () => {
     expect(isMinutesValid(undefined)).toBe(false);
   });
 
-  it("turns the idle choice into GiB free on the Radeon, with the engine's own arithmetic", () => {
-    // 0.9 × VRAM − model size, the same headroom rule Get-VramHeadroom applies.
-    const text = describeIdleVramEffect(15.8, 6.2);
-    expect(text).toContain("8.0 GiB");
+  it("states what unloading frees, from the backend's footprint estimate and not the weights", () => {
+    const text = describeIdleVramEffect(15.8, 8.3);
+    expect(text).toContain("estimated 8.3 GiB");
     expect(text).toContain("15.8 GiB");
-    expect(text).toContain("free for games");
+    expect(text).toContain("context cache");
   });
 
   it("says nothing about VRAM when the hardware or model is unknown", () => {
     expect(describeIdleVramEffect(null, 6.2)).toBeNull();
     expect(describeIdleVramEffect(15.8, null)).toBeNull();
     expect(describeIdleVramEffect(null, null)).toBeNull();
+    expect(describeIdleVramEffect(undefined, 6.2)).toBeNull();
+    expect(describeIdleVramEffect(15.8, undefined)).toBeNull();
+    expect(describeIdleVramEffect(Number.NaN, 6.2)).toBeNull();
+    expect(describeIdleVramEffect(0, 6.2)).toBeNull();
+    expect(describeIdleVramEffect(15.8, Number.POSITIVE_INFINITY)).toBeNull();
   });
 
-  it("never claims a negative amount free when the model is bigger than VRAM", () => {
-    expect(describeIdleVramEffect(4, 6.2)).toContain("0.0 GiB");
+  it("never claims more freed than the card holds", () => {
+    expect(describeIdleVramEffect(4, 6.2)).toContain("estimated 4.0 GiB");
   });
 
   it("accepts only listed use cases", () => {
@@ -280,6 +286,7 @@ describe("settings wording and validation", () => {
     expect(describeSettingsSave(2, [])).toContain("Saved (2 settings)");
     expect(describeSettingsSave(1, [])).toContain("Saved (1 setting)");
     expect(describeSettingsSave(0, [])).toContain("Nothing to change");
+    expect(describeSettingsSave(undefined, undefined)).toBe("Nothing to change.");
     const message = describeSettingsSave(0, [
       { field: "idle_unload.minutes", reason: "Minutes must be a whole number from 0 to 1440." },
       { field: "use_case", reason: "Unknown use case 'x'." }
@@ -287,6 +294,52 @@ describe("settings wording and validation", () => {
     expect(message).toContain("Not saved");
     expect(message).toContain("whole number");
     expect(message).toContain("Unknown use case");
+  });
+
+  it("normalizes an older settings document before the window reads it", () => {
+    const document = asSettingsDocument({
+      schema_version: 1,
+      idle_unload: { minutes: 15, capable: true, installed_models: 2 },
+      use_case: { saved: "chat", allowed: ["chat", "coding"] }
+    });
+    expect(document).not.toBeNull();
+    expect(document?.gpu_vram_gib).toBeNull();
+    expect(document?.active_model_gib).toBeNull();
+    expect(document?.game_pause).toBeUndefined();
+    expect(describeIdleVramEffect(document?.gpu_vram_gib, document?.active_model_footprint_gib)).toBeNull();
+    expect(document?.idle_unload).toEqual({ minutes: 15, capable: true, installed_models: 2 });
+    expect(document?.use_case).toEqual({ saved: "chat", allowed: ["chat", "coding"] });
+  });
+
+  it("fills malformed nested settings with safe defaults instead of throwing", () => {
+    const document = asSettingsDocument({
+      gpu_vram_gib: "16",
+      active_model_gib: Number.NaN,
+      idle_unload: { minutes: -1, capable: "yes", installed_models: "2" },
+      use_case: { saved: "", allowed: ["chat", 7, null] }
+    });
+    expect(document?.gpu_vram_gib).toBeNull();
+    expect(document?.active_model_gib).toBeNull();
+    expect(document?.idle_unload).toEqual({ minutes: null, capable: false, installed_models: 0 });
+    expect(document?.use_case).toEqual({ saved: null, allowed: ["chat"] });
+  });
+
+  it("rejects a settings document that is not an object", () => {
+    expect(asSettingsDocument(null)).toBeNull();
+    expect(asSettingsDocument([])).toBeNull();
+    expect(asSettingsDocument("not a document")).toBeNull();
+  });
+
+  it("normalizes a partial save result and its refreshed settings", () => {
+    const document = asSettingsSaveDocument({
+      applied: [{ field: "idle_unload.minutes", value: 15 }],
+      rejected: [{ reason: "missing field" }],
+      settings: { idle_unload: {}, use_case: {} }
+    });
+    expect(document?.applied).toHaveLength(1);
+    expect(document?.rejected).toEqual([]);
+    expect(document?.settings?.idle_unload).toEqual({ minutes: null, capable: false, installed_models: 0 });
+    expect(describeSettingsSave(document?.applied.length, document?.rejected)).toBe("Saved (1 setting).");
   });
 });
 

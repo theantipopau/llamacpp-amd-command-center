@@ -72,7 +72,7 @@ No programming or AI knowledge is needed. The menu explains each step and always
 | Word | What it means |
 |---|---|
 | **Model** | The AI itself: one large file (about 6 GB) that does the thinking. You can download several and switch between them. |
-| **AI server** | A program that loads the model onto your graphics card so apps can talk to it. It runs in its own window; close the window and the AI stops. |
+| **AI server** | A program that loads the model onto your graphics card so apps can talk to it. The classic launchers show it in its own window; close that window and the AI stops. The desktop app runs it hidden and controls it with Start and Stop. |
 | **VRAM** | Your graphics card's own memory. A model that fits entirely in VRAM replies quickly. |
 | **Context** | How much of the conversation (and your code) the model can keep in mind at once, measured in **tokens**. A token is roughly three-quarters of a word. |
 | **Agent mode** | A Copilot mode where the AI can read and edit files in your project, not just answer questions. |

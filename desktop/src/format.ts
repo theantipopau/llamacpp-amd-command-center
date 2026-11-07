@@ -136,7 +136,7 @@ export function describeModelState(modelState: RouterModelState | string | undef
 
 /** The game-pause line under the setting: what the number means, or why it is unavailable. */
 export function describeGamePause(gib: number | null | undefined, capable: boolean | undefined): string {
-  if (capable === false) {
+  if (capable !== true) {
     return "Needs a newer llama.cpp (router mode). Update llama.cpp first.";
   }
   if (!gib) {
@@ -242,9 +242,10 @@ export function describeUseCase(id: string): string {
 }
 
 /** Idle-unload wording that asserts the capability instead of offering a dead control. */
-export function describeIdleCapability(capable: boolean, installedModels: number): string {
-  if (!capable) {
-    return installedModels > 0
+export function describeIdleCapability(capable: boolean | undefined, installedModels: number | undefined): string {
+  const installed = typeof installedModels === "number" && Number.isFinite(installedModels) && installedModels > 0;
+  if (capable !== true) {
+    return installed
       ? "The installed llama.cpp is too old to unload the model when idle. Update the runtime first."
       : "Idle unload needs llama.cpp installed. Set up the AI first.";
   }
@@ -257,12 +258,13 @@ export function describeIdleCapability(capable: boolean, installedModels: number
  * weights come out of it when the model unloads). Null everywhere the hardware scan
  * or the active model is unknown — the window then stays silent instead of guessing.
  */
-export function describeIdleVramEffect(vramGiB: number | null, activeModelGiB: number | null): string | null {
-  if (vramGiB === null || activeModelGiB === null) {
+export function describeIdleVramEffect(vramGiB: number | null | undefined, footprintGiB: number | null | undefined): string | null {
+  const vram = typeof vramGiB === "number" && Number.isFinite(vramGiB) && vramGiB > 0 ? vramGiB : null;
+  const held = typeof footprintGiB === "number" && Number.isFinite(footprintGiB) && footprintGiB > 0 ? footprintGiB : null;
+  if (vram === null || held === null) {
     return null;
   }
-  const spare = Math.max(0, vramGiB * 0.9 - activeModelGiB);
-  return `With the model unloaded, about ${spare.toFixed(1)} GiB of the Radeon's ${vramGiB.toFixed(1)} GiB stays free for games.`;
+  return `Unloading the model frees an estimated ${Math.min(held, vram).toFixed(1)} GiB of the Radeon's ${vram.toFixed(1)} GiB (weights, context cache and compute buffers).`;
 }
 
 /** The minutes a save attempt asks for, validated the same way the backend validates. */
@@ -276,11 +278,16 @@ export function isUseCaseValid(id: string, allowed: string[]): boolean {
 }
 
 /** One-line summary of a save result, naming every rejected field and its reason. */
-export function describeSettingsSave(applied: number, rejected: { field: string; reason?: string }[]): string {
-  if (rejected.length === 0) {
-    return applied > 0 ? `Saved (${applied} setting${applied === 1 ? "" : "s"}).` : "Nothing to change.";
+export function describeSettingsSave(
+  applied: number | null | undefined,
+  rejected: { field: string; reason?: string }[] | null | undefined
+): string {
+  const rejectedFields = Array.isArray(rejected) ? rejected : [];
+  const appliedCount = typeof applied === "number" && Number.isFinite(applied) ? applied : 0;
+  if (rejectedFields.length === 0) {
+    return appliedCount > 0 ? `Saved (${appliedCount} setting${appliedCount === 1 ? "" : "s"}).` : "Nothing to change.";
   }
-  const parts = rejected.map((r) => `${r.field}: ${r.reason ?? "rejected"}`);
+  const parts = rejectedFields.map((r) => `${r.field}: ${r.reason ?? "rejected"}`);
   return `Not saved — ${parts.join("; ")}`;
 }
 

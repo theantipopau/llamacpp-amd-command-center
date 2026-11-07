@@ -11,6 +11,7 @@
     "vite:build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:lifecycle": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/Test-DesktopLifecycle.ps1",
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {

@@ -186,6 +186,8 @@ export interface SettingsDocument {
   /** The discrete Radeon's VRAM and the active model's size, null when unknown. */
   gpu_vram_gib: number | null;
   active_model_gib: number | null;
+  /** Estimated graphics memory the loaded model holds (weights, KV cache, compute), null when unknown. */
+  active_model_footprint_gib?: number | null;
   idle_unload: { minutes: number | null; capable: boolean; installed_models: number };
   use_case: { saved: string | null; allowed: string[] };
   /** Optional so an older backend document still parses. */
@@ -257,4 +259,120 @@ export interface LibraryResultDocument {
 /** Narrow an unknown backend document to one of the typed views without throwing. */
 export function asDocument<T>(document: unknown): T | null {
   return document && typeof document === "object" ? (document as T) : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asPositiveNumber(value: unknown): number | null {
+  const number = asFiniteNumber(value);
+  return number !== null && number > 0 ? number : null;
+}
+
+function asNonNegativeCount(value: unknown): number {
+  const number = asFiniteNumber(value);
+  return number !== null && number > 0 ? Math.trunc(number) : 0;
+}
+
+function asMinutes(value: unknown): number | null {
+  const number = asFiniteNumber(value);
+  return number !== null && Number.isInteger(number) && number >= 0 && number <= 1440 ? number : null;
+}
+
+/**
+ * Normalize a settings document before it reaches React. The backend contract is
+ * additive and older builds can omit fields that were added later; a missing optional
+ * fact must render as "unknown/unavailable", never crash the whole window.
+ */
+export function asSettingsDocument(document: unknown): SettingsDocument | null {
+  const source = asRecord(document);
+  if (!source) {
+    return null;
+  }
+  const idle = asRecord(source.idle_unload);
+  const useCase = asRecord(source.use_case);
+  const allowed = Array.isArray(useCase?.allowed)
+    ? useCase.allowed.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const settings: SettingsDocument = {
+    schema_version: asFiniteNumber(source.schema_version) ?? 0,
+    generated_at: typeof source.generated_at === "string" ? source.generated_at : "",
+    install_root: typeof source.install_root === "string" ? source.install_root : "",
+    gpu_vram_gib: asPositiveNumber(source.gpu_vram_gib),
+    active_model_gib: asPositiveNumber(source.active_model_gib),
+    active_model_footprint_gib: asPositiveNumber(source.active_model_footprint_gib),
+    idle_unload: {
+      minutes: asMinutes(idle?.minutes),
+      capable: idle?.capable === true,
+      installed_models: asNonNegativeCount(idle?.installed_models)
+    },
+    use_case: {
+      saved: typeof useCase?.saved === "string" && useCase.saved.length > 0 ? useCase.saved : null,
+      allowed
+    }
+  };
+  const pause = asRecord(source.game_pause);
+  if (pause) {
+    settings.game_pause = {
+      gib: asNonNegativeCount(pause.gib),
+      capable: pause.capable === true,
+      min: asNonNegativeCount(pause.min) || 4,
+      max: asNonNegativeCount(pause.max) || 40
+    };
+  }
+  return settings;
+}
+
+function asSettingsOutcome(value: unknown): SettingsPatchOutcome | null {
+  const source = asRecord(value);
+  if (!source || typeof source.field !== "string" || source.field.length === 0) {
+    return null;
+  }
+  const outcome: SettingsPatchOutcome = { field: source.field };
+  if (typeof source.note === "string") {
+    outcome.note = source.note;
+  }
+  if (typeof source.reason === "string") {
+    outcome.reason = source.reason;
+  }
+  if ((typeof source.value === "number" && Number.isFinite(source.value)) || typeof source.value === "string") {
+    outcome.value = source.value;
+  }
+  return outcome;
+}
+
+function asSettingsOutcomes(value: unknown): SettingsPatchOutcome[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const outcomes: SettingsPatchOutcome[] = [];
+  for (const item of value) {
+    const outcome = asSettingsOutcome(item);
+    if (outcome) {
+      outcomes.push(outcome);
+    }
+  }
+  return outcomes;
+}
+
+/** Normalize a save result too; older or partial results must not make the window throw. */
+export function asSettingsSaveDocument(document: unknown): SettingsSaveDocument | null {
+  const source = asRecord(document);
+  if (!source) {
+    return null;
+  }
+  return {
+    schema_version: asFiniteNumber(source.schema_version) ?? 0,
+    generated_at: typeof source.generated_at === "string" ? source.generated_at : "",
+    applied: asSettingsOutcomes(source.applied),
+    rejected: asSettingsOutcomes(source.rejected),
+    settings: asSettingsDocument(source.settings)
+  };
 }
