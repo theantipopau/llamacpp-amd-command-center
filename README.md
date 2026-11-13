@@ -25,6 +25,14 @@
 
 <sub>The window you get when you double-click `Start-LlamaCpp.cmd`. The text menu below is still there under **More options**, and runs by itself if the window cannot open.</sub>
 
+## New in v0.3.0
+
+- **Per-model backend.** Each model can start on Vulkan or ROCm. Auto picks a default by model size and type, and your choice in the Models tab always wins. Starting a model that prefers the other backend switches runtimes for you.
+- **"Tested on this PC".** Model cards show speeds measured on your own machine by Tune (`-Action Tune -TuneAction Start`), with the build and date. Nothing is shown for a model that was never measured.
+- **Two experimental 35B mixture-of-experts models:** Qwen3.6 35B-A3B and Ornith 1.5 35B-A3B. On a 16 GB card part of each model runs from system RAM. Tune sweeps how much, and you can apply a measured value per model with `-Action Settings -SettingsPatch '{"moe_cpu_layers":{"ornith-1.5-35b-a3b":18}}'` (`"auto"` clears it). They generate well but read long prompts several times slower than the 9B. Answer quality is not tested yet.
+- **Safer runtime handling.** The server is pinned to your Radeon by name, a port already used by another program is reported instead of taken over, llama.cpp updates can be rolled back, and a memory estimate warns before a model will not fit.
+- **Desktop app.** Tray icon with close-to-tray and health monitoring, a single running copy, a Home verdict, an honest memory bar, light and dark themes, **Copy diagnostics** with your user name removed, and a check for newer llama.cpp builds. The server, chat and downloads no longer open console windows.
+
 ## New in v0.2.0
 
 - **A desktop app with a Windows installer.** A window with tabs for Home, Models, Settings and Health, one status badge, and Start, Stop, Open chat and Update buttons that stay in view while you scroll. It installs per user, needs no administrator rights, and bundles the backend it runs.

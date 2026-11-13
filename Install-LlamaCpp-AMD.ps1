@@ -172,7 +172,7 @@ function Get-CatalogJson {
     return $document
 }
 
-$script:CommandCenterVersion = '0.2.0'
+$script:CommandCenterVersion = '0.3.0'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{

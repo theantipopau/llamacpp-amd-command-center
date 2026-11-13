@@ -90,6 +90,15 @@
     <figcaption>The window you get when you double-click <code>Start-LlamaCpp.cmd</code>: one big button for what to do next, plus your graphics memory and gaming switches.</figcaption>
   </figure>
 
+  <h2>New in v0.3.0</h2>
+  <ul>
+    <li><strong>Per-model backend.</strong> Each model can start on Vulkan or ROCm. Auto picks a default by model size and type, and your choice in the Models tab always wins. Starting a model that prefers the other backend switches runtimes for you.</li>
+    <li><strong>&ldquo;Tested on this PC&rdquo;.</strong> Model cards show speeds measured on your own machine by Tune (<code>-Action Tune -TuneAction Start</code>), with the build and date. Nothing is shown for a model that was never measured.</li>
+    <li><strong>Two experimental 35B mixture-of-experts models:</strong> Qwen3.6 35B-A3B and Ornith 1.5 35B-A3B. On a 16 GB card part of each model runs from system RAM. Tune sweeps how much, and you can apply a measured value per model with <code>-Action Settings -SettingsPatch '{"moe_cpu_layers":{"ornith-1.5-35b-a3b":18}}'</code> (<code>"auto"</code> clears it). They generate well but read long prompts several times slower than the 9B. Answer quality is not tested yet.</li>
+    <li><strong>Safer runtime handling.</strong> The server is pinned to your Radeon by name, a port already used by another program is reported instead of taken over, llama.cpp updates can be rolled back, and a memory estimate warns before a model will not fit.</li>
+    <li><strong>Desktop app.</strong> Tray icon with close-to-tray and health monitoring, a single running copy, a Home verdict, an honest memory bar, light and dark themes, <strong>Copy diagnostics</strong> with your user name removed, and a check for newer llama.cpp builds. The server, chat and downloads no longer open console windows.</li>
+  </ul>
+
   <h2>Desktop app (new in v0.2.0)</h2>
   <p>A normal Windows window with tabs for Home, Models, Settings and Health. The status badge shows <strong>Running</strong>, <strong>Starting</strong>, <strong>Stopped</strong> or <strong>Asleep</strong>, and the server buttons stay in view while you scroll. A Windows installer is attached to each release; it needs no administrator rights.</p>
 
