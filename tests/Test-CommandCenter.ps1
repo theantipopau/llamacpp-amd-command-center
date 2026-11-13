@@ -404,8 +404,11 @@ try {
     $splitPreflight = Get-VramPreflight -Model $qwen -Hardware $hw16 -Context 65536 -UsedGiB 1.2
     Assert-True (($null -ne $splitPreflight.Estimate) -and ($splitPreflight.WeightsGiB -gt 0) -and ($splitPreflight.KvGiB -gt 0) -and ($splitPreflight.ComputeGiB -gt 0) -and ($splitPreflight.HeadroomGiB -gt 0) -and ($splitPreflight.Verdict -in @('fits', 'tight', 'will_not_fit'))) 'Preflight exposes the four split components and the verdict, not just one lump'
     Assert-True ($null -eq (Get-VramEstimateDocument -Hardware ([pscustomobject]@{ HasAmdGpu = $false }))) 'State carries no estimate on a machine without a Radeon'
+    # CI runners have no Radeon, so the real hardware scan correctly yields no estimate there.
+    # Check the property on State, and the document itself against a fake 16 GB Radeon.
     $stateWithModel = Get-ApplicationState
-    Assert-True (($stateWithModel.PSObject.Properties.Name -contains 'vram_estimate') -and ($null -ne $stateWithModel.vram_estimate) -and ($stateWithModel.vram_estimate.estimate -eq $true)) 'State exposes the fit estimate as typed JSON for the desktop app'
+    $radeonDoc = Get-VramEstimateDocument -Hardware ([pscustomobject]@{ HasAmdGpu = $true; MaxAmdVramGiB = 15.9 })
+    Assert-True (($stateWithModel.PSObject.Properties.Name -contains 'vram_estimate') -and ($null -ne $radeonDoc) -and ($radeonDoc.estimate -eq $true)) 'State exposes the fit estimate as typed JSON for the desktop app'
 
     $desk = Join-Path $work 'desktop'
     New-Item -ItemType Directory -Path $desk -Force | Out-Null
