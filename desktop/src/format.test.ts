@@ -9,6 +9,10 @@ import {
   describeLibraryFit,
   describeLibraryResult,
   describeLibraryState,
+  describeMoeChoice,
+  localDate,
+  measuredMoeLayers,
+  sortLibraryModels,
   describeMissingBackend,
   describeModel,
   describeOverall,
@@ -402,7 +406,7 @@ describe("model library display rules", () => {
   it("derives per-model state from the backend fields, never from guesses", () => {
     expect(describeLibraryState({ ...base, active: true })).toBe("Active now");
     expect(describeLibraryState({ ...base, runtime_blocker: "needs a newer llama.cpp" })).toContain("Blocked");
-    expect(describeLibraryState({ ...base, downloaded: true })).toContain("activate");
+    expect(describeLibraryState({ ...base, downloaded: true })).toBe("Downloaded");
     expect(describeLibraryState(base)).toBe("Not downloaded");
   });
 
@@ -492,7 +496,7 @@ describe("per-model backend and receipts", () => {
     experimental: false, downloaded: true, active: false, runtime_blocker: "", fit_status: "EXCELLENT", gpu_resident: true
   };
   const receipt = {
-    backend: "Vulkan", runtime_tag: "b12110", job_id: "tune-1", measured_at: "2026-11-04T23:39:16Z", gpu_layers: 99,
+    backend: "Vulkan", runtime_tag: "b12110", job_id: "tune-1", measured_at: "2026-11-04T12:00:00Z", gpu_layers: 99,
     prompt: [{ tokens: 2048, tokens_per_second: 3140.7, noisy: false }, { tokens: 8192, tokens_per_second: 3027.3, noisy: true }],
     decode: { tokens: 128, tokens_per_second: 94.7, noisy: false }, unreliable: false
   };
@@ -519,6 +523,29 @@ describe("per-model backend and receipts", () => {
     expect(line).toContain("generation 94.7 tok/s");
     expect(line).toContain("measured 2026-11-04");
     expect(describeReceipt({ ...receipt, unreliable: true })).toContain("Marked unreliable.");
+  });
+
+  it("orders the library: active, then downloaded, then the rest", () => {
+    const models = [
+      { ...base, id: "a", downloaded: false }, { ...base, id: "b", downloaded: true },
+      { ...base, id: "c", active: true, downloaded: true }, { ...base, id: "d", downloaded: true }
+    ];
+    expect(sortLibraryModels(models).map((m) => m.id)).toEqual(["c", "b", "d", "a"]);
+  });
+
+  it("dates a receipt in local time and survives a junk timestamp", () => {
+    expect(localDate("not a date")).toBe("");
+    expect(localDate("2026-11-04T12:00:00Z")).toMatch(/^2026-11-0[45]$/);
+  });
+
+  it("explains the expert-layer choice from the setting and the measurement", () => {
+    const moe = { ...base, moe: true, receipts: [{ ...receipt, cpu_moe_layers: 18 }] };
+    expect(measuredMoeLayers(moe)).toBe(18);
+    expect(measuredMoeLayers(base)).toBeNull();
+    expect(describeMoeChoice(moe)).toContain("Tune measured 18");
+    expect(describeMoeChoice({ ...moe, moe_cpu_layers: 18 })).toContain("the value Tune measured");
+    expect(describeMoeChoice({ ...moe, moe_cpu_layers: 22 })).toContain("your choice");
+    expect(describeMoeChoice({ ...base, moe: true })).toContain("Run Tune");
   });
 
   it("names the expert layers kept on the CPU for a MoE receipt", () => {

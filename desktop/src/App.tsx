@@ -3,6 +3,9 @@ import * as api from "./api";
 import logo from "./assets/logo.png";
 import {
   BACKEND_CHOICES,
+  describeMoeChoice,
+  measuredMoeLayers,
+  sortLibraryModels,
   describeRollback,
   describeRuntimeUpdate,
   redactPaths,
@@ -66,7 +69,7 @@ const START_DEADLINE_MS = 240000;
 const LIBRARY_POLL_MS = 15000;
 const LIBRARY_POLL_LIMIT = 240;
 
-type Busy = null | "updates" | "rollback" | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `backend:${string}` | `library:${string}`;
+type Busy = null | "updates" | "rollback" | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `model:${string}` | `library:${string}`;
 type Tab = "home" | "models" | "settings" | "health";
 
 const TABS: Array<[Tab, string]> = [
@@ -504,23 +507,34 @@ export default function App() {
 
   /** Save one model's backend choice through the backend's settings patch, then re-read the library. */
   async function onBackendChoice(model: LibraryModel, choice: BackendChoice) {
+    await saveModelChoice(model, { model_backends: { [model.id]: choice } }, `backend set to ${choice}`, "backend choice");
+  }
+
+  /** Expert layers kept on the CPU for a MoE model: a number, or "auto" to let llama.cpp decide. */
+  async function onMoeChoice(model: LibraryModel, value: string) {
+    const layers = value === "auto" ? "auto" : Number(value);
+    const label = layers === "auto" ? "expert layers left to llama.cpp" : `${layers} expert layers on the CPU`;
+    await saveModelChoice(model, { moe_cpu_layers: { [model.id]: layers } }, label, "expert-layer choice");
+  }
+
+  /** Save one per-model choice through the backend's settings patch, then re-read the library. */
+  async function saveModelChoice(model: LibraryModel, patch: object, done: string, what: string) {
     if (busyRef.current !== null) {
       return;
     }
-    busyRef.current = `backend:${model.id}`;
-    setBusy(`backend:${model.id}`);
-    const result = await api.saveSettings(JSON.stringify({ model_backends: { [model.id]: choice } }));
+    busyRef.current = `model:${model.id}`;
+    setBusy(`model:${model.id}`);
+    const result = await api.saveSettings(JSON.stringify(patch));
     const document = asSettingsSaveDocument(result.document);
     if (!result.ok || !document) {
       setFailure(result);
-      setLibraryNote({ message: "The backend choice did not reach the backend. Nothing was saved.", ok: false });
+      setLibraryNote({ message: `The ${what} did not reach the backend. Nothing was saved.`, ok: false });
     } else {
-      const message = describeSettingsSave(document.applied.length, document.rejected);
       const running = phase === "running" || phase === "loading";
       setLibraryNote({
         message: document.rejected.length === 0
-          ? `${model.name}: backend set to ${choice}. ${running && model.active ? "It applies the next time the AI starts." : "It applies when this model next starts."}`
-          : message,
+          ? `${model.name}: ${done}. ${running && model.active ? "It applies the next time the AI starts." : "It applies when this model next starts."}`
+          : describeSettingsSave(document.applied.length, document.rejected),
         ok: document.rejected.length === 0
       });
     }
@@ -883,7 +897,7 @@ export default function App() {
             {library ? (
               <>
                 <ul className="models">
-                  {library.models.map((model) => {
+                  {sortLibraryModels(library.models).map((model) => {
                     const operation = libraryOperation(model);
                     return (
                       <li key={model.id} className={model.active ? "current" : undefined}>
@@ -911,6 +925,29 @@ export default function App() {
                               </select>
                             </label>
                             <span className="muted">{describeBackendChoice(model)}</span>
+                          </div>
+                        ) : null}
+                        {model.downloaded && model.moe ? (
+                          <div className="backend-choice">
+                            <label>
+                              Expert layers on CPU{" "}
+                              <select
+                                value={typeof model.moe_cpu_layers === "number" ? String(model.moe_cpu_layers) : "auto"}
+                                onChange={(event) => void onMoeChoice(model, event.target.value)}
+                                disabled={busy !== null}
+                                aria-label={`Expert layers on the CPU for ${model.name}`}
+                              >
+                                <option value="auto">Auto (llama.cpp decides)</option>
+                                {Array.from(new Set([measuredMoeLayers(model), model.moe_cpu_layers]
+                                  .filter((n): n is number => typeof n === "number")))
+                                  .map((n) => (
+                                    <option key={n} value={String(n)}>
+                                      {n === measuredMoeLayers(model) ? `${n} (fastest in Tune)` : String(n)}
+                                    </option>
+                                  ))}
+                              </select>
+                            </label>
+                            <span className="muted">{describeMoeChoice(model)}</span>
                           </div>
                         ) : null}
                         {describeReceipts(model).length > 0 ? (
@@ -1092,37 +1129,12 @@ export default function App() {
         {tab === "health" ? (
           <section className="card">
             <h2>Health</h2>
+            <h3>Diagnostics</h3>
             <div className="actions">
               <button type="button" onClick={onDiagnose} disabled={busy !== null}>
                 {busy === "diagnose" ? "Checking…" : "Run diagnostics"}
               </button>
             </div>
-            <h3>llama.cpp builds</h3>
-            <div className="actions">
-              <button type="button" onClick={() => void onCheckUpdates()} disabled={busy !== null}>
-                {busy === "updates" ? "Checking…" : "Check for newer builds"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void onRollback()}
-                disabled={busy !== null || phase !== "stopped"}
-                title={phase !== "stopped" ? "Stop the AI first" : "Go back to the previous build"}
-              >
-                {busy === "rollback" ? "Rolling back…" : "Roll back to the previous build"}
-              </button>
-            </div>
-            {updatesDoc ? (
-              <ul className="builds">
-                {updatesDoc.updates.map((entry) => (
-                  <li key={`${entry.backend}-${entry.installed_tag}`}>{describeRuntimeUpdate(entry)}</li>
-                ))}
-              </ul>
-            ) : null}
-            {buildNote ? (
-              <p className={buildNote.ok ? "verdict" : "warning"} role="status">
-                {buildNote.message}
-              </p>
-            ) : null}
             {diagnostics ? (
               <>
                 <p className="verdict" role="status">{describeDiagnostics(diagnostics)}</p>
@@ -1170,6 +1182,32 @@ export default function App() {
             ) : (
               <p>Press “Run diagnostics” to ask the backend for its four health sections.</p>
             )}
+            <h3>llama.cpp builds</h3>
+            <div className="actions">
+              <button type="button" onClick={() => void onCheckUpdates()} disabled={busy !== null}>
+                {busy === "updates" ? "Checking…" : "Check for newer builds"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void onRollback()}
+                disabled={busy !== null || phase !== "stopped"}
+                title={phase !== "stopped" ? "Stop the AI first" : "Go back to the previous build"}
+              >
+                {busy === "rollback" ? "Rolling back…" : "Roll back to the previous build"}
+              </button>
+            </div>
+            {updatesDoc ? (
+              <ul className="builds">
+                {updatesDoc.updates.map((entry) => (
+                  <li key={`${entry.backend}-${entry.installed_tag}`}>{describeRuntimeUpdate(entry)}</li>
+                ))}
+              </ul>
+            ) : null}
+            {buildNote ? (
+              <p className={buildNote.ok ? "verdict" : "warning"} role="status">
+                {buildNote.message}
+              </p>
+            ) : null}
           </section>
         ) : null}
       </div>

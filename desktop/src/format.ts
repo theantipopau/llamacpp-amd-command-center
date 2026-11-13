@@ -340,7 +340,7 @@ export function describeLibraryState(model: LibraryModel): string {
     return `Blocked: the installed runtime cannot run it`;
   }
   if (model.downloaded) {
-    return "Downloaded — activate to switch to it";
+    return "Downloaded";
   }
   return "Not downloaded";
 }
@@ -553,6 +553,44 @@ export function describeBackendChoice(model: LibraryModel): string {
     : `Starts on ${backend} (default${model.backend_reason ? `: ${model.backend_reason.replace(/\.$/, "")}` : ""}).`;
 }
 
+/** The local calendar date of a UTC timestamp, as YYYY-MM-DD; "" when it does not parse. */
+export function localDate(timestamp: string): string {
+  const when = new Date(timestamp);
+  if (!timestamp || Number.isNaN(when.getTime())) {
+    return "";
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`;
+}
+
+/** Library order: the active model first, then downloaded ones, then the rest, otherwise as listed. */
+export function sortLibraryModels(models: LibraryModel[]): LibraryModel[] {
+  const rank = (model: LibraryModel) => (model.active ? 0 : model.downloaded ? 1 : 2);
+  return models.map((model, index) => ({ model, index }))
+    .sort((a, b) => rank(a.model) - rank(b.model) || a.index - b.index)
+    .map((entry) => entry.model);
+}
+
+/** The expert-layer count Tune measured as fastest for this model, if any. */
+export function measuredMoeLayers(model: LibraryModel): number | null {
+  const found = (model.receipts ?? []).find((receipt) => typeof receipt.cpu_moe_layers === "number");
+  return found && typeof found.cpu_moe_layers === "number" ? found.cpu_moe_layers : null;
+}
+
+/** One line under the expert-layer control: what starts, and where the number came from. */
+export function describeMoeChoice(model: LibraryModel): string {
+  const chosen = model.moe_cpu_layers;
+  const measured = measuredMoeLayers(model);
+  if (typeof chosen !== "number") {
+    return measured === null
+      ? "llama.cpp decides. Run Tune to measure the fastest setting on this PC."
+      : `llama.cpp decides. Tune measured ${measured} as fastest in a short benchmark; the full server may want a few more.`;
+  }
+  return chosen === measured
+    ? `Starts with ${chosen} expert layers on the CPU (the value Tune measured).`
+    : `Starts with ${chosen} expert layers on the CPU (your choice).`;
+}
+
 function speedText(speed: ReceiptSpeed): string {
   return `${speed.tokens_per_second.toFixed(1)} tok/s${speed.noisy ? " (noisy)" : ""}`;
 }
@@ -567,7 +605,7 @@ export function describeReceipt(receipt: LibraryReceipt): string {
   if (receipt.decode) {
     parts.push(`generation ${speedText(receipt.decode)}`);
   }
-  const date = /^\d{4}-\d{2}-\d{2}/.exec(receipt.measured_at)?.[0];
+  const date = localDate(receipt.measured_at);
   const when = date ? `, measured ${date}` : "";
   const flag = receipt.unreliable ? " Marked unreliable." : "";
   const experts = typeof receipt.cpu_moe_layers === "number" ? ` (expert layers on CPU: ${receipt.cpu_moe_layers})` : "";

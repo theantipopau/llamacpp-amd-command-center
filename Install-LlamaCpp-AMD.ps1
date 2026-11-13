@@ -6568,9 +6568,13 @@ function Set-SettingsFromDocument {
         $result['settings'] = Get-SettingsDocument
         return [pscustomobject]$result
     }
-    if ($null -eq $parsed -or $parsed.PSObject.Properties.Name -notcontains 'idle_unload') {
-        $result['rejected'] += @([pscustomobject]@{ field = 'idle_unload'; reason = 'The change did not say what to do with idle unload.' })
-    } else {
+    # Every field is optional, so the desktop can save one choice (a model's backend) without
+    # resending the rest. A patch that names no known setting at all is still rejected.
+    $knownFields = @('idle_unload', 'use_case', 'game_pause', 'model_backends', 'moe_cpu_layers', 'tune_preset_selection')
+    if ($null -eq $parsed -or @($parsed.PSObject.Properties.Name | Where-Object { $knownFields -contains $_ }).Count -eq 0) {
+        $result['rejected'] += @([pscustomobject]@{ field = 'patch'; reason = 'The change did not name any setting this version knows.' })
+    }
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'idle_unload') {
         $idle = $parsed.idle_unload
         if ($idle.PSObject.Properties.Name -notcontains 'minutes' -or $null -eq $idle.minutes) {
             $result['rejected'] += @([pscustomobject]@{ field = 'idle_unload.minutes'; reason = 'No minutes value was sent.' })
@@ -6592,9 +6596,7 @@ function Set-SettingsFromDocument {
             }
         }
     }
-    if ($null -eq $parsed -or $parsed.PSObject.Properties.Name -notcontains 'use_case') {
-        $result['rejected'] += @([pscustomobject]@{ field = 'use_case'; reason = 'The change did not say which use case to save.' })
-    } else {
+    if ($null -ne $parsed -and $parsed.PSObject.Properties.Name -contains 'use_case') {
         $useCase = [string]$parsed.use_case
         $allowed = @('chat', 'coding', 'images', 'fast', 'quality')
         if ($allowed -notcontains $useCase) {
@@ -6810,6 +6812,8 @@ function Get-LibraryDocument {
             backend_source = [string]$preference.source
             backend_reason = [string]$preference.reason
             backend_override = Get-ModelBackendOverride -ModelId ([string]$model.Id)
+            moe = (($model.PSObject.Properties.Name -contains 'Moe') -and [bool]$model.Moe)
+            moe_cpu_layers = Get-MoeCpuLayers -ModelId ([string]$model.Id)
             receipts = @(if ($receipts.models.ContainsKey([string]$model.Id)) { @($receipts.models[[string]$model.Id].Values | Sort-Object backend) } else { @() })
         }
     }

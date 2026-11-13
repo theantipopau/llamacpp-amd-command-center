@@ -304,6 +304,10 @@ export interface LibraryModel {
   backend_reason?: string;
   /** "" when the user has not chosen; otherwise Vulkan or ROCm. */
   backend_override?: string;
+  /** Mixture-of-experts model: part of it can run from system RAM. */
+  moe?: boolean;
+  /** The opt-in expert layers kept on the CPU; null when llama.cpp decides. */
+  moe_cpu_layers?: number | null;
   receipts?: LibraryReceipt[];
 }
 

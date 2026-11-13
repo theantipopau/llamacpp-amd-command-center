@@ -11,6 +11,7 @@
   --ok: #5fd38a;
   --code-bg: #0d1116;
   --button-bg: #1f2830;
+  --reserve: #556675;
   font-family: "Segoe UI", system-ui, sans-serif;
 }
 
@@ -27,6 +28,7 @@
   --ok: #1f6b43;
   --code-bg: #f0ebe1;
   --button-bg: #ebe5d8;
+  --reserve: #b9b0a0;
 }
 
 @media (prefers-color-scheme: light) {
@@ -43,6 +45,7 @@
     --ok: #1f6b43;
     --code-bg: #f0ebe1;
     --button-bg: #ebe5d8;
+    --reserve: #b9b0a0;
   }
 }
 
@@ -270,7 +273,7 @@ h3 {
 .vram-weights { background: var(--ok); }
 .vram-cache { background: repeating-linear-gradient(45deg, var(--ok) 0 3px, transparent 3px 6px); }
 .vram-compute { background: repeating-linear-gradient(90deg, var(--ok) 0 2px, transparent 2px 5px); }
-.vram-reserve { background: var(--line); }
+.vram-reserve { background: var(--reserve); }
 
 .vram-track.over .vram-weights { background: var(--danger); }
 .vram-track.over .vram-cache { background: repeating-linear-gradient(45deg, var(--danger) 0 3px, transparent 3px 6px); }
@@ -618,4 +621,12 @@ select {
   padding: 0;
   border: 0;
   background: none;
+}
+
+.card h3 {
+  margin: 18px 0 8px;
+}
+
+.card h2 + h3 {
+  margin-top: 4px;
 }

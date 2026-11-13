@@ -1068,6 +1068,9 @@ try {
     Assert-True ((ConvertTo-ServerPresetText -Alias 'x' -ModelArguments $moeSplit.Model) -match "(?m)^n-cpu-moe = 18$") 'the router preset carries the expert layers with the model flags'
     $moePatchOk = Set-SettingsFromDocument -SettingsPatchText '{"moe_cpu_layers":{"qwen3.6-35b-a3b":22}}'
     Assert-True ((@($moePatchOk.applied | Where-Object { $_.field -eq 'moe_cpu_layers.qwen3.6-35b-a3b' }).Count -eq 1) -and ((Get-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b') -eq 22)) 'the settings patch saves a layer count for a MoE model'
+    Assert-True (@($moePatchOk.rejected).Count -eq 0) 'a patch with one setting is not rejected for the settings it leaves out'
+    $emptyPatch = Set-SettingsFromDocument -SettingsPatchText '{"unknown_thing":1}'
+    Assert-True ((@($emptyPatch.rejected | Where-Object { $_.field -eq 'patch' }).Count -eq 1) -and (@($emptyPatch.applied).Count -eq 0)) 'a patch naming no known setting is rejected'
     $moePatchBad = Set-SettingsFromDocument -SettingsPatchText '{"moe_cpu_layers":{"qwen3-4b":10,"qwen3.6-35b-a3b":-1}}'
     $moeRejected = @($moePatchBad.rejected | ForEach-Object { [string]$_.field })
     Assert-True (($moeRejected -contains 'moe_cpu_layers.qwen3-4b') -and ($moeRejected -contains 'moe_cpu_layers.qwen3.6-35b-a3b') -and ($null -eq (Get-MoeCpuLayers -ModelId 'qwen3-4b')) -and ((Get-MoeCpuLayers -ModelId 'qwen3.6-35b-a3b') -eq 22)) 'a non-MoE model or a negative count is rejected and changes nothing'
