@@ -366,6 +366,28 @@ export function libraryOperation(model: LibraryModel): LibraryOperation {
   return "download";
 }
 
+/** One button on a model card and the exact operation it runs. */
+export interface LibraryButton {
+  label: string;
+  operation: "download" | "activate" | "remove";
+}
+
+/** The buttons a model card shows. Each names its own operation, so "Switch" can never run
+ * a different one: v0.2.0 and v0.3.0 sent Switch through the remove path and its prompt. */
+export function libraryButtons(model: LibraryModel): LibraryButton[] {
+  const operation = libraryOperation(model);
+  if (operation === "download") {
+    return [{ label: "Download", operation: "download" }];
+  }
+  if (operation === "remove") {
+    return [
+      { label: "Switch to this model", operation: "activate" },
+      { label: "Remove from disk", operation: "remove" }
+    ];
+  }
+  return [];
+}
+
 /** What the update button says a newer runtime would unlock — only names the
  * catalogue itself listed; never invents model names or counts. */
 export function describeUnlockableModels(models: UnlockableModel[] | null | undefined): string | null {

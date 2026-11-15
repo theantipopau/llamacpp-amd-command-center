@@ -9,6 +9,7 @@ import {
   describeLibraryFit,
   describeLibraryResult,
   describeLibraryState,
+  libraryButtons,
   describeMoeChoice,
   localDate,
   measuredMoeLayers,
@@ -487,6 +488,28 @@ describe("model library display rules", () => {
         total_gib: 0, verdict: "fits", confidence: "high"
       }).available
     ).toBe(false);
+  });
+});
+
+describe("model card buttons", () => {
+  const base = {
+    id: "qwen3.5-9b", name: "Qwen3.5 9B", alias: "qwen3.5:9b", approx_gib: 6.2, tools: true, vision: true,
+    experimental: false, downloaded: true, active: false, runtime_blocker: "", fit_status: "EXCELLENT", gpu_resident: true
+  };
+
+  it("Switch activates and only Remove removes (regression: Switch used to delete the model)", () => {
+    const buttons = libraryButtons(base);
+    expect(buttons).toEqual([
+      { label: "Switch to this model", operation: "activate" },
+      { label: "Remove from disk", operation: "remove" }
+    ]);
+    expect(libraryConfirmText(base, "activate")).toBeNull();
+  });
+
+  it("offers Download for a missing model and nothing for the active or a blocked one", () => {
+    expect(libraryButtons({ ...base, downloaded: false })).toEqual([{ label: "Download", operation: "download" }]);
+    expect(libraryButtons({ ...base, active: true })).toEqual([]);
+    expect(libraryButtons({ ...base, runtime_blocker: "needs a newer llama.cpp" })).toEqual([]);
   });
 });
 

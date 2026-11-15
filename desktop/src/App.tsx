@@ -3,6 +3,8 @@ import * as api from "./api";
 import logo from "./assets/logo.png";
 import {
   BACKEND_CHOICES,
+  libraryButtons,
+  type LibraryButton,
   describeMoeChoice,
   measuredMoeLayers,
   sortLibraryModels,
@@ -633,11 +635,10 @@ export default function App() {
     }
   }, [library, pendingDownload]);
 
-  async function onLibraryOperation(model: LibraryModel) {
+  async function onLibraryOperation(model: LibraryModel, operation: LibraryButton["operation"]) {
     if (busyRef.current !== null) {
       return;
     }
-    const operation = libraryOperation(model);
     const confirmText = libraryConfirmText(model, operation);
     if (confirmText !== null && !window.confirm(confirmText)) {
       setLibraryNote({ message: `Nothing was ${operation === "remove" ? "deleted" : "downloaded"}.`, ok: true });
@@ -659,6 +660,10 @@ export default function App() {
       setLibraryNote({ message: "The change did not reach the backend.", ok: false });
     } else {
       const described = describeLibraryResult(document.status, document.detail);
+      if (operation === "activate" && document.status === "activated" && (phase === "running" || phase === "loading")) {
+        // The running server keeps serving the old model until it restarts.
+        described.message += " The AI is still running the previous model: stop and start it to load this one.";
+      }
       setLibraryNote(described);
       if (document.library) {
         applyLibraryDocument(document.library);
@@ -964,21 +969,16 @@ export default function App() {
                         )}
                         {operation === "active" ? null : (
                           <div className="actions">
-                            {operation === "download" ? (
-                              <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                                Download
+                            {libraryButtons(model).map((button) => (
+                              <button
+                                key={button.operation}
+                                type="button"
+                                onClick={() => void onLibraryOperation(model, button.operation)}
+                                disabled={busy !== null}
+                              >
+                                {button.label}
                               </button>
-                            ) : null}
-                            {operation === "remove" ? (
-                              <>
-                                <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                                  Switch to this model
-                                </button>
-                                <button type="button" onClick={() => void onLibraryOperation(model)} disabled={busy !== null}>
-                                  Remove from disk
-                                </button>
-                              </>
-                            ) : null}
+                            ))}
                             {operation === "blocked" ? (
                               <button type="button" disabled title={model.runtime_blocker || "Blocked by the installed runtime"}>
                                 Not available on this runtime

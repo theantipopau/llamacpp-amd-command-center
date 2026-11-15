@@ -4575,6 +4575,17 @@ function Skip-GgufArrayValue {
         if ($bytes -gt 0) { [void]$Reader.BaseStream.Seek($bytes, [IO.SeekOrigin]::Current) }
         return
     }
+    if ($ItemType -eq 8) {
+        # Tokenizer vocabularies hold ~150k strings: read each length and seek past it. Decoding
+        # every string through Read-GgufStringValue took 5 s per file and froze State.
+        $stream = $Reader.BaseStream
+        for ($i = 0; $i -lt $Count; $i++) {
+            $length = if ($Version -eq 1) { [long]$Reader.ReadUInt32() } else { [long]$Reader.ReadUInt64() }
+            if ($length -lt 0 -or $length -gt 104857600) { throw "Invalid GGUF string length $length." }
+            [void]$stream.Seek($length, [IO.SeekOrigin]::Current)
+        }
+        return
+    }
     for ($i = 0; $i -lt $Count; $i++) {
         if ($ItemType -eq 8) { [void](Read-GgufStringValue -Reader $Reader -Version $Version) }
         elseif ($ItemType -eq 9) {
@@ -6831,6 +6842,19 @@ function Get-LibraryDocument {
     }
 }
 
+function Add-ActionLogEntry {
+    # One JSON line per desktop library change in logs\actions.jsonl (download, activate,
+    # remove), so a missing model can be traced. JSON actions exit before run logging starts,
+    # so without this nothing recorded them. Never throws: logging must not block the change.
+    param([string] $Action, [string] $ModelId, [string] $Status, [string] $Detail)
+    try {
+        $dir = Join-Path $InstallRoot 'logs'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $line = ConvertTo-Json -Compress -InputObject ([ordered]@{ at = (Get-Date).ToUniversalTime().ToString('o'); action = $Action; model_id = $ModelId; status = $Status; detail = $Detail })
+        [IO.File]::AppendAllText((Join-Path $dir 'actions.jsonl'), $line + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 function Invoke-LibraryAction {
     # The write side of the model library for the desktop window: download, activate or
     # remove one catalog model, then answer with one typed result document. Every change
@@ -6893,6 +6917,7 @@ function Invoke-LibraryAction {
         $result['status'] = 'failed'
         $result['detail'] = [string]$_.Exception.Message
     }
+    Add-ActionLogEntry -Action "library:$LibraryAction" -ModelId $ModelIdRequested -Status ([string]$result['status']) -Detail ([string]$result['detail'])
     $result['library'] = Get-LibraryDocument
     return [pscustomobject]$result
 }

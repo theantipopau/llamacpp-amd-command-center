@@ -1055,6 +1055,9 @@ try {
     Set-TunePresetSelection -ModelId 'qwen3-4b' -Preset 'none'
     $clearedPreset = Get-ServerArguments -ActiveModel $tuneActive -EffectiveContext 32768
     Assert-True (($clearedPreset -join ' ') -eq ($beforePreset -join ' ')) 'clearing the selection restores the exact previous command line'
+    Add-ActionLogEntry -Action 'library:remove' -ModelId 'qwen3-4b' -Status 'removed' -Detail 'test'
+    $actionLine = @(Get-Content -LiteralPath (Join-Path $tuneRoot 'logs\actions.jsonl'))[-1] | ConvertFrom-Json
+    Assert-True (($actionLine.action -eq 'library:remove') -and ($actionLine.model_id -eq 'qwen3-4b') -and ($actionLine.status -eq 'removed')) 'library changes are recorded in logs\actions.jsonl'
     Write-Host 'MoE expert offload setting (opt-in)'
     $moeActive = [pscustomobject]@{ id = 'qwen3.6-35b-a3b'; model_path = (Join-Path $tuneRoot 'models\dummy.gguf'); mmproj_path = ''; alias = 'qwen3.6:35b-a3b'; reasoning = $false; tool_calling = $false; thinking = $false }
     $moeBefore = Get-ServerArguments -ActiveModel $moeActive -EffectiveContext 32768

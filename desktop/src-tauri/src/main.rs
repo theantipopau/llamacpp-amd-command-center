@@ -563,7 +563,8 @@ fn start_health_monitor(app: AppHandle) {
     });
 }
 
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_state(app: AppHandle) -> BackendResult {
     let result = get_state_inner();
     if let Some(document) = result.document.as_ref() {
@@ -661,18 +662,21 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_recommendations() -> BackendResult {
     run_backend("Recommend", "recommend", &[])
 }
 
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_diagnostics() -> BackendResult {
     run_backend("Diagnose", "diagnose", &[])
 }
 
 /// Cheap liveness probe: no hardware scan, safe to poll while a model loads.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn runtime_health() -> BackendResult {
     run_backend(
         "Runtime",
@@ -684,7 +688,8 @@ fn runtime_health() -> BackendResult {
 /// Start the server through the supported adapter entry point, hidden. Its output goes
 /// to `<install root>\\logs\\desktop-server.log`, so no terminal window is opened. The
 /// port-ownership guard and the loader diagnostics live in the backend, not here.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn start_server() -> BackendResult {
     // One Start at a time: the tray and the window can race, and two health checks that
     // both see "stopped" would otherwise try to start two servers.
@@ -829,7 +834,8 @@ fn start_server() -> BackendResult {
 
 /// Stop the server through the adapter. Without `force` the backend only reports that a
 /// confirmation is required; nothing is killed until the user confirms.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn stop_server(force: bool) -> BackendResult {
     let mut extra = vec!["-RuntimeAction".to_string(), "stop".to_string()];
     if force {
@@ -857,7 +863,8 @@ fn shutdown_owned_processes() {
 /// call asks the backend (it answers `requires_confirmation` and downloads nothing);
 /// after the user confirms the window sends `force`, which delegates to the
 /// backend's single-source updater (staged download, backup, launcher rebuild).
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn update_runtime(force: bool) -> BackendResult {
     let mut extra = vec!["-RuntimeAction".to_string(), "update".to_string()];
     if force {
@@ -889,7 +896,8 @@ fn copy_to_clipboard(text: String) -> Result<(), String> {
 
 /// Newest-available check for each installed backend (`-RuntimeAction updates`). Read-only:
 /// it asks GitHub for the latest tag (cached six hours by the backend) and downloads nothing.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_runtime_updates() -> BackendResult {
     run_backend(
         "Runtime",
@@ -901,7 +909,8 @@ fn get_runtime_updates() -> BackendResult {
 /// Point llama.cpp back at the previous build of the active backend (`-RuntimeAction
 /// rollback`). The backend would restart a running server in a visible console, which this
 /// window never opens, so a running server is refused here and the user stops it first.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn rollback_runtime() -> BackendResult {
     let health = runtime_health();
     let state = health
@@ -933,7 +942,8 @@ fn rollback_runtime() -> BackendResult {
 
 /// Read-only settings document (`-Action Settings`): what the user can change and what the
 /// installed runtime actually supports.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_settings() -> BackendResult {
     run_backend("Settings", "settings:read", &[])
 }
@@ -941,7 +951,8 @@ fn get_settings() -> BackendResult {
 /// Save one settings patch through the backend's own single-source helpers. The patch is a
 /// JSON string the backend validates field by field; its result document lists what was
 /// applied and what was rejected, so the UI can show both honestly.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn save_settings(patch: String) -> BackendResult {
     run_backend(
         "Settings",
@@ -952,7 +963,8 @@ fn save_settings(patch: String) -> BackendResult {
 
 /// Read-only model library document (`-Action Library`): every catalog model with its
 /// downloaded/active state, fit and runtime blockers.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn get_library() -> BackendResult {
     run_backend("Library", "library:read", &[])
 }
@@ -960,7 +972,8 @@ fn get_library() -> BackendResult {
 /// Activation and removal are quick: answer synchronously through the adapter's own
 /// helpers (`-LibraryAction activate|remove -ModelId <id>`). The window already asked the
 /// user for confirmation before calling this.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn library_change(action: String, model_id: String) -> BackendResult {
     run_backend(
         "Library",
@@ -972,7 +985,8 @@ fn library_change(action: String, model_id: String) -> BackendResult {
 /// Start the AI through this app's tracked launcher when it is off, then run the install's
 /// own `Chat.cmd` hidden. Chat.cmd still waits for the model and opens the chat browser,
 /// but it cannot open a second server console: the app already owns the hidden server.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn open_chat() -> BackendResult {
     let root = install_root();
     let root_text = root.display().to_string();
@@ -1067,7 +1081,8 @@ fn open_chat() -> BackendResult {
 /// that carries the refreshed library), then run the real transfer hidden through the
 /// proven `-Action Models -ModelId <id>` path. The window keeps polling the library; no
 /// second console window is opened or left behind.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn download_model(model_id: String) -> BackendResult {
     let root = install_root();
     let root_text = root.display().to_string();
@@ -1153,7 +1168,8 @@ fn download_model(model_id: String) -> BackendResult {
 
 /// Where the backend lives, and every location that was checked. The UI shows this when
 /// the backend is unavailable instead of inventing a status.
-#[tauri::command]
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
 fn backend_info() -> BackendResult {
     let root = install_root();
     let candidates = script_candidates();
