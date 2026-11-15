@@ -630,3 +630,7 @@ select {
 .card h2 + h3 {
   margin-top: 4px;
 }
+
+.model-group + .model-group {
+  margin-top: 14px;
+}

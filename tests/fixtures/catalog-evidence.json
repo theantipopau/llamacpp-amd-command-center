@@ -1,5 +1,5 @@
 {
- "checked_utc": "2026-11-07T09:41:32Z",
+ "checked_utc": "2026-11-15T23:22:03Z",
  "checked_by": "tests/fixtures/refresh note: captured from the Hugging Face API (model metadata + tree at pinned revision); see docs/research/upstream-evidence.md",
  "files": [
   {
@@ -166,6 +166,36 @@
    "projector_bytes": 902822240,
    "projector_sha256": "1921a36a85aee56cd2abd27f46701802c9d85a33474792e600df6c3b282a135d",
    "approx_gib_recorded": 21.06
+  },
+  {
+   "model_id": "qwen3.8-27b-gsq",
+   "repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
+   "revision": "d562806dbafae37109975e970aae91b43e73b440",
+   "gated": false,
+   "license": "apache-2.0",
+   "last_modified": "2026-09-02T09:11:34.000Z",
+   "file": "Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf",
+   "file_bytes": 10094357632,
+   "file_sha256": "fdfcb6a29b11188956dfbfd904223588a6c1b77eb250c3e8a36e1bd269df91f7",
+   "projector": "mmproj-Qwen3.8-27B-BF16.gguf",
+   "projector_bytes": 931146528,
+   "projector_sha256": "13cb7bebccbd04afc8f4090cb949ecf8937cdf7377c5799b1a0c594e7c0d3e16",
+   "approx_gib_recorded": 10.27
+  },
+  {
+   "model_id": "bonsai2-27b",
+   "repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+   "revision": "839bd57023c1558945afea70a74fa83c054f35f9",
+   "gated": false,
+   "license": "apache-2.0",
+   "last_modified": "2026-11-04T23:05:35.000Z",
+   "file": "Ternary-Bonsai-2-27B-Q2_0.gguf",
+   "file_bytes": 7626008928,
+   "file_sha256": "4f99aed01b8a877e153f9aa6569a4440fe17c59701cc0953e36d7f460549e70e",
+   "projector": "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+   "projector_bytes": 629246976,
+   "projector_sha256": "6807ede61d570bb86ba34b756a0fa109edc33668604de867c6ea6d8f1d631903",
+   "approx_gib_recorded": 7.69
   }
  ]
 }

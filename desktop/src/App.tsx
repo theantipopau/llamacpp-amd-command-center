@@ -7,7 +7,7 @@ import {
   type LibraryButton,
   describeMoeChoice,
   measuredMoeLayers,
-  sortLibraryModels,
+  libraryGroups,
   describeRollback,
   describeRuntimeUpdate,
   redactPaths,
@@ -901,8 +901,11 @@ export default function App() {
             ) : null}
             {library ? (
               <>
+                {libraryGroups(library.models).map((group) => (
+                  <section key={group.title} className="model-group" aria-label={group.title}>
+                    <h3>{group.title} <span className="muted">({group.models.length})</span></h3>
                 <ul className="models">
-                  {sortLibraryModels(library.models).map((model) => {
+                  {group.models.map((model) => {
                     const operation = libraryOperation(model);
                     return (
                       <li key={model.id} className={model.active ? "current" : undefined}>
@@ -990,6 +993,8 @@ export default function App() {
                     );
                   })}
                 </ul>
+                  </section>
+                ))}
                 {library.receipts_caveat ? <p className="muted">Reading the speeds: {library.receipts_caveat}</p> : null}
                 {library.hardware_error ? <p className="warning">Hardware scan problem: {library.hardware_error}</p> : null}
                 {libraryNote ? (

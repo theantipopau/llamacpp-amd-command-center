@@ -37,7 +37,7 @@ $script:AssumeYes = $false
 $script:ScriptSource = $scriptPath
 $script:JsonDocumentsOnly = $false
 $UseCase = ''
-$script:CommandCenterVersion = '0.3.0'
+$script:CommandCenterVersion = '0.3.1'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{}
@@ -665,9 +665,9 @@ try {
 
     Write-Host 'Catalogue files: the single versioned source (ADR-004)'
     $modelsDoc = Get-CatalogJson -Name 'models.json'
-    Assert-True (($modelsDoc.schema_version -eq 1) -and (@($modelsDoc.models).Count -eq 11)) 'models.json declares schema_version 1 and the eleven catalog models'
+    Assert-True (($modelsDoc.schema_version -eq 1) -and (@($modelsDoc.models).Count -eq 13)) 'models.json declares schema_version 1 and the thirteen catalog models'
     Assert-True (@($modelsDoc.models | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Id) -or [string]::IsNullOrWhiteSpace([string]$_.File) -or ($_.PSObject.Properties.Name -notcontains 'Rank') }).Count -eq 0) 'every model entry has an id, a file and a rank'
-    Assert-True ((@(Get-ModelCatalog).Count -eq 11) -and ((Get-ModelCatalog)[0].Id -eq 'qwen3.8-27b')) 'Get-ModelCatalog reads the file, not an embedded copy'
+    Assert-True ((@(Get-ModelCatalog).Count -eq 13) -and ((Get-ModelCatalog)[0].Id -eq 'qwen3.8-27b')) 'Get-ModelCatalog reads the file, not an embedded copy'
     $localProjectors = @(Get-ModelCatalog | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Projector) } | ForEach-Object { Get-ProjectorLocalName -Model $_ })
     Assert-True ($localProjectors.Count -eq @($localProjectors | Select-Object -Unique).Count) 'no two catalogue models share a local projector file name (a shared name would overwrite the other model projector)'
     $runtimeDoc = Get-CatalogJson -Name 'runtimes.json'
@@ -678,7 +678,7 @@ try {
     $compatDoc = Get-CatalogJson -Name 'compatibility.json'
     Assert-True (($compatDoc.schema_version -eq 1) -and (@($compatDoc.rules).Count -ge 1) -and (@($compatDoc.rules)[0].model_flags -contains 'NeedsMtpLoader')) 'compatibility.json carries the runtime rules'
     $experimental = @($modelsDoc.models | Where-Object { ($_.PSObject.Properties.Name -contains 'Experimental') -and [bool]$_.Experimental })
-    Assert-True ((@($experimental | ForEach-Object { [string]$_.Id } | Sort-Object) -join ',') -eq 'ornith-1.5-35b-a3b,ornith-1.5-9b,qwen3.6-35b-a3b') 'only the Ornith models and the Qwen3.6 mixture-of-experts model carry the catalogue Experimental flag'
+    Assert-True ((@($experimental | ForEach-Object { [string]$_.Id } | Sort-Object) -join ',') -eq 'bonsai2-27b,ornith-1.5-35b-a3b,ornith-1.5-9b,qwen3.6-35b-a3b,qwen3.8-27b-gsq') 'only the unmeasured models (Ornith, the 35B MoE and the two 16 GB Qwen3.8 27B builds) carry the catalogue Experimental flag'
     Assert-True ((@($runtimeDoc.adapters).Count -eq 3) -and (@($runtimeDoc.adapters | Where-Object { [string]$_.status -notin @('active', 'stub') }).Count -eq 0)) 'three runtime adapters are declared with known statuses'
     $capabilityFlags = @($runtimeDoc.llamacpp_capabilities)
     Assert-True (($capabilityFlags.Count -ge 8) -and (@($capabilityFlags | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.flag) -or ([string]$_.flag -notlike '--*') }).Count -eq 0) -and (@($capabilityFlags | Where-Object { [bool]$_.required }).Count -ge 6)) 'capability flags are well formed and the launcher-critical ones are required'
@@ -1493,8 +1493,8 @@ try {
             # the flagged models may appear - no other model may sneak in.
             $inProcessUnlock = Get-RuntimeUpdateUnlock -Runtime ([pscustomobject]@{ backend = 'ROCm'; tag = 'rocm-7.2.1-b8407' })
             $ids = @(@($inProcessUnlock) | ForEach-Object { [string]$_.id })
-            Assert-True (($ids -contains 'ornith-1.5-9b') -and ($ids -contains 'ornith-1.5-35b-a3b') -and ($ids -contains 'gemma4-12b')) "the catalogue rule drives the unlock list ($($ids -join ', '))"
-            Assert-True (@($inProcessUnlock).Count -eq 3) 'only stage-rule-blocked models are unlockable, nothing else'
+            Assert-True (($ids -contains 'ornith-1.5-9b') -and ($ids -contains 'ornith-1.5-35b-a3b') -and ($ids -contains 'gemma4-12b') -and ($ids -contains 'bonsai2-27b')) "the catalogue rule drives the unlock list ($($ids -join ', '))"
+            Assert-True (@($inProcessUnlock).Count -eq 4) 'only stage-rule-blocked models are unlockable, nothing else'
             $otherRuntime = Get-RuntimeUpdateUnlock -Runtime ([pscustomobject]@{ backend = 'Vulkan'; tag = 'b99999' })
             Assert-True (@($otherRuntime).Count -eq 0) 'a runtime outside the stage rule unlocks nothing'
         }

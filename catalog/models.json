@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "catalog_version": "0.1.7",
-  "verified_on": "2026-11-07",
+  "catalog_version": "0.1.8",
+  "verified_on": "2026-11-16",
   "verified_against": "tests/fixtures/catalog-evidence.json",
   "models": [
     {
@@ -16,6 +16,41 @@
       "Rank": 100,
       "Tag": "BEST QUALITY",
       "Description": "Flagship reasoning, coding, tools, vision and video. Ollama qwen3.8:latest equivalent.",
+      "Reasoning": true,
+      "Vision": true,
+      "Tools": true
+    },
+    {
+      "Id": "qwen3.8-27b-gsq",
+      "Name": "Qwen3.8 27B (16 GB fit)",
+      "Alias": "qwen3.8:27b-gsq",
+      "Repo": "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
+      "File": "Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf",
+      "Projector": "mmproj-Qwen3.8-27B-BF16.gguf",
+      "ApproxGiB": 10.27,
+      "KvGiBPer32k": 1.1,
+      "Rank": 94,
+      "Tag": "27B ON THE GPU / EXPERIMENTAL",
+      "Experimental": true,
+      "Description": "Qwen3.8 27B in ISTA-DASLab's GSQ-RCO 3-bit quantization (about 9.4 GiB), so the whole 27B fits on a 16 GB card at 32k context per conversation instead of spilling into system RAM like the Q4 build. The publisher calls the 3.0-bit file a strong all-round point and reports near-BF16 scores; not verified here. Community reports on an RX 9070 XT quote about 60-70 tok/s generation for 3-3.5-bit builds; not measured on this PC yet. Uses standard IQ3 types, so it should load on the installed builds; experimental until a run proves it.",
+      "Reasoning": true,
+      "Vision": true,
+      "Tools": true
+    },
+    {
+      "Id": "bonsai2-27b",
+      "Name": "Ternary Bonsai 2 27B",
+      "Alias": "bonsai2:27b",
+      "Repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+      "File": "Ternary-Bonsai-2-27B-Q2_0.gguf",
+      "Projector": "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+      "ApproxGiB": 7.69,
+      "KvGiBPer32k": 1.1,
+      "Rank": 89,
+      "Tag": "TERNARY 27B / EXPERIMENTAL",
+      "Experimental": true,
+      "NeedsCurrentLlamaCpp": true,
+      "Description": "A ternary (about 2-bit) build of Qwen3.8 27B by PrismML, about 7.1 GiB, so a 27B fits a 16 GB card with room for 64k context per conversation. The publisher reports 98% of full-precision scores and 74.9 on BFCL tool calling; not verified here. Q2_0 needs llama.cpp b11556 or newer (Vulkan b12110 is fine); AMD's ROCm 7.2.1 package cannot load it. Not measured on this PC yet.",
       "Reasoning": true,
       "Vision": true,
       "Tools": true

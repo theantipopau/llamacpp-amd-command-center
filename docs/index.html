@@ -90,6 +90,15 @@
     <figcaption>The window you get when you double-click <code>Start-LlamaCpp.cmd</code>: one big button for what to do next, plus your graphics memory and gaming switches.</figcaption>
   </figure>
 
+  <h2>New in v0.3.1</h2>
+  <ul>
+    <li><strong>Important fix: &ldquo;Switch to this model&rdquo; no longer deletes the model.</strong> In v0.2.0 and v0.3.0 that button ran the remove action and asked &ldquo;Delete &hellip; from disk?&rdquo;. If you clicked OK, the model was deleted; download it again from the Models tab.</li>
+    <li><strong>The window no longer freezes</strong> while the app talks to the backend, and the status refresh is more than twice as fast (10.4 s to 4.5 s on an RX 9070 XT).</li>
+    <li><strong>Qwen3.8 27B on a 16 GB card</strong> <em>(experimental)</em>: two smaller builds of Qwen3.8 27B that fit entirely in graphics memory, ISTA-DASLab's GSQ-RCO 3-bit build (10.3 GB) and PrismML's Ternary Bonsai 2 27B (7.7 GB, Vulkan only). Publisher quality claims are not verified here, and neither has been measured on this PC yet.</li>
+    <li><strong>Models tab:</strong> split into <strong>On this PC</strong> and <strong>Available to download</strong>, and experimental models can be downloaded (the prompt says they are untested).</li>
+    <li><strong>Logs:</strong> downloads, switches and removals are recorded in <code>logs\actions.jsonl</code>.</li>
+  </ul>
+
   <h2>New in v0.3.0</h2>
   <ul>
     <li><strong>Per-model backend.</strong> Each model can start on Vulkan or ROCm. Auto picks a default by model size and type, and your choice in the Models tab always wins. Starting a model that prefers the other backend switches runtimes for you.</li>
@@ -211,6 +220,8 @@
     <tbody>
       <tr><td><strong>Qwen3.5 9B</strong></td><td>6.2 GB</td><td class="center">✓</td><td class="center">✓</td><td><strong>Recommended for 12–16 GB Radeon cards.</strong> On an RX 9070 XT: fully on the GPU (33/33 layers), 64k context. First measured run: median <strong>13.3 tokens/s</strong>, 235&nbsp;ms to first token, on a busy desktop — see <code>benchmarks/results</code>. Earlier 45–90&nbsp;t/s figures were never reproduced and stay labelled unverified.</td></tr>
       <tr><td>Qwen3.8 27B</td><td>18.3 GB</td><td class="center">✓</td><td class="center">✓</td><td>Strongest answers, but on a 16 GB card part of it runs from system RAM: roughly 4–7 tokens/s.</td></tr>
+      <tr><td>Qwen3.8 27B (16 GB fit) <em>(experimental)</em></td><td>10.3 GB</td><td class="center">✓</td><td class="center">✓</td><td>The same Qwen3.8 27B in ISTA-DASLab's GSQ-RCO 3-bit build, small enough to sit entirely in 16 GB of graphics memory at 32k context per conversation. The publisher reports near-full-precision scores; community reports on an RX 9070 XT quote about 60–70 tokens/s for 3-bit builds. Neither is verified or measured here yet.</td></tr>
+      <tr><td>Ternary Bonsai 2 27B <em>(experimental)</em></td><td>7.7 GB</td><td class="center">✓</td><td class="center">✓</td><td>A ternary build of Qwen3.8 27B by PrismML that leaves room for 64k context per conversation. The publisher reports 98% of full-precision scores; not verified here. Needs Vulkan or a newer llama.cpp than AMD's ROCm 7.2.1 package.</td></tr>
       <tr><td>Qwen3 8B</td><td>8.1 GB</td><td class="center">✓</td><td></td><td>High-quality 8-bit weights.</td></tr>
       <tr><td>Llama 3.1 8B</td><td>5.6 GB</td><td class="center">✓</td><td></td><td>Proven general-purpose model.</td></tr>
       <tr><td>Gemma 4 12B <em>(new)</em></td><td>6.9 GB</td><td class="center">✓</td><td class="center">✓</td><td>Google's April 2026 model. Tool calling works in current llama.cpp but hasn't been tested with Copilot Agent mode here. Needs the Vulkan or <em>llama.cpp ROCm (latest)</em> backend: AMD's ROCm 7.2.1 package can't load it.</td></tr>

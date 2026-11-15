@@ -14,6 +14,7 @@ import {
   localDate,
   measuredMoeLayers,
   sortLibraryModels,
+  libraryGroups,
   describeMissingBackend,
   describeModel,
   describeOverall,
@@ -415,7 +416,8 @@ describe("model library display rules", () => {
     expect(libraryOperation({ ...base, active: true })).toBe("active");
     expect(libraryOperation({ ...base, runtime_blocker: "x" })).toBe("blocked");
     expect(libraryOperation({ ...base, downloaded: true })).toBe("remove");
-    expect(libraryOperation({ ...base, experimental: true })).toBe("blocked");
+    expect(libraryOperation({ ...base, experimental: true })).toBe("download");
+    expect(libraryOperation({ ...base, experimental: true, runtime_blocker: "needs a newer llama.cpp" })).toBe("blocked");
     expect(libraryOperation(base)).toBe("download");
   });
 
@@ -546,6 +548,17 @@ describe("per-model backend and receipts", () => {
     expect(line).toContain("generation 94.7 tok/s");
     expect(line).toContain("measured 2026-11-04");
     expect(describeReceipt({ ...receipt, unreliable: true })).toContain("Marked unreliable.");
+  });
+
+  it("groups the library into what is on this PC and what can be downloaded", () => {
+    const groups = libraryGroups([{ ...base, id: "x", downloaded: false }, { ...base, id: "y", downloaded: true }]);
+    expect(groups.map((g) => [g.title, g.models.map((m) => m.id)])).toEqual([["On this PC", ["y"]], ["Available to download", ["x"]]]);
+    expect(libraryGroups([{ ...base, downloaded: true }]).map((g) => g.title)).toEqual(["On this PC"]);
+  });
+
+  it("warns that an experimental download is untested", () => {
+    expect(libraryConfirmText({ ...base, downloaded: false, experimental: true }, "download")).toContain("experimental");
+    expect(libraryConfirmText({ ...base, downloaded: false }, "download")).not.toContain("experimental");
   });
 
   it("orders the library: active, then downloaded, then the rest", () => {

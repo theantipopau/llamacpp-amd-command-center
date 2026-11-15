@@ -358,11 +358,8 @@ export function libraryOperation(model: LibraryModel): LibraryOperation {
   if (model.downloaded) {
     return "remove";
   }
-  if (model.experimental) {
-    // Experimental models download only when no blocker exists; the backend already
-    // refuses them with the same reason, so the UI mirrors it instead of hiding them.
-    return "blocked";
-  }
+  // Experimental means "not yet measured on this PC", not "blocked": the backend downloads
+  // it like any other model, and the confirm prompt says it is experimental.
   return "download";
 }
 
@@ -406,7 +403,8 @@ export function libraryConfirmText(model: LibraryModel, operation: LibraryOperat
     return `Delete ${model.name} (${model.approx_gib} GB) from disk? You can download it again later.`;
   }
   if (operation === "download") {
-    return `Download ${model.name}, about ${model.approx_gib} GB? The size and SHA-256 are checked against the published values.`;
+    const caution = model.experimental ? " It is experimental: not yet tested on this PC, so speed and quality are unknown." : "";
+    return `Download ${model.name}, about ${model.approx_gib} GB?${caution} The size and SHA-256 are checked against the published values.`;
   }
   return null;
 }
@@ -591,6 +589,15 @@ export function sortLibraryModels(models: LibraryModel[]): LibraryModel[] {
   return models.map((model, index) => ({ model, index }))
     .sort((a, b) => rank(a.model) - rank(b.model) || a.index - b.index)
     .map((entry) => entry.model);
+}
+
+/** The Models tab in two titled groups; an empty group is left out. */
+export function libraryGroups(models: LibraryModel[]): Array<{ title: string; models: LibraryModel[] }> {
+  const sorted = sortLibraryModels(models);
+  return [
+    { title: "On this PC", models: sorted.filter((model) => model.downloaded) },
+    { title: "Available to download", models: sorted.filter((model) => !model.downloaded) }
+  ].filter((group) => group.models.length > 0);
 }
 
 /** The expert-layer count Tune measured as fastest for this model, if any. */
