@@ -81,3 +81,8 @@ export function openChat(): Promise<BackendResult> {
 export function downloadModel(modelId: string): Promise<BackendResult> {
   return invoke<BackendResult>("download_model", { modelId });
 }
+
+/** Progress of the newest model download: bytes on disk per file and the run's state. */
+export function downloadProgress(): Promise<BackendResult> {
+  return invoke<BackendResult>("download_progress");
+}

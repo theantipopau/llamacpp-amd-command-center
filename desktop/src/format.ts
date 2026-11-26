@@ -2,6 +2,7 @@
 // document, so the rules are unit testable without a window or a backend (ADR-006 §4).
 
 import type {
+  DownloadProgressDocument,
   RuntimeRollbackDocument,
   RuntimeUpdateEntry,
   LibraryReceipt,
@@ -363,6 +364,66 @@ export function libraryOperation(model: LibraryModel): LibraryOperation {
   return "download";
 }
 
+/** One progress reading: when it was taken and how many bytes were on disk. */
+export interface DownloadSample {
+  at: number;
+  bytes: number;
+}
+
+/** Bytes per second between two readings; null until there are two that move forward. */
+export function downloadSpeed(previous: DownloadSample | null, current: DownloadSample): number | null {
+  if (!previous) {
+    return null;
+  }
+  const seconds = (current.at - previous.at) / 1000;
+  if (seconds <= 0 || current.bytes < previous.bytes) {
+    return null;
+  }
+  return (current.bytes - previous.bytes) / seconds;
+}
+
+function gib(bytes: number): string {
+  return (bytes / 1073741824).toFixed(2);
+}
+
+/** What the download banner says. null when there is nothing to show. */
+export function describeDownloadProgress(
+  progress: DownloadProgressDocument | null,
+  bytesPerSecond: number | null
+): { title: string; detail: string; percent: number | null; tone: "progress" | "ok" | "warning" } | null {
+  if (!progress || progress.state === "none") {
+    return null;
+  }
+  const name = progress.model_name || progress.model_id;
+  if (progress.state === "resolving") {
+    return { title: `Preparing ${name}…`, detail: "Looking up the published file sizes and SHA-256 checksums.", percent: null, tone: "progress" };
+  }
+  if (progress.state === "downloading") {
+    const verifying = progress.files.find((file) => file.phase === "verifying");
+    if (verifying) {
+      return { title: `Checking ${name}…`, detail: `Verifying ${verifying.name} against its published SHA-256.`, percent: progress.percent, tone: "progress" };
+    }
+    const parts = [`${gib(progress.done_bytes)} of ${gib(progress.total_bytes)} GB`];
+    if (bytesPerSecond !== null && bytesPerSecond > 0) {
+      parts.push(`${(bytesPerSecond / 1048576).toFixed(0)} MB/s`);
+      const seconds = (progress.total_bytes - progress.done_bytes) / bytesPerSecond;
+      parts.push(seconds < 60 ? "under a minute left" : `about ${Math.ceil(seconds / 60)} min left`);
+    }
+    return { title: `Downloading ${name}`, detail: parts.join(" · "), percent: progress.percent, tone: "progress" };
+  }
+  if (progress.state === "completed") {
+    return progress.activated
+      ? { title: `${name} is downloaded`, detail: "It is verified and is now the active model.", percent: 100, tone: "ok" }
+      : { title: `${name} is downloaded`, detail: "It is verified. Use “Switch to this model” on its card in Models to start using it.", percent: 100, tone: "ok" };
+  }
+  return {
+    title: `${name} did not finish downloading`,
+    detail: progress.error || "The download stopped. Start it again from Models to resume where it left off.",
+    percent: null,
+    tone: "warning"
+  };
+}
+
 /** One button on a model card and the exact operation it runs. */
 export interface LibraryButton {
   label: string;
@@ -404,7 +465,7 @@ export function libraryConfirmText(model: LibraryModel, operation: LibraryOperat
   }
   if (operation === "download") {
     const caution = model.experimental ? " It is experimental: not yet tested on this PC, so speed and quality are unknown." : "";
-    return `Download ${model.name}, about ${model.approx_gib} GB?${caution} The size and SHA-256 are checked against the published values.`;
+    return `Download ${model.name}, about ${model.approx_gib} GB?${caution} It downloads in the background and your active model stays the same. The size and SHA-256 are checked against the published values.`;
   }
   return null;
 }

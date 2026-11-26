@@ -333,6 +333,28 @@ export interface LibraryDocument {
 }
 
 /** The typed result of a library change; `library` re-syncs the screen. */
+/** One file of a model download and how much of it is on disk. */
+export interface DownloadProgressFile {
+  name: string;
+  expected_bytes: number;
+  done_bytes: number;
+  phase: "waiting" | "downloading" | "verifying" | "done" | string;
+}
+
+/** The newest model download, as `-LibraryAction progress` reports it. */
+export interface DownloadProgressDocument {
+  schema_version: number;
+  state: "none" | "resolving" | "downloading" | "completed" | "failed" | "interrupted" | string;
+  model_id: string;
+  model_name: string;
+  files: DownloadProgressFile[];
+  done_bytes: number;
+  total_bytes: number;
+  percent: number;
+  activated: boolean;
+  error: string;
+}
+
 export interface LibraryResultDocument {
   schema_version: number;
   generated_at: string;

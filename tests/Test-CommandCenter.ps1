@@ -37,7 +37,7 @@ $script:AssumeYes = $false
 $script:ScriptSource = $scriptPath
 $script:JsonDocumentsOnly = $false
 $UseCase = ''
-$script:CommandCenterVersion = '0.3.1'
+$script:CommandCenterVersion = '0.3.2'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{}
@@ -1058,6 +1058,53 @@ try {
     Add-ActionLogEntry -Action 'library:remove' -ModelId 'qwen3-4b' -Status 'removed' -Detail 'test'
     $actionLine = @(Get-Content -LiteralPath (Join-Path $tuneRoot 'logs\actions.jsonl'))[-1] | ConvertFrom-Json
     Assert-True (($actionLine.action -eq 'library:remove') -and ($actionLine.model_id -eq 'qwen3-4b') -and ($actionLine.status -eq 'removed')) 'library changes are recorded in logs\actions.jsonl'
+    Write-Host 'Download progress and keep-active downloads'
+    Assert-True ((Get-DownloadProgressDocument).state -eq 'none') 'with no download there is no progress, not an error'
+    $stagingTest = Get-DownloadStagingDirectory
+    New-Item -ItemType Directory -Path $stagingTest -Force | Out-Null
+    $finalModel = Join-Path $tuneRoot 'models\progress-model.gguf'
+    [IO.File]::WriteAllBytes((Join-Path $stagingTest 'progress-model.gguf'), (New-Object byte[] 250))
+    Write-DownloadProgress -Fields @{ model_id = 'qwen3.5-9b'; model_name = 'Qwen3.5 9B'; state = 'downloading'; files = @([pscustomobject]@{ name = 'progress-model.gguf'; final_path = $finalModel; expected_bytes = 1000 }, [pscustomobject]@{ name = 'progress-mmproj.gguf'; final_path = (Join-Path $tuneRoot 'models\progress-mmproj.gguf'); expected_bytes = 1000 }); error = ''; activated = $false; started_at = 'x'; process_id = $PID }
+    $midway = Get-DownloadProgressDocument
+    Assert-True (($midway.state -eq 'downloading') -and ($midway.done_bytes -eq 250) -and ($midway.total_bytes -eq 2000) -and ($midway.percent -eq 12.5)) 'progress counts the staged bytes against both files'
+    Assert-True ((@($midway.files)[0].phase -eq 'downloading') -and (@($midway.files)[1].phase -eq 'waiting')) 'each file reports its own phase'
+    [IO.File]::WriteAllBytes((Join-Path $stagingTest 'progress-model.gguf'), (New-Object byte[] 1000))
+    Assert-True ((@((Get-DownloadProgressDocument).files)[0].phase -eq 'verifying')) 'a fully staged file is reported as verifying'
+    Remove-Item -LiteralPath (Join-Path $stagingTest 'progress-model.gguf') -Force
+    [IO.File]::WriteAllBytes($finalModel, (New-Object byte[] 1000))
+    Assert-True ((@((Get-DownloadProgressDocument).files)[0].phase -eq 'done') -and ((Get-DownloadProgressDocument).done_bytes -eq 1000)) 'a promoted file counts as done'
+    $deadPid = (Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'exit' -PassThru -WindowStyle Hidden); $deadPid.WaitForExit()
+    Write-DownloadProgress -Fields @{ process_id = [int]$deadPid.Id }
+    Assert-True ((Get-DownloadProgressDocument).state -eq 'interrupted') 'a download whose process has gone is reported as interrupted'
+    Remove-Item -LiteralPath $finalModel -Force
+
+    $originalInstallPieces = @{}
+    foreach ($name in 'Get-ModelRuntimeBlocker', 'Get-ModelAssessment', 'Assert-ModelDiskSpace', 'Get-HfFileDescriptor', 'Get-VerifiedDownload', 'Get-ActiveModel', 'Set-ActiveModel', 'Sync-VsCodeChatEndpoint', 'Get-InstalledRuntime') { $originalInstallPieces[$name] = (Get-Command $name).ScriptBlock }
+    try {
+        $script:activations = 0
+        function Get-ModelRuntimeBlocker { return '' }
+        function Get-ModelAssessment { return @() }
+        function Assert-ModelDiskSpace { }
+        function Get-InstalledRuntime { return $null }
+        function Get-HfFileDescriptor { param($Repo, $FileName) [pscustomobject]@{ Url = 'https://example.invalid/x'; Size = 10; Sha256 = ('0' * 64); Revision = ('a' * 40) } }
+        function Get-VerifiedDownload { param($Url, $Destination, $ExpectedSize, $ExpectedSha256) [IO.File]::WriteAllBytes($Destination, (New-Object byte[] 10)); return 'hash' }
+        function Get-ActiveModel { [pscustomobject]@{ id = 'qwen3-4b' } }
+        function Set-ActiveModel { param($Model, $EffectiveContext) $script:activations++ }
+        function Sync-VsCodeChatEndpoint { }
+        $keepModel = Get-ModelById -Id 'qwen3.5-9b'
+        Install-Model -Model $keepModel -Hardware $tuneHardware -KeepActive | Out-Null
+        $keepDoc = Get-DownloadProgressDocument
+        Assert-True (($script:activations -eq 0) -and ($keepDoc.state -eq 'completed') -and (-not [bool]$keepDoc.activated)) 'a keep-active download verifies the files and leaves the active model alone'
+        Install-Model -Model $keepModel -Hardware $tuneHardware | Out-Null
+        Assert-True (($script:activations -eq 1) -and [bool](Get-DownloadProgressDocument).activated) 'a plain download still activates the model (console and Easy start)'
+        function Get-HfFileDescriptor { throw 'network down' }
+        try { Install-Model -Model $keepModel -Hardware $tuneHardware -KeepActive | Out-Null } catch { }
+        $failedDoc = Get-DownloadProgressDocument
+        Assert-True (($failedDoc.state -eq 'failed') -and ($failedDoc.error -match 'network down')) 'a failed download records the reason for the window'
+    } finally {
+        foreach ($name in $originalInstallPieces.Keys) { Set-Item -Path "Function:\$name" -Value $originalInstallPieces[$name] }
+        Remove-Item -LiteralPath (Join-Path $tuneRoot 'models\Qwen3.5-9B-Q4_K_M.gguf'), (Join-Path $tuneRoot 'models\mmproj-F16.gguf') -Force -ErrorAction SilentlyContinue
+    }
     Write-Host 'MoE expert offload setting (opt-in)'
     $moeActive = [pscustomobject]@{ id = 'qwen3.6-35b-a3b'; model_path = (Join-Path $tuneRoot 'models\dummy.gguf'); mmproj_path = ''; alias = 'qwen3.6:35b-a3b'; reasoning = $false; tool_calling = $false; thinking = $false }
     $moeBefore = Get-ServerArguments -ActiveModel $moeActive -EffectiveContext 32768

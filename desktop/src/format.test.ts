@@ -9,6 +9,8 @@ import {
   describeLibraryFit,
   describeLibraryResult,
   describeLibraryState,
+  describeDownloadProgress,
+  downloadSpeed,
   libraryButtons,
   describeMoeChoice,
   localDate,
@@ -625,5 +627,37 @@ describe("health: path redaction, build updates and rollback", () => {
     expect(done).toEqual({ message: "Rolled back from b12110 to b12109.", ok: true });
     const refused = describeRollback({ schema_version: 1, action: "rollback", status: "no_previous", detail: "No previous build is installed for this backend; two builds are needed to roll back.", backend: "vulkan", from_tag: "b12110", to_tag: "", restarted: false });
     expect(refused.ok).toBe(false);
+  });
+});
+
+describe("download progress banner", () => {
+  const doc = {
+    schema_version: 1, state: "downloading", model_id: "qwen3.5-9b", model_name: "Qwen3.5 9B",
+    files: [{ name: "Qwen3.5-9B-Q4_K_M.gguf", expected_bytes: 5368709120, done_bytes: 2147483648, phase: "downloading" }],
+    done_bytes: 2147483648, total_bytes: 5368709120, percent: 40, activated: false, error: ""
+  };
+
+  it("measures speed only between two readings that move forward", () => {
+    expect(downloadSpeed(null, { at: 1000, bytes: 10 })).toBeNull();
+    expect(downloadSpeed({ at: 1000, bytes: 0 }, { at: 3000, bytes: 2097152 })).toBe(1048576);
+    expect(downloadSpeed({ at: 1000, bytes: 50 }, { at: 3000, bytes: 10 })).toBeNull();
+  });
+
+  it("shows GB done, speed and time left while downloading", () => {
+    const view = describeDownloadProgress(doc, 41943040);
+    expect(view?.title).toBe("Downloading Qwen3.5 9B");
+    expect(view?.detail).toBe("2.00 of 5.00 GB · 40 MB/s · about 2 min left");
+    expect(view?.percent).toBe(40);
+  });
+
+  it("says when a file is being checked, finished, or failed", () => {
+    expect(describeDownloadProgress({ ...doc, files: [{ ...doc.files[0], phase: "verifying" }] }, null)?.title).toBe("Checking Qwen3.5 9B…");
+    expect(describeDownloadProgress({ ...doc, state: "completed" }, null)?.detail).toContain("Switch to this model");
+    expect(describeDownloadProgress({ ...doc, state: "completed", activated: true }, null)?.detail).toContain("now the active model");
+    const failed = describeDownloadProgress({ ...doc, state: "failed", error: "SHA-256 verification failed" }, null);
+    expect(failed?.tone).toBe("warning");
+    expect(failed?.detail).toBe("SHA-256 verification failed");
+    expect(describeDownloadProgress({ ...doc, state: "none" }, null)).toBeNull();
+    expect(describeDownloadProgress(null, null)).toBeNull();
   });
 });

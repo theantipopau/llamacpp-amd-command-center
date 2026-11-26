@@ -3,6 +3,9 @@ import * as api from "./api";
 import logo from "./assets/logo.png";
 import {
   BACKEND_CHOICES,
+  describeDownloadProgress,
+  downloadSpeed,
+  type DownloadSample,
   libraryButtons,
   type LibraryButton,
   describeMoeChoice,
@@ -48,6 +51,7 @@ import {
 } from "./format";
 import { asDocument as narrow, asSettingsDocument, asSettingsSaveDocument } from "./types";
 import type {
+  DownloadProgressDocument,
   BackendResult,
   RuntimeRollbackDocument,
   RuntimeUpdatesDocument,
@@ -68,8 +72,7 @@ const GIVE_UP_AFTER_MS = 25000;
 const START_DEADLINE_MS = 240000;
 // A download runs hidden in the background: check the read-only library list every
 // 15 s for up to an hour, then stop and leave the Refresh button to the user.
-const LIBRARY_POLL_MS = 15000;
-const LIBRARY_POLL_LIMIT = 240;
+const PROGRESS_POLL_MS = 2000;
 
 type Busy = null | "updates" | "rollback" | "refresh" | "start" | "stop" | "chat" | "updateRuntime" | "diagnose" | "settings" | `model:${string}` | `library:${string}`;
 type Tab = "home" | "models" | "settings" | "health";
@@ -167,6 +170,9 @@ export default function App() {
   const [library, setLibrary] = useState<LibraryDocument | null>(null);
   const [libraryNote, setLibraryNote] = useState<{ message: string; ok: boolean } | null>(null);
   const [pendingDownload, setPendingDownload] = useState<string | null>(null);
+  const [downloadDoc, setDownloadDoc] = useState<DownloadProgressDocument | null>(null);
+  const [downloadRate, setDownloadRate] = useState<number | null>(null);
+  const downloadSample = useRef<DownloadSample | null>(null);
   const [notice, setNotice] = useState<string>("");
   const [busy, setBusy] = useState<Busy>("refresh");
   const [progress, setProgress] = useState<string>("");
@@ -610,30 +616,47 @@ export default function App() {
     void loadLibrary();
   }, [loadLibrary]);
 
-  // While a download runs hidden in the background, re-read the library so the list
-  // shows the model as downloaded when the file lands. Stops on success or after the
-  // poll limit.
+  /** One progress reading. Finishes the pending download when the backend says it ended. */
+  const readDownloadProgress = useCallback(async () => {
+    const result = await api.downloadProgress();
+    const progress = narrow<DownloadProgressDocument>(result.document);
+    if (!result.ok || !progress) {
+      return null;
+    }
+    const sample = { at: Date.now(), bytes: progress.done_bytes };
+    const rate = downloadSpeed(downloadSample.current, sample);
+    if (rate !== null) {
+      setDownloadRate(rate);
+    }
+    downloadSample.current = sample;
+    setDownloadDoc(progress);
+    if (progress.state === "completed" || progress.state === "failed" || progress.state === "interrupted") {
+      setPendingDownload(null);
+      void loadLibrary();
+    }
+    return progress;
+  }, [loadLibrary]);
+
+  // A download started before the window opened (or before a restart) shows up again.
+  useEffect(() => {
+    void (async () => {
+      const progress = await readDownloadProgress();
+      if (progress && (progress.state === "resolving" || progress.state === "downloading")) {
+        setPendingDownload(progress.model_id);
+      } else {
+        setDownloadDoc(null);
+      }
+    })();
+  }, [readDownloadProgress]);
+
+  // While a download runs hidden in the background, read its progress every two seconds.
   useEffect(() => {
     if (pendingDownload === null) {
       return;
     }
-    let polls = 0;
-    const timer = window.setInterval(() => {
-      polls += 1;
-      if (polls > LIBRARY_POLL_LIMIT) {
-        setPendingDownload(null);
-        return;
-      }
-      void loadLibrary();
-    }, LIBRARY_POLL_MS);
+    const timer = window.setInterval(() => void readDownloadProgress(), PROGRESS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [pendingDownload, loadLibrary]);
-
-  useEffect(() => {
-    if (pendingDownload !== null && library?.models.some((model) => model.id === pendingDownload && model.downloaded)) {
-      setPendingDownload(null);
-    }
-  }, [library, pendingDownload]);
+  }, [pendingDownload, readDownloadProgress]);
 
   async function onLibraryOperation(model: LibraryModel, operation: LibraryButton["operation"]) {
     if (busyRef.current !== null) {
@@ -669,6 +692,9 @@ export default function App() {
         applyLibraryDocument(document.library);
       }
       if (operation === "download" && document.status === "validated") {
+        downloadSample.current = null;
+        setDownloadRate(null);
+        setDownloadDoc({ schema_version: 1, state: "resolving", model_id: model.id, model_name: model.name, files: [], done_bytes: 0, total_bytes: 0, percent: 0, activated: false, error: "" });
         setPendingDownload(model.id);
       }
     }
@@ -788,6 +814,11 @@ export default function App() {
       </div>
 
       <ErrorBox result={failure} />
+
+      <DownloadBanner
+        view={describeDownloadProgress(downloadDoc, downloadRate)}
+        onDismiss={pendingDownload === null ? () => setDownloadDoc(null) : null}
+      />
 
       <nav className="tabs" role="tablist" aria-label="Sections">
         {TABS.map(([id, label], index) => (
@@ -1002,11 +1033,6 @@ export default function App() {
                     {libraryNote.message}
                   </p>
                 ) : null}
-                {pendingDownload !== null ? (
-                  <p className="progress" role="status" aria-live="polite">
-                    Download running in the background. This list updates when the file is in place.
-                  </p>
-                ) : null}
                 {busy?.startsWith("library:") ? (
                   <p className="progress" role="status" aria-live="polite">
                     Working…
@@ -1217,5 +1243,37 @@ export default function App() {
         ) : null}
       </div>
     </main>
+  );
+}
+
+/** The download banner above the tabs, so a hidden download is visible from every tab. */
+function DownloadBanner({
+  view,
+  onDismiss
+}: {
+  view: ReturnType<typeof describeDownloadProgress>;
+  onDismiss: (() => void) | null;
+}) {
+  if (!view) {
+    return null;
+  }
+  return (
+    <section className={`download-banner ${view.tone}`} role="status" aria-live="polite">
+      <div className="download-text">
+        <strong>{view.title}</strong>
+        <span className="muted">{view.detail}</span>
+      </div>
+      {view.percent !== null && view.tone === "progress" ? (
+        <div className="download-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(view.percent)} aria-label="Download progress">
+          <span className="download-fill" style={{ width: `${Math.min(100, view.percent)}%` }} />
+        </div>
+      ) : null}
+      {view.percent !== null && view.tone === "progress" ? <span className="download-percent">{Math.round(view.percent)}%</span> : null}
+      {onDismiss ? (
+        <button type="button" className="download-dismiss" onClick={onDismiss} aria-label="Dismiss the download message">
+          Dismiss
+        </button>
+      ) : null}
+    </section>
   );
 }

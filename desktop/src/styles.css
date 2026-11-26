@@ -634,3 +634,54 @@ select {
 .model-group + .model-group {
   margin-top: 14px;
 }
+
+.download-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.download-banner.ok {
+  border-left-color: var(--ok);
+}
+
+.download-banner.warning {
+  border-left-color: var(--danger);
+}
+
+.download-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.download-track {
+  flex: 1 1 200px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.download-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 400ms ease-out;
+}
+
+.download-percent {
+  font-variant-numeric: tabular-nums;
+  min-width: 3.5ch;
+  text-align: right;
+}

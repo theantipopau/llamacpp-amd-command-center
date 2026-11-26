@@ -90,6 +90,13 @@
     <figcaption>The window you get when you double-click <code>Start-LlamaCpp.cmd</code>: one big button for what to do next, plus your graphics memory and gaming switches.</figcaption>
   </figure>
 
+  <h2>New in v0.3.2</h2>
+  <ul>
+    <li><strong>Download progress you can see.</strong> A banner above the tabs shows the model, GB downloaded, speed and time left, then &ldquo;Checking &hellip; against its SHA-256&rdquo;, and finally whether it finished or why it stopped. It is visible from every tab and comes back if you reopen the window mid-download.</li>
+    <li><strong>Downloading no longer switches your model.</strong> A download from the Models tab only downloads and verifies; use <strong>Switch to this model</strong> when you want it. (The console menu and Easy start still activate the model they download.)</li>
+    <li><strong>One download at a time:</strong> starting a second one while the first runs is refused with a clear message.</li>
+  </ul>
+
   <h2>New in v0.3.1</h2>
   <ul>
     <li><strong>Important fix: &ldquo;Switch to this model&rdquo; no longer deletes the model.</strong> In v0.2.0 and v0.3.0 that button ran the remove action and asked &ldquo;Delete &hellip; from disk?&rdquo;. If you clicked OK, the model was deleted; download it again from the Models tab.</li>

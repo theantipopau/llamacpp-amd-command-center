@@ -120,6 +120,8 @@ param(
     [ValidateSet('', 'chat', 'coding', 'images', 'fast', 'quality')]
     [string] $UseCase = '',
     [switch] $SkipModel,
+    # Download a model without making it the active one (the desktop Models tab uses this).
+    [switch] $KeepActiveModel,
     [switch] $NoPath,
     [switch] $Force,
     [switch] $DryRun,
@@ -172,7 +174,7 @@ function Get-CatalogJson {
     return $document
 }
 
-$script:CommandCenterVersion = '0.3.1'
+$script:CommandCenterVersion = '0.3.2'
 $script:CommandCenterRepo = 'theantipopau/llamacpp-amd-command-center'
 $script:GitHubApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases'
 $script:GitHubHeaders = @{
@@ -3820,39 +3822,122 @@ function Select-RuntimeForActiveModel {
 }
 
 function Install-Model {
-    param($Model, $Hardware)
-    $blocker = Get-ModelRuntimeBlocker -Model $Model -Runtime (Get-InstalledRuntime)
-    if ($blocker) { throw $blocker }
-    $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Model.Id -eq $Model.Id }) | Select-Object -First 1
-    if ($null -ne $assessment) { Write-Info "Fit: $($assessment.Status), headroom $($assessment.HeadroomGiB) GiB" }
-    Assert-ModelDiskSpace -RequiredGiB ([double]$Model.ApproxGiB)
-    $modelsRoot = Join-Path $InstallRoot 'models'
-    New-Item -ItemType Directory -Path $modelsRoot -Force | Out-Null
+    # -KeepActive downloads and verifies without switching, when a model is already active
+    # (the desktop Models tab: switching stays a separate, explicit choice). Every step is
+    # mirrored to downloads\progress.json so the window can show progress for a hidden run.
+    param($Model, $Hardware, [switch] $KeepActive)
+    Write-DownloadProgress -Fields @{ model_id = [string]$Model.Id; model_name = [string]$Model.Name; state = 'resolving'; files = @(); error = ''; activated = $false; started_at = (Get-Date).ToUniversalTime().ToString('o'); process_id = $PID }
+    try {
+        $blocker = Get-ModelRuntimeBlocker -Model $Model -Runtime (Get-InstalledRuntime)
+        if ($blocker) { throw $blocker }
+        $assessment = @(Get-ModelAssessment -Hardware $Hardware | Where-Object { $_.Model.Id -eq $Model.Id }) | Select-Object -First 1
+        if ($null -ne $assessment) { Write-Info "Fit: $($assessment.Status), headroom $($assessment.HeadroomGiB) GiB" }
+        Assert-ModelDiskSpace -RequiredGiB ([double]$Model.ApproxGiB)
+        $modelsRoot = Join-Path $InstallRoot 'models'
+        New-Item -ItemType Directory -Path $modelsRoot -Force | Out-Null
 
-    Write-Step "Resolving verified model metadata for $($Model.Name)"
-    $descriptor = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.File
-    Write-Info "Revision $($descriptor.Revision.Substring(0,12)); SHA-256 $($descriptor.Sha256.Substring(0,12))..."
-    Write-RunLogEvent -Event 'model_metadata' -Message "Resolved model metadata for $($Model.Name)" -Data @{
-        model_id = $Model.Id
-        repo = $Model.Repo
-        file = $Model.File
-        projector = [string]$Model.Projector
-        revision = $descriptor.Revision
-        sha256 = $descriptor.Sha256
-        size_bytes = $descriptor.Size
+        Write-Step "Resolving verified model metadata for $($Model.Name)"
+        $descriptor = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.File
+        Write-Info "Revision $($descriptor.Revision.Substring(0,12)); SHA-256 $($descriptor.Sha256.Substring(0,12))..."
+        Write-RunLogEvent -Event 'model_metadata' -Message "Resolved model metadata for $($Model.Name)" -Data @{
+            model_id = $Model.Id
+            repo = $Model.Repo
+            file = $Model.File
+            projector = [string]$Model.Projector
+            revision = $descriptor.Revision
+            sha256 = $descriptor.Sha256
+            size_bytes = $descriptor.Size
+        }
+        $downloads = @([pscustomobject]@{ Descriptor = $descriptor; Destination = (Join-Path $modelsRoot $Model.File) })
+        if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
+            $projector = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.Projector
+            $downloads += [pscustomobject]@{ Descriptor = $projector; Destination = (Join-Path $modelsRoot (Get-ProjectorLocalName $Model)) }
+        }
+        $files = @($downloads | ForEach-Object { [pscustomobject]@{ name = [IO.Path]::GetFileName([string]$_.Destination); final_path = [string]$_.Destination; expected_bytes = [long]$_.Descriptor.Size } })
+        Write-DownloadProgress -Fields @{ state = 'downloading'; files = $files }
+        foreach ($item in $downloads) {
+            Get-VerifiedDownload -Url $item.Descriptor.Url -Destination $item.Destination -ExpectedSize $item.Descriptor.Size -ExpectedSha256 $item.Descriptor.Sha256 | Out-Null
+        }
+
+        $activate = -not ($KeepActive -and $null -ne (Get-ActiveModel))
+        if ($activate) {
+            $context = $ContextSize
+            if ($context -eq 0) { $context = Get-SuggestedContext -Model $Model -Hardware $Hardware }
+            Set-ActiveModel -Model $Model -EffectiveContext $context
+            Write-Success "$($Model.Name) is installed and active at context $context."
+            Sync-VsCodeChatEndpoint
+        } else {
+            Write-Success "$($Model.Name) is downloaded and verified. The active model is unchanged."
+        }
+        Write-DownloadProgress -Fields @{ state = 'completed'; activated = $activate }
+    } catch {
+        Write-DownloadProgress -Fields @{ state = 'failed'; error = [string]$_.Exception.Message }
+        throw
     }
-    Get-VerifiedDownload -Url $descriptor.Url -Destination (Join-Path $modelsRoot $Model.File) -ExpectedSize $descriptor.Size -ExpectedSha256 $descriptor.Sha256
+}
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$Model.Projector)) {
-        $projector = Get-HfFileDescriptor -Repo $Model.Repo -FileName $Model.Projector
-        Get-VerifiedDownload -Url $projector.Url -Destination (Join-Path $modelsRoot (Get-ProjectorLocalName $Model)) -ExpectedSize $projector.Size -ExpectedSha256 $projector.Sha256
+function Get-DownloadProgressPath { return (Join-Path (Join-Path $InstallRoot 'downloads') 'progress.json') }
+
+function Write-DownloadProgress {
+    # Merges fields into downloads\progress.json. Never throws: progress reporting must not
+    # break the download it describes.
+    param([hashtable] $Fields)
+    try {
+        $path = Get-DownloadProgressPath
+        $document = [ordered]@{}
+        if ($Fields.ContainsKey('started_at')) { $document = [ordered]@{} }
+        elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+            $existing = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            foreach ($property in $existing.PSObject.Properties) { $document[$property.Name] = $property.Value }
+        }
+        foreach ($key in $Fields.Keys) { $document[$key] = $Fields[$key] }
+        $document['updated_at'] = (Get-Date).ToUniversalTime().ToString('o')
+        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+        [IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject ([pscustomobject]$document) -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Get-DownloadProgressDocument {
+    # Read-only view of the newest model download for the desktop window: bytes on disk per
+    # file (finished file, or the staged part), totals, and whether the run is still alive.
+    $document = [ordered]@{ schema_version = 1; state = 'none'; model_id = ''; model_name = ''; files = @(); done_bytes = 0; total_bytes = 0; percent = 0; activated = $false; error = ''; started_at = ''; updated_at = '' }
+    $path = Get-DownloadProgressPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]$document }
+    try { $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return [pscustomobject]$document }
+    foreach ($name in @('state', 'model_id', 'model_name', 'activated', 'error', 'started_at', 'updated_at')) {
+        if ($saved.PSObject.Properties.Name -contains $name) { $document[$name] = $saved.$name }
     }
-
-    $context = $ContextSize
-    if ($context -eq 0) { $context = Get-SuggestedContext -Model $Model -Hardware $Hardware }
-    Set-ActiveModel -Model $Model -EffectiveContext $context
-    Write-Success "$($Model.Name) is installed and active at context $context."
-    Sync-VsCodeChatEndpoint
+    $staging = Get-DownloadStagingDirectory
+    $files = @()
+    $done = [long]0
+    $total = [long]0
+    if ($saved.PSObject.Properties.Name -contains 'files') {
+        foreach ($file in @($saved.files)) {
+            $expected = [long]$file.expected_bytes
+            $phase = 'waiting'
+            $bytes = [long]0
+            $staged = Join-Path $staging ([string]$file.name)
+            if (Test-Path -LiteralPath ([string]$file.final_path) -PathType Leaf) { $phase = 'done'; $bytes = $expected }
+            elseif (Test-Path -LiteralPath $staged -PathType Leaf) {
+                $bytes = [long](Get-Item -LiteralPath $staged).Length
+                $phase = if ($bytes -ge $expected) { 'verifying' } else { 'downloading' }
+            }
+            $done += [Math]::Min($bytes, $expected)
+            $total += $expected
+            $files += [pscustomobject]@{ name = [string]$file.name; expected_bytes = $expected; done_bytes = [Math]::Min($bytes, $expected); phase = $phase }
+        }
+    }
+    # A run that says it is still working but whose process has gone was interrupted.
+    $processId = if ($saved.PSObject.Properties.Name -contains 'process_id') { [int]$saved.process_id } else { 0 }
+    if (@('resolving', 'downloading') -contains [string]$document['state'] -and $processId -gt 0 -and $null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+        $document['state'] = 'interrupted'
+        $document['error'] = 'The download stopped before it finished. Start it again to resume from where it left off.'
+    }
+    $document['files'] = @($files)
+    $document['done_bytes'] = $done
+    $document['total_bytes'] = $total
+    $document['percent'] = if ($total -gt 0) { [Math]::Round(($done / $total) * 100, 1) } else { 0 }
+    return [pscustomobject]$document
 }
 
 function Sync-VsCodeChatEndpoint {
@@ -6908,6 +6993,8 @@ function Invoke-LibraryAction {
             Assert-ModelDiskSpace -RequiredGiB ([double]$model.ApproxGiB)
             $downloaded = @(Get-InstalledModels | Where-Object { $_.Id -ieq $model.Id }).Count -gt 0
             if ($downloaded) { throw "$($model.Name) is already downloaded." }
+            $running = Get-DownloadProgressDocument
+            if (@('resolving', 'downloading') -contains [string]$running.state) { throw "$($running.model_name) is still downloading. Wait for it to finish first." }
             $result['status'] = 'validated'
             $result['detail'] = "$($model.Name) passed preflight. The download runs in its own window; this document answers now."
         } else {
@@ -8010,7 +8097,9 @@ try {
         # its own, and one typed result per download/activate/remove. Downloads only
         # validate here; the long transfer runs in the console window the caller opens.
         $script:JsonDocumentsOnly = $true
-        if ($LibraryAction) {
+        if ($LibraryAction -eq 'progress') {
+            Write-JsonStdout -Document (Get-DownloadProgressDocument)
+        } elseif ($LibraryAction) {
             Write-JsonStdout -Document (Invoke-LibraryAction -LibraryAction $LibraryAction -ModelIdRequested $ModelId)
         } else {
             Write-JsonStdout -Document (Get-LibraryDocument)
@@ -8188,7 +8277,7 @@ try {
                     }
                 }
                 if (Confirm-ModelDownload -Model $model -Hardware $hardware) {
-                    Install-Model -Model $model -Hardware $hardware
+                    Install-Model -Model $model -Hardware $hardware -KeepActive:$KeepActiveModel
                 }
             }
         }

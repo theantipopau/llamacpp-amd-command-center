@@ -961,6 +961,14 @@ fn save_settings(patch: String) -> BackendResult {
     )
 }
 
+/// Progress of the newest model download (`-LibraryAction progress`): bytes on disk per
+/// file, totals and state. Read-only and fast; the window polls it while a download runs.
+// Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
+#[tauri::command(async)]
+fn download_progress() -> BackendResult {
+    run_backend("Library", "library:progress", &["-LibraryAction".to_string(), "progress".to_string()])
+}
+
 /// Read-only model library document (`-Action Library`): every catalog model with its
 /// downloaded/active state, fit and runtime blockers.
 // Async: runs on the worker pool, so a slow PowerShell call never freezes the window.
@@ -1120,7 +1128,8 @@ fn download_model(model_id: String) -> BackendResult {
         command
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
-            .args(["-Action", "Models", "-ModelId", &model_id, "-Force"])
+            // -KeepActiveModel: a download never switches models; the card's Switch does.
+            .args(["-Action", "Models", "-ModelId", &model_id, "-Force", "-KeepActiveModel"])
             .arg("-InstallRoot")
             .arg(&root)
             .current_dir(&root)
@@ -1629,6 +1638,7 @@ fn main() {
             get_library,
             library_change,
             download_model,
+            download_progress,
             open_chat
         ])
         .setup(|app| {
